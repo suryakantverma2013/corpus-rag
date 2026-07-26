@@ -1,0 +1,64 @@
+# ---- Environment / secrets ----
+.env
+.env.*
+!.env.example
+
+# ---- Python / uv (backend, T-003) ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.python-version
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+# uv.lock IS committed — do not ignore it
+
+# ---- Node / Vite (frontend, T-004) ----
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---- Data / runtime artifacts ----
+*.log
+/tmp/
+minio-data/
+pgdata/
+*.sqlite
+*.sqlite3
+
+# ---- Private to this working copy (not published) ----
+# Third-party / course-supplied source material — not ours to relicense under GPL-3.0.
+ReferenceDocs/
+RAG Chatbot GUI Design/
+# Internal build board and phase plan.
+planning/
+# Authoritative specification (requirement IDs, rulings, open issues).
+Nexus_AI_Detailed_Specification.md
+# Agent orientation + project skills (reference the excluded docs above).
+CLAUDE.md
+.claude/
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*~

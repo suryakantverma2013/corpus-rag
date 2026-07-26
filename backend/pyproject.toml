@@ -1,0 +1,60 @@
+[project]
+name = "corpus-backend"
+version = "0.1.0"
+description = "Corpus RAG Chatbot backend (Nexus AI platform) — FastAPI + LangGraph + PostgreSQL/pgvector"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+    "alembic>=1.18.5",
+    "arq>=0.28.0",
+    "asyncpg>=0.31.0",
+    "fastapi>=0.139.2",
+    "httpx>=0.28.1",
+    "langgraph>=1.2.9",
+    "langgraph-checkpoint-postgres>=3.1.0",
+    "markdown-it-py>=4.2.0",
+    "openai>=2.47.0",
+    "pandas>=3.0.3",
+    "pgvector>=0.5.0",
+    "psycopg[binary]>=3.3.4",
+    "pydantic-settings>=2.14.2",
+    "pyjwt[crypto]>=2.13.0",
+    "pymupdf>=1.28.0",
+    "python-docx>=1.2.0",
+    "redis>=5.3.1",
+    "slowapi>=0.1.10",
+    "sqlalchemy[asyncio]>=2.0.51",
+    "sse-starlette>=3.4.6",
+    "structlog>=26.1.0",
+    "uvicorn[standard]>=0.51.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# Flat layout: two top-level import packages live at the backend root.
+packages = ["app", "workers"]
+
+[tool.ruff]
+line-length = 100
+src = ["app", "workers", "tests"]
+
+[tool.ruff.lint]
+# Errors, pyflakes, import-sorting, pyupgrade, bugbear, async-correctness.
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "workers"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "respx>=0.23.1",
+    "ruff>=0.15.22",
+]

@@ -1,0 +1,127 @@
+"""Dependency readiness probes (T-106, NFR-REL-02).
+
+Each probe touches one live dependency and returns a :class:`CheckResult` — never
+raises. Probes are individually timed and bounded by ``_PROBE_TIMEOUT`` so a hung
+dependency cannot stall the readiness endpoint; :func:`run_readiness_checks` fans
+them out concurrently.
+
+Coverage per NFR-REL-02:
+
+* **database** — a ``SELECT 1`` on the async engine. The vector store is pgvector
+  *inside the same Postgres* (NFR-REL-03 / §4.16), so this arm covers it too.
+* **broker** — a Redis ``PING``. No shared Redis client exists (slowapi owns its
+  storage string internally and exposes no handle; the arq worker is T-207), so the
+  probe builds its own ephemeral ``redis.asyncio`` client from the broker URL.
+* **object_storage** — an HTTP GET to MinIO's unauthenticated ``/minio/health/live``.
+  The MinIO SDK client is T-201; probing the health endpoint over ``httpx`` avoids
+  front-running it. T-201 may swap this for an SDK bucket-exists check.
+
+Worker readiness (also named in NFR-REL-02) is out of scope until the arq worker
+exists (T-207).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from typing import Literal
+
+import httpx
+import redis.asyncio as aioredis
+from pydantic import BaseModel
+from sqlalchemy import text
+
+from app.config import get_settings
+from app.db.session import get_engine
+
+# Per-probe wall-clock ceiling. Provisional pending the §8.4 decision. Kept short so
+# an unreachable dependency fails the probe fast rather than hanging the endpoint.
+_PROBE_TIMEOUT = 2.0  # seconds — # TBD(§8.4)
+_ERROR_MAX_LEN = 200
+
+
+class CheckResult(BaseModel):
+    """Outcome of a single dependency probe."""
+
+    status: Literal["ok", "error"]
+    latency_ms: float | None = None
+    error: str | None = None
+
+
+def _ok(started: float) -> CheckResult:
+    return CheckResult(status="ok", latency_ms=round((time.perf_counter() - started) * 1000, 2))
+
+
+def _error(exc: BaseException) -> CheckResult:
+    if isinstance(exc, TimeoutError):
+        detail = f"probe timed out after {_PROBE_TIMEOUT}s"
+    else:
+        detail = f"{type(exc).__name__}: {exc}".strip().rstrip(":").strip()
+    return CheckResult(status="error", error=detail[:_ERROR_MAX_LEN])
+
+
+async def check_database() -> CheckResult:
+    """Probe Postgres (and, transitively, the pgvector store) with ``SELECT 1``."""
+    started = time.perf_counter()
+    try:
+        async with asyncio.timeout(_PROBE_TIMEOUT):
+            engine = get_engine()
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+        return _ok(started)
+    except Exception as exc:  # noqa: BLE001 — a probe must classify, never propagate.
+        return _error(exc)
+
+
+async def check_broker() -> CheckResult:
+    """Probe the Redis broker (arq) with ``PING`` via an ephemeral client."""
+    started = time.perf_counter()
+    client: aioredis.Redis | None = None
+    try:
+        async with asyncio.timeout(_PROBE_TIMEOUT):
+            client = aioredis.from_url(
+                get_settings().redis.url, socket_connect_timeout=_PROBE_TIMEOUT
+            )
+            await client.ping()
+        return _ok(started)
+    except Exception as exc:  # noqa: BLE001
+        return _error(exc)
+    finally:
+        if client is not None:
+            await client.aclose()
+
+
+async def check_object_storage() -> CheckResult:
+    """Probe MinIO via its unauthenticated ``/minio/health/live`` endpoint."""
+    started = time.perf_counter()
+    minio = get_settings().minio
+    scheme = "https" if minio.secure else "http"
+    url = f"{scheme}://{minio.endpoint}/minio/health/live"
+    try:
+        async with asyncio.timeout(_PROBE_TIMEOUT):
+            async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT) as http:
+                resp = await http.get(url)
+            if resp.status_code != 200:
+                raise RuntimeError(f"unexpected status {resp.status_code}")
+        return _ok(started)
+    except Exception as exc:  # noqa: BLE001
+        return _error(exc)
+
+
+async def run_readiness_checks() -> tuple[bool, dict[str, object]]:
+    """Run every probe concurrently and aggregate.
+
+    Returns ``(all_ok, payload)`` where ``payload`` is the JSON-serialisable body
+    ``{"status": "ok"|"degraded", "checks": {name: CheckResult, ...}}``. Overall
+    status is ``ok`` only when every probe passed.
+    """
+    database, broker, object_storage = await asyncio.gather(
+        check_database(), check_broker(), check_object_storage()
+    )
+    checks = {"database": database, "broker": broker, "object_storage": object_storage}
+    all_ok = all(check.status == "ok" for check in checks.values())
+    payload: dict[str, object] = {
+        "status": "ok" if all_ok else "degraded",
+        "checks": {name: check.model_dump() for name, check in checks.items()},
+    }
+    return all_ok, payload

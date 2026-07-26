@@ -1,0 +1,77 @@
+# Corpus dev infrastructure (T-005).
+#
+# Default service: Redis (arq broker) only. The developer reuses existing local
+# services for the rest — a local pgvector-enabled Postgres (dedicated `corpus`
+# database) and a MinIO already on :9000/:9001. Both are available here behind
+# profiles for anyone who lacks a local one:
+#   docker compose --profile minio    up -d   # + MinIO object storage
+#   docker compose --profile postgres up -d   # + pgvector Postgres
+#
+# Usage (from repo root):
+#   docker compose -f deployment/docker-compose.yml up -d                    # redis only
+#   docker compose -f deployment/docker-compose.yml --profile minio up -d    # redis + minio
+#   docker compose -f deployment/docker-compose.yml down
+#
+# Credentials here are DEV DEFAULTS and match backend/.env(.example). Override via
+# the environment for anything shared.
+
+services:
+  # Optional: only for developers without an existing MinIO. Enable with
+  # `--profile minio`. This project's Corpus dev box reuses the MinIO already
+  # running on :9000/:9001 (bucket `corpus`, isolated from any other buckets).
+  minio:
+    image: minio/minio
+    profiles: ["minio"]
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # web console -> http://localhost:9001
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ACCESS_KEY:-minioadmin}"
+      MINIO_ROOT_PASSWORD: "${MINIO_SECRET_KEY:-minioadmin}"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Optional: only for developers without a local pgvector instance.
+  # Enable with `--profile postgres`. Schema + indexes are owned by Alembic (T-101);
+  # this just creates the `corpus` database and enables the `vector` extension.
+  postgres:
+    image: pgvector/pgvector:pg18
+    profiles: ["postgres"]
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-corpus}"
+      POSTGRES_USER: "${POSTGRES_USER:-postgres}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-postgres}"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./initdb/01-extension.sql:/docker-entrypoint-initdb.d/01-extension.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-corpus}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  minio-data:
+  redis-data:
+  pgdata:

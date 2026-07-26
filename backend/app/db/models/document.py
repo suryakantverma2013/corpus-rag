@@ -1,0 +1,69 @@
+"""`documents` — per-document lifecycle + metadata (§4.15, FR-ING/FR-KBM).
+
+`status` walks the 11-state machine (FR-ING-01); `searchable` is the synchronous
+deletion gate (FR-ING-05); `checksum_sha256` is unique per knowledge base for
+dedup (FR-KBM-08). `tenant_id`/`owner_id`/`knowledge_base_id`/`searchable` back the
+FR-RET-04 in-query access filter. Original bytes live in object storage
+(`storage_uri`); this row is metadata only.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+
+from sqlalchemy import (
+    CHAR,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.db.base import Base, TimestampMixin
+from app.db.enums import DocumentStatus, str_enum
+
+
+class Document(TimestampMixin, Base):
+    __tablename__ = "documents"
+    __table_args__ = (
+        UniqueConstraint("knowledge_base_id", "checksum_sha256"),  # FR-KBM-08 per-KB dedup
+        Index(
+            "ix_documents_tenant_id_knowledge_base_id_searchable",
+            "tenant_id",
+            "knowledge_base_id",
+            "searchable",
+        ),  # FR-RET-04 / NFR-SEC-06 access filter
+        Index("ix_documents_owner_id", "owner_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=False,
+        server_default=text("'00000000-0000-0000-0000-000000000000'"),  # TBD(OI-21)
+    )
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    knowledge_base_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("knowledge_bases.id"), nullable=False
+    )
+    filename: Mapped[str] = mapped_column(Text, nullable=False)
+    mime_type: Mapped[str | None] = mapped_column(String(255))
+    storage_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    checksum_sha256: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    current_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    status: Mapped[DocumentStatus] = mapped_column(str_enum(DocumentStatus), nullable=False)
+    searchable: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    page_count: Mapped[int | None] = mapped_column(Integer)
+    chunk_count: Mapped[int | None] = mapped_column(Integer)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

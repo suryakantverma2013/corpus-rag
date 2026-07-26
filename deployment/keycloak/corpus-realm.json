@@ -1,0 +1,70 @@
+{
+  "realm": "corpus",
+  "enabled": true,
+  "sslRequired": "external",
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "maxFailureWaitSeconds": 900,
+  "failureFactor": 30,
+  "roles": {
+    "realm": [
+      { "name": "admin", "description": "Corpus Administrator — full user mgmt, unrestricted docs (spec §4.9)" },
+      { "name": "user", "description": "Corpus Non-Administrator — own/authorized docs only (spec §4.9)" }
+    ]
+  },
+  "defaultRoles": ["user"],
+  "clients": [
+    {
+      "clientId": "corpus-backend",
+      "name": "Corpus Backend (ROPC, confidential)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "CHANGE_ME_dev-client-secret",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": true,
+      "fullScopeAllowed": true,
+      "protocolMappers": [
+        {
+          "name": "corpus-backend-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "corpus-backend",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "admin@corpus.local",
+      "email": "admin@corpus.local",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Corpus",
+      "lastName": "Administrator",
+      "credentials": [
+        { "type": "password", "value": "CHANGE_ME_admin-password", "temporary": false }
+      ],
+      "realmRoles": ["admin", "user"]
+    },
+    {
+      "username": "service-account-corpus-backend",
+      "enabled": true,
+      "serviceAccountClientId": "corpus-backend",
+      "clientRoles": {
+        "realm-management": ["manage-users"]
+      }
+    }
+  ]
+}

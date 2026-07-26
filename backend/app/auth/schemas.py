@@ -1,0 +1,86 @@
+"""Request/response models for the ``/auth`` surface (R-25, T-103).
+
+The spec adopts Source A §6's REST surface by reference without pinning body
+shapes (§10.1: the generated OpenAPI schema is authoritative), so the concrete
+contract is defined here. Per the T-103 decision, login/refresh return both
+tokens in the JSON body.
+"""
+
+from __future__ import annotations
+
+import uuid
+
+from pydantic import BaseModel, Field, model_validator
+
+from app.auth.roles import Role
+
+
+class LoginRequest(BaseModel):
+    # Plain str — Keycloak is the authority on identity/format; avoids the
+    # email-validator dependency.
+    email: str = Field(min_length=1)
+    password: str = Field(min_length=1)
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str = Field(min_length=1)
+
+
+class LogoutRequest(BaseModel):
+    refresh_token: str = Field(min_length=1)
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1)
+    new_password: str = Field(min_length=1)
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int
+
+
+class MeResponse(BaseModel):
+    id: uuid.UUID
+    email: str
+    display_name: str | None
+    roles: list[str]
+    is_active: bool
+
+
+class CreateUserRequest(BaseModel):
+    # Plain str email — Keycloak validates identity/format (mirrors LoginRequest).
+    email: str = Field(min_length=1)
+    display_name: str | None = None
+    password: str = Field(min_length=1)
+    role: Role = Role.NON_ADMINISTRATOR
+
+
+class UpdateUserRequest(BaseModel):
+    """Admin PATCH — every field optional; at least one required (FR-USR-05/07)."""
+
+    display_name: str | None = None
+    is_active: bool | None = None
+    role: Role | None = None
+    new_password: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _require_one(self) -> UpdateUserRequest:
+        if (
+            self.display_name is None
+            and self.is_active is None
+            and self.role is None
+            and self.new_password is None
+        ):
+            raise ValueError("at least one field must be provided")
+        return self
+
+
+class UserResponse(BaseModel):
+    id: uuid.UUID
+    email: str
+    display_name: str | None
+    roles: list[str]
+    is_active: bool

@@ -1,0 +1,145 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   Corpus design tokens — base stylesheet (spec §5.1 / NFR-VIS-01..05)
+   MACHINE COPY of the design README + prototype
+   `RAG Chatbot GUI Design/design_handoff_rag_chatbot/RAG Chatbot.dc.html`.
+   MUST match that prototype byte-for-byte for the color/motion/scrollbar values.
+   The prototype is the pixel-perfect authority (NFR-VIS-01).
+
+   Scope note (T-004): this file lays down the STATIC token sets for both themes.
+   Runtime behavior is deferred:
+     - the data-theme toggle handler + accent-prop `applyAccent()` override → T-501
+     - the three-column shell + showStats/brandName props               → T-502
+   ════════════════════════════════════════════════════════════════════════ */
+
+/* ── Color tokens — DARK theme (default) — NFR-VIS-02 ───────────────────── */
+:root,
+:root[data-theme='dark'] {
+  --bg: #0d1017;
+  --panel: #12161f;
+  --panel2: #181d2a;
+  --line: rgba(255, 255, 255, 0.07);
+  --text: #e8eaf2;
+  --muted: #8a91a6;
+  --muted2: #5c6377;
+  --accent: #7c86f8;
+  --accent-soft: rgba(124, 134, 248, 0.14);
+  --bubble: #1d2333;
+  --shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+
+  /* Overlay + eval status hues are literals in the prototype (not themed);
+     promoted to tokens here for reuse by later component tasks. */
+  --overlay: rgba(5, 7, 12, 0.55);
+  --eval-good: #4ec3a6; /* score >= 0.90  (FR-EVL-03) */
+  --eval-warn: #e8a34c; /* 0.80–0.89 */
+  --eval-bad: #e86a8a; /* < 0.80 */
+
+  /* Radii scale — NFR-VIS-04 (values from the prototype inventory). */
+  --radius-chip: 4px; /* mini chips / type badges (4–5px) */
+  --radius-btn: 8px; /* buttons, list items, icon buttons */
+  --radius-card: 10px; /* stat/KB/source cards */
+  --radius-pop: 12px; /* composer, popovers, mention menu, drop zone */
+  --radius-bubble: 14px; /* message bubbles */
+  --radius-bubble-user: 14px 14px 4px 14px; /* asymmetric user bubble */
+  --radius-modal: 16px; /* modal / login card */
+  --radius-pill: 20px; /* "Grounded" badge, theme toggle */
+  --radius-avatar: 50%; /* round avatars */
+
+  /* Layout dimensions — §9 literal table (wired into the shell in T-502). */
+  --sidebar-w: 264px;
+  --stats-w: 272px;
+  --app-min-h: 640px;
+
+  /* Motion durations — NFR-VIS-05 (prototype uses inline literals; named here). */
+  --motion-fast: 0.15s;
+  --motion: 0.2s;
+  --motion-slow: 0.25s;
+  --motion-bar: 0.5s; /* meter/bar width transitions */
+}
+
+/* ── Color tokens — LIGHT theme — NFR-VIS-02 ────────────────────────────── */
+/* TBD(§8.4): FR-THM-03 — the accent-prop override writes --accent on :root and
+   will clobber this theme's distinct default (#5B66E8); per-theme accents
+   unconfirmed. Toggling between the two blocks (FR-THM-02) is wired in T-501;
+   theme persistence across sessions is unspecified. */
+:root[data-theme='light'] {
+  --bg: #f3f4f8;
+  --panel: #ffffff;
+  --panel2: #eceef5;
+  --line: rgba(20, 24, 40, 0.1);
+  --text: #1b1e2b;
+  --muted: #5d6478;
+  --muted2: #9aa0b4;
+  --accent: #5b66e8;
+  --accent-soft: rgba(91, 102, 232, 0.1);
+  --bubble: #e9ebf6;
+  --shadow: 0 16px 48px rgba(25, 30, 60, 0.18);
+  --overlay: rgba(5, 7, 12, 0.55);
+}
+
+/* ── Base element styles — NFR-VIS-03 (typography) ──────────────────────── */
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: #0d1017; /* raw dark fallback before variables resolve (prototype) */
+}
+
+:root {
+  font-family: 'Instrument Sans', system-ui, sans-serif;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--bg);
+}
+
+#root {
+  height: 100%;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+/* Mono for dates, token counts, badges, citation chips, eval scores, footers. */
+.mono {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* ── Motion keyframes — NFR-VIS-05 ──────────────────────────────────────── */
+@keyframes dotPulse {
+  0%,
+  80%,
+  100% {
+    opacity: 0.25;
+  }
+  40% {
+    opacity: 1;
+  }
+}
+
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ── Scrollbars — NFR-USE-05 (WebKit; TBD(§8.4) to-confirm) ─────────────── */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(128, 136, 160, 0.25);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
