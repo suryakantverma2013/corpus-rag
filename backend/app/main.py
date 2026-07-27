@@ -8,6 +8,8 @@ own tasks. Run: `uv run uvicorn app.main:app`.
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI
@@ -17,6 +19,8 @@ from app.api import health
 from app.api.router import api_router
 from app.config import Settings, get_settings
 from app.security.rate_limit import limiter, rate_limit_exceeded_handler
+from app.services.jobs import close_job_queue
+from app.services.object_storage import close_object_storage
 
 
 def _configure_logging() -> None:
@@ -34,6 +38,22 @@ def _configure_logging() -> None:
     )
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Process-lifetime resources.
+
+    Object storage (T-201) and the arq job queue (T-202) both pool connections in clients
+    bound to this event loop, so both are released on shutdown. Nothing is *opened* here:
+    each client is built lazily on first use, so a cold MinIO or Redis cannot stop the API
+    from booting (the readiness probe, NFR-REL-02, is what reports that).
+    """
+    try:
+        yield
+    finally:
+        await close_object_storage()
+        await close_job_queue()
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Build and return the FastAPI application."""
     _configure_logging()
@@ -43,6 +63,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         title=f"{settings.app_name} API",
         version="0.1.0",
         summary="Corpus RAG Chatbot backend (Nexus AI platform).",
+        lifespan=lifespan,
     )
 
     # Rate limiting (T-105, NFR-SEC-07). The limiter is a module-global bound to the

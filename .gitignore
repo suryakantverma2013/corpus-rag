@@ -38,6 +38,8 @@ pnpm-debug.log*
 *.log
 /tmp/
 minio-data/
+# Local-filesystem object-storage backend (STORAGE_BACKEND=local, T-201)
+.data/
 pgdata/
 *.sqlite
 *.sqlite3

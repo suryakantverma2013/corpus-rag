@@ -28,6 +28,48 @@ exchanges login credentials with Keycloak's token endpoint and validates
 realm-signed RS256 JWTs against the realm JWKS. There is **no local password
 hashing**. Configure via `KEYCLOAK_*` env vars (see `app/config.py`). Wired in T-103.
 
+## Object storage (R-19, T-201)
+
+Originals and derived artifacts live in object storage; `documents` rows keep only
+metadata plus the `storage_uri`. `app/services/object_storage.py` exposes one
+`ObjectStorage` protocol with two backends, chosen by `STORAGE_BACKEND`:
+
+- `s3` (default) — MinIO or AWS S3 over `aioboto3`, configured by the `MINIO_*` vars.
+- `local` — a directory tree under `STORAGE_LOCAL_ROOT`; **development only** (R-19).
+
+Keys are built by `original_key()` / `artifact_key()` as
+`tenants/{tenant}/kb/{kb}/documents/{doc}/v{n}/…`, so deleting a document (FR-ING-05)
+or replacing a version is a single prefix delete. There is deliberately **no download,
+presigned-URL, or preview helper** — adding one is R-31's revisit trigger and would
+make a real malware scanner mandatory.
+
+## Uploads (T-202, R-33)
+
+`POST /api/v1/documents` — `multipart/form-data` with `file`, `scope` (`global` or
+`chat`), and `conversation_id` when `scope=chat`. The knowledge base is resolved
+server-side (the user's GLOBAL default, or the conversation's implicit attachment KB),
+so clients never handle KB ids. Returns `202 {document_id, job_id, status:"QUEUED",
+duplicate:false}`; an identical checksum in the same KB returns `200` with
+`duplicate:true`, the existing `document_id`, and a null `job_id`.
+
+Two controls are required here by R-31(3) and are regression-tested:
+
+- **Type is decided by content, not the extension** — `app/security/content_validation.py`.
+  PDF magic must sit at offset 0; a DOCX must really be an OOXML package; CSV/MD have no
+  magic bytes, so they must instead pass a binary/markup deny-list plus whole-payload
+  UTF-8 and control-byte validation. A file whose content contradicts its extension is
+  rejected `415`.
+- **The 50 MB limit is enforced before anything is written to storage**, during the read
+  loop — a rejected upload leaves no object behind.
+
+Malware scanning is *not* here: R-31 moved it to the head of the ingestion worker (T-207)
+so a 50 MB scan never blocks the `202`.
+
+Background dispatch goes through `app/services/jobs.py`. `QUEUE_BACKEND=none` selects a
+no-op queue so the API runs without Redis; the job row is still written, so nothing is
+lost. If the broker is down the upload still returns `202` and the job is marked
+`error_code="ENQUEUE_FAILED"` for T-207's sweeper.
+
 ## Running
 
 ```bash

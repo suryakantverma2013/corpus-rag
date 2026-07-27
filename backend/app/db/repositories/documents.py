@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.db.enums import DocumentStatus
 from app.db.models.document import Document
@@ -40,6 +40,21 @@ class DocumentRepository(BaseRepository[Document]):
             Document.deleted_at.is_(None),
         )
         return (await self.session.scalars(stmt)).first()
+
+    async def total_bytes_for_owner(self, owner_id: uuid.UUID) -> int:
+        """Bytes of stored originals owned by ``owner_id`` — the FR-ERR-02 quota base.
+
+        Counts originals only, never derived artifacts (R-33), and excludes soft-deleted
+        rows so freeing space by deleting works immediately rather than after the T-208
+        worker finishes. Summed in-query per NFR-SEC-06; `ix_documents_owner_id` covers
+        the predicate. `COALESCE` because both an empty set and the nullable column
+        yield NULL.
+        """
+        stmt = select(func.coalesce(func.sum(Document.size_bytes), 0)).where(
+            Document.owner_id == owner_id,
+            Document.deleted_at.is_(None),
+        )
+        return int(await self.session.scalar(stmt) or 0)
 
     async def set_status(
         self, document: Document, status: DocumentStatus, *, error_message: str | None = None

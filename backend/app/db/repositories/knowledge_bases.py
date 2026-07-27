@@ -48,3 +48,35 @@ class KnowledgeBaseRepository(BaseRepository[KnowledgeBase]):
             self.session.add(kb)
             await self.session.flush()
         return kb
+
+    async def get_for_conversation(self, conversation_id: uuid.UUID) -> KnowledgeBase | None:
+        stmt = select(KnowledgeBase).where(KnowledgeBase.conversation_id == conversation_id)
+        return (await self.session.scalars(stmt)).first()
+
+    async def get_or_create_for_conversation(
+        self,
+        conversation_id: uuid.UUID,
+        *,
+        owner_id: uuid.UUID,
+        tenant_id: uuid.UUID = DEFAULT_TENANT_ID,
+        name: str = "Chat attachments",
+    ) -> KnowledgeBase:
+        """The implicit per-conversation KB backing THIS-CHAT attachments (R-25/R-33).
+
+        Materialised on first attachment rather than with the conversation, so chats that
+        never receive an upload cost nothing. `knowledge_bases.conversation_id` is unique,
+        so a concurrent second upload loses the insert race with an `IntegrityError`
+        rather than creating a second attachment KB — the caller re-reads.
+        """
+        kb = await self.get_for_conversation(conversation_id)
+        if kb is None:
+            kb = KnowledgeBase(
+                owner_id=owner_id,
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                name=name,
+                visibility=KBVisibility.CONVERSATION,
+            )
+            self.session.add(kb)
+            await self.session.flush()
+        return kb

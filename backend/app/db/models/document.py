@@ -14,6 +14,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     CHAR,
+    BigInteger,
     Boolean,
     DateTime,
     ForeignKey,
@@ -60,6 +61,9 @@ class Document(TimestampMixin, Base):
     mime_type: Mapped[str | None] = mapped_column(String(255))
     storage_uri: Mapped[str] = mapped_column(Text, nullable=False)
     checksum_sha256: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    # Size of the stored original. Summed per owner for the FR-ERR-02 10 GB quota
+    # (T-202); nullable so pre-T-202 rows and future backfills stay valid.
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger)
     current_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     status: Mapped[DocumentStatus] = mapped_column(str_enum(DocumentStatus), nullable=False)
     searchable: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))

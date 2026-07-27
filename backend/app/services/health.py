@@ -12,9 +12,12 @@ Coverage per NFR-REL-02:
 * **broker** — a Redis ``PING``. No shared Redis client exists (slowapi owns its
   storage string internally and exposes no handle; the arq worker is T-207), so the
   probe builds its own ephemeral ``redis.asyncio`` client from the broker URL.
-* **object_storage** — an HTTP GET to MinIO's unauthenticated ``/minio/health/live``.
-  The MinIO SDK client is T-201; probing the health endpoint over ``httpx`` avoids
-  front-running it. T-201 may swap this for an SDK bucket-exists check.
+* **object_storage** — :meth:`ObjectStorage.check_health` on the configured backend
+  (T-201): ``HeadBucket`` for S3/MinIO, a writable-root check for the filesystem
+  backend. This replaced the original ``httpx`` GET to ``/minio/health/live``, which
+  R-29 adopted only to avoid front-running the T-201 client (spec Rev 0.6.8): the
+  bucket check also proves the credentials and the bucket, and it is correct when the
+  filesystem backend is selected, where MinIO may legitimately not be running at all.
 
 Worker readiness (also named in NFR-REL-02) is out of scope until the arq worker
 exists (T-207).
@@ -26,13 +29,13 @@ import asyncio
 import time
 from typing import Literal
 
-import httpx
 import redis.asyncio as aioredis
 from pydantic import BaseModel
 from sqlalchemy import text
 
 from app.config import get_settings
 from app.db.session import get_engine
+from app.services.object_storage import get_object_storage
 
 # Per-probe wall-clock ceiling. Provisional pending the §8.4 decision. Kept short so
 # an unreachable dependency fails the probe fast rather than hanging the endpoint.
@@ -92,17 +95,11 @@ async def check_broker() -> CheckResult:
 
 
 async def check_object_storage() -> CheckResult:
-    """Probe MinIO via its unauthenticated ``/minio/health/live`` endpoint."""
+    """Probe the configured object-storage backend (T-201)."""
     started = time.perf_counter()
-    minio = get_settings().minio
-    scheme = "https" if minio.secure else "http"
-    url = f"{scheme}://{minio.endpoint}/minio/health/live"
     try:
         async with asyncio.timeout(_PROBE_TIMEOUT):
-            async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT) as http:
-                resp = await http.get(url)
-            if resp.status_code != 200:
-                raise RuntimeError(f"unexpected status {resp.status_code}")
+            await get_object_storage().check_health()
         return _ok(started)
     except Exception as exc:  # noqa: BLE001
         return _error(exc)
