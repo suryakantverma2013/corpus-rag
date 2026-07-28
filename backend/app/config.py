@@ -12,7 +12,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, computed_field
+from pydantic import Field, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -129,6 +129,56 @@ class ParserSettings(BaseSettings):
     csv_max_rows: int = Field(default=200_000)  # TBD(§8.4)
     csv_max_columns: int = Field(default=1_000)  # TBD(§8.4)
     csv_rows_per_block: int = Field(default=50)  # TBD(§8.4)
+
+
+#: Ceiling on the characters in one embedding input. `text-embedding-3-*` accepts
+#: 8191 tokens; charged pessimistically at one token per character, because CJK text
+#: really does tokenise near 1:1 and a chunk that overruns is a hard 400 from the API
+#: mid-ingestion. Guards :class:`ChunkerSettings` rather than being enforced per call.
+EMBEDDING_MAX_INPUT_CHARS = 8_000  # TBD(§8.4)
+
+
+class ChunkerSettings(BaseSettings):
+    """Chunk sizing — the FR-ING-03 chunking strategy (T-204, ruling R-35).
+
+    Separate from :class:`ParserSettings` on purpose. Those are *rejection* limits on
+    hostile input; these are *retrieval-quality* knobs, and nothing here ever fails a
+    document.
+
+    Every value is also a fingerprint input: they compose into `chunking_version`
+    (`app.ingestion.chunker.effective_chunking_version`), so changing one re-embeds
+    the affected corpus on next ingestion. That is FR-ING-03 working as designed —
+    a boundary change really does invalidate the vectors — but it is not free, so
+    tune deliberately.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="CHUNKER_", env_file=".env", extra="ignore")
+
+    target_chars: int = Field(default=2_000)  # TBD(§8.4) — ~500 English tokens
+    overlap_chars: int = Field(default=200)  # TBD(§8.4) — 10% of target
+    min_chars: int = Field(default=200)  # TBD(§8.4) — orphan-tail merge threshold
+    # Fraction of the target a chunk must reach before a coarse separator is accepted.
+    # Without it, a blank line just past the cursor yields a 250-char chunk even when a
+    # sentence boundary sits at 1,990.
+    boundary_floor_ratio: float = Field(default=0.5)  # TBD(§8.4)
+
+    @model_validator(mode="after")
+    def _coherent(self) -> ChunkerSettings:
+        if not 0 <= self.overlap_chars < self.target_chars:
+            # Not merely a poor setting: an overlap at or above the target makes the
+            # splitter's cursor stop advancing, i.e. an infinite loop in the worker.
+            raise ValueError("CHUNKER_OVERLAP_CHARS must be >= 0 and < CHUNKER_TARGET_CHARS")
+        if not 0 <= self.min_chars <= self.target_chars:
+            raise ValueError("CHUNKER_MIN_CHARS must be >= 0 and <= CHUNKER_TARGET_CHARS")
+        if not 0.0 < self.boundary_floor_ratio <= 1.0:
+            raise ValueError("CHUNKER_BOUNDARY_FLOOR_RATIO must be in (0, 1]")
+        # Tail absorption lets the last chunk of a block reach target + min.
+        if self.target_chars + self.min_chars > EMBEDDING_MAX_INPUT_CHARS:
+            raise ValueError(
+                "CHUNKER_TARGET_CHARS + CHUNKER_MIN_CHARS must not exceed "
+                f"{EMBEDDING_MAX_INPUT_CHARS:,} characters"
+            )
+        return self
 
 
 class QueueSettings(BaseSettings):
@@ -256,6 +306,7 @@ class Settings(BaseSettings):
     storage: StorageSettings = Field(default_factory=StorageSettings)
     upload: UploadSettings = Field(default_factory=UploadSettings)
     parser: ParserSettings = Field(default_factory=ParserSettings)
+    chunker: ChunkerSettings = Field(default_factory=ChunkerSettings)
     queue: QueueSettings = Field(default_factory=QueueSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     ratelimit: RateLimitSettings = Field(default_factory=RateLimitSettings)
