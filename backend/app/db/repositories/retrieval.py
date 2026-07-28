@@ -130,6 +130,13 @@ def _access_predicates(filters: RetrievalFilter) -> list[ColumnElement[bool]]:
     same transaction as the chunk swap. `persist_chunk_set` deliberately does not touch it,
     so a T-207 that writes the v2 rows and forgets the pointer leaves a document that is
     `ACTIVE`, listed in the KB, and retrieves nothing at all.
+
+    **`Document.status` is deliberately absent, and must stay absent** (T-209, R-40).
+    `searchable` and `current_version` are the only two fields keeping the previous version
+    alive while a replace rebuilds, and a replace sets `status = QUEUED` on a document that
+    must go on answering questions throughout (R-36(3)). Adding a `status == ACTIVE`
+    predicate here would take every document offline the moment its replacement was
+    requested — silently, and only for the duration of the rebuild.
     """
     predicates: list[ColumnElement[bool]] = [
         DocumentChunk.tenant_id == filters.tenant_id,

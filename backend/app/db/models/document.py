@@ -1,8 +1,9 @@
 """`documents` — per-document lifecycle + metadata (§4.15, FR-ING/FR-KBM).
 
 `status` walks the 11-state machine (FR-ING-01); `searchable` is the synchronous
-deletion gate (FR-ING-05); `checksum_sha256` is unique per knowledge base for
-dedup (FR-KBM-08). `tenant_id`/`owner_id`/`knowledge_base_id`/`searchable` back the
+deletion gate (FR-ING-05); `checksum_sha256` is unique per knowledge base **among
+live rows** for dedup (FR-KBM-08 / R-39(4) — a deleted document must not block
+re-uploading the same file). `tenant_id`/`owner_id`/`knowledge_base_id`/`searchable` back the
 FR-RET-04 in-query access filter. Original bytes live in object storage
 (`storage_uri`); this row is metadata only.
 """
@@ -22,7 +23,6 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -35,7 +35,21 @@ from app.db.enums import DocumentStatus, str_enum
 class Document(TimestampMixin, Base):
     __tablename__ = "documents"
     __table_args__ = (
-        UniqueConstraint("knowledge_base_id", "checksum_sha256"),  # FR-KBM-08 per-KB dedup
+        # FR-KBM-08 per-KB dedup — **partial**, over live rows only (R-39(4)).
+        #
+        # `DocumentRepository.find_by_checksum` has always filtered `deleted_at IS NULL`,
+        # so once FR-ING-05 started writing that column a full constraint and the code
+        # disagreed: the dedup fast path skips the tombstone, the insert trips the
+        # constraint anyway, and T-202's dedup-race branch re-reads with the same filter,
+        # finds nothing and raises — turning "re-upload a file I previously deleted" into
+        # a 503. The predicate here is exactly the one the query uses.
+        Index(
+            "uq_documents_knowledge_base_id_checksum_sha256_live",
+            "knowledge_base_id",
+            "checksum_sha256",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
         Index(
             "ix_documents_tenant_id_knowledge_base_id_searchable",
             "tenant_id",

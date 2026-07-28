@@ -16,6 +16,7 @@ import io
 import uuid
 import zipfile
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -72,6 +73,11 @@ class _RecordingQueue:
         self.calls.append(
             {"job_id": job_id, "document_id": document_id, "idempotency_key": idempotency_key}
         )
+
+    async def enqueue_delete(
+        self, *, job_id: uuid.UUID, document_id: uuid.UUID, idempotency_key: str
+    ) -> None:
+        raise AssertionError("the upload path must never enqueue a deletion")
 
     async def aclose(self) -> None:
         return None
@@ -443,6 +449,39 @@ async def test_duplicate_returns_200_and_does_not_reingest(
     assert len(await _jobs_of(session, sub)) == 1
     assert _stored_files(storage) == stored_after_first
     assert len(queue.calls) == 1
+
+
+async def test_a_deleted_document_does_not_block_re_uploading_the_same_file(
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    make_token: Callable[..., str],
+    queue: _RecordingQueue,
+) -> None:
+    """R-39(4): the regression the partial checksum index exists to prevent.
+
+    `find_by_checksum` filters `deleted_at IS NULL`, so with the old full constraint the
+    dedup fast path missed the tombstone, the insert tripped the constraint anyway, and the
+    dedup-race branch — re-reading with the same filter and finding no winner — raised,
+    turning "re-upload a file I deleted last week" into a 503.
+    """
+    sub, headers = await _owner(session, make_token)
+    payload = _pdf()
+
+    first = await client.post("/api/v1/documents", files=_files(payload), headers=headers)
+    document = await _document(session, uuid.UUID(first.json()["document_id"]))
+    assert document is not None
+    # What the T-208 delete worker's terminal transaction leaves behind.
+    document.status = DocumentStatus.DELETED
+    document.deleted_at = datetime.now(UTC)
+    document.searchable = False
+    await session.flush()
+
+    second = await client.post("/api/v1/documents", files=_files(payload), headers=headers)
+
+    assert second.status_code == 202, second.text
+    assert second.json()["duplicate"] is False
+    assert second.json()["document_id"] != first.json()["document_id"]
+    assert len(await _documents_of(session, sub)) == 2
 
 
 async def test_same_bytes_in_different_kb_are_not_duplicates(

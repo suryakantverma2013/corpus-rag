@@ -39,12 +39,14 @@ from app.ingestion.scanner import build_scanner
 from app.services.clamav import close_clamav_client, get_clamav_client
 from app.services.embeddings import close_embedding_client, get_embedding_client
 from app.services.jobs import (
+    DELETE_TASK_NAME,
     INGEST_TASK_NAME,
     WORKER_HEALTH_CHECK_KEY,
     close_job_queue,
     get_job_queue,
 )
 from app.services.object_storage import close_object_storage, get_object_storage
+from workers.delete import delete_document
 from workers.ingest import ingest_document
 from workers.sweeper import sweep_undispatched_jobs
 
@@ -110,8 +112,11 @@ class WorkerSettings:
     """arq worker configuration. Referenced by path on the command line, not instantiated."""
 
     functions = [
-        # The name is the contract with T-202's enqueue — never let it drift.
+        # The names are the contract with the API's enqueue — never let them drift.
         func(ingest_document, name=INGEST_TASK_NAME, timeout=_settings.worker.job_timeout_seconds),
+        # Deletion shares the timeout, though it needs far less of it: it holds no parse and
+        # no embedding call, only a prefix delete and two short transactions.
+        func(delete_document, name=DELETE_TASK_NAME, timeout=_settings.worker.job_timeout_seconds),
     ]
 
     cron_jobs = [

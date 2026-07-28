@@ -10,7 +10,11 @@ else, is the part each of those modules deliberately left undone:
   upstream moves the pointer. Miss it and a re-ingested document reaches `ACTIVE`, lists in
   the KB modal, and matches nothing — silently;
 * the R-31/R-32 malware screen, at the head, **before `PARSING`**;
-* FR-ING-04's retry, backoff and dead-letter path.
+* FR-ING-04's retry, backoff and dead-letter path;
+* **the swap guard** (R-39(8)) — a re-read of the document under `FOR UPDATE` immediately
+  before `mark_active`. `_begin`'s deletion short-circuit ran minutes earlier, before the
+  parse and the embedding calls, so a `DELETE` that arrived since then is invisible to it
+  and the swap would commit `searchable = True` over a deletion in progress.
 
 **arq does not retry on a plain exception, and cannot report its own dead-letter.**
 Both facts are load-bearing here and neither is obvious from arq's docs. Reading
@@ -35,7 +39,6 @@ is the swap, which is one transaction by requirement.
 
 from __future__ import annotations
 
-import random
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -45,11 +48,11 @@ from arq.worker import Retry
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings, get_settings
-from app.db.enums import DocumentStatus, JobStatus
+from app.db.enums import DocumentStatus, JobStatus, JobType
 from app.db.models.document import Document
 from app.db.models.knowledge_job import KnowledgeJob
 from app.db.repositories.documents import DocumentRepository
-from app.db.repositories.jobs import KnowledgeJobRepository
+from app.db.repositories.jobs import DOCUMENT_DELETED, KnowledgeJobRepository
 from app.db.session import get_sessionmaker
 from app.ingestion.chunker import chunk_document
 from app.ingestion.incremental import persist_chunk_set, plan_chunk_set
@@ -64,6 +67,7 @@ from app.services.object_storage import (
     document_version_prefix,
     get_object_storage,
 )
+from workers.common import backoff, is_final_attempt
 
 log = structlog.get_logger(__name__)
 
@@ -76,8 +80,8 @@ _PROGRESS_EMBEDDING = 65
 _PROGRESS_INDEXING = 85
 _PROGRESS_DONE = 100
 
-# Reason codes this task owns (the others come from the parser/embedding/scanner trees).
-_CODE_DOCUMENT_DELETED = "DOCUMENT_DELETED"
+# Reason codes this task owns (the others come from the parser/embedding/scanner trees, and
+# `DOCUMENT_DELETED` is shared with the deletion request — see `repositories.jobs`).
 _CODE_OBJECT_MISSING = "OBJECT_MISSING"
 _CODE_STORAGE_UNAVAILABLE = "OBJECT_STORAGE_UNAVAILABLE"
 _CODE_UNEXPECTED = "INGEST_FAILED"
@@ -101,6 +105,13 @@ class _EmptyChunkSet(Exception):
     """A parse that yielded no chunks. Terminal — a retry re-parses the same bytes."""
 
     code = _CODE_EMPTY_CHUNK_SET
+    retryable = False
+
+
+class _DocumentDeleted(Exception):
+    """A deletion landed after `_begin` passed. Terminal — the document is going away."""
+
+    code = DOCUMENT_DELETED
     retryable = False
 
 
@@ -187,8 +198,8 @@ async def ingest_document(ctx: dict[str, Any], document_id: str, job_id: str) ->
                 # nothing sweeps that state. Convert to a retry so it gets another attempt
                 # once the database is back.
                 logger.exception("ingest.bookkeeping_failed", original_error=str(exc))
-                if job_try < deps.settings.worker.max_tries:
-                    raise Retry(defer=_backoff(job_try, settings=deps.settings)) from None
+                if not is_final_attempt(job_try, settings=deps.settings):
+                    raise Retry(defer=backoff(job_try, settings=deps.settings)) from None
                 raise
 
 
@@ -252,7 +263,7 @@ async def _begin(
         await jobs.update_status(
             job,
             JobStatus.FAILED,
-            error_code=_CODE_DOCUMENT_DELETED,
+            error_code=DOCUMENT_DELETED,
             error_message="document was deleted before ingestion ran",
         )
         await session.commit()
@@ -334,6 +345,66 @@ async def _run(
     await jobs.update_status(job, JobStatus.RUNNING, progress=_PROGRESS_INDEXING)
     await session.commit()
 
+    # THE SWAP GUARD (R-39(8)). `_begin`'s deletion short-circuit ran before the parse, the
+    # scan and the embedding calls — minutes ago for a large document — so a `DELETE` that
+    # arrived since then is invisible to it. Without this, `mark_active` below commits
+    # `searchable = True` and a version bump over a deletion in progress, resurrecting the
+    # document; and if the purge has already run, it resurrects it as an `ACTIVE` row whose
+    # original bytes are gone.
+    #
+    # `FOR UPDATE` opens the swap transaction by locking the row, so the check and the
+    # commit cannot be interleaved — the delete request takes the same lock and blocks.
+    #
+    # **The DELETE-job check is not belt and braces.** The state writes above operate on an
+    # ORM instance loaded before the embed window, so `set_status(INDEXING)` on the previous
+    # line has already overwritten any `DELETE_PENDING` a concurrent request wrote — the
+    # status field alone reads clean here, which is exactly how this guard failed its first
+    # test. A deletion job is never deleted, so its existence is the one signal the
+    # ingestion path cannot erase.
+    document = await documents.get_for_update(context.document_id)
+    deleting = document is None or document.deleted_at is not None
+    deleting = deleting or (document is not None and document.status in _DELETION_STATES)
+    deleting = deleting or await jobs.has_job(context.document_id, job_type=JobType.DELETE)
+    if deleting:
+        raise _DocumentDeleted(f"{context.document_id} entered the deletion path mid-ingest")
+
+    # Read under the lock and before `mark_active` overwrites it: the version whose objects
+    # become redundant once the swap below is durable (R-40(3)). It must come from the
+    # `get_for_update` result — `populate_existing` makes that read authoritative, while the
+    # instance this task has been carrying predates the whole embed window.
+    previous_version = document.current_version
+
+    # THE STALE-JOB GUARD (R-40(4)). `_begin`'s `current_version >= document_version`
+    # short-circuit closes the *redelivery* case, where a newer version had already won
+    # before this job started. It cannot close the *concurrent* case: a replace can commit
+    # its own swap while this job sits between `_begin` and here — minutes, for a large
+    # document. Committing now would roll the pointer backwards, and `persist_chunk_set`'s
+    # `delete_other_versions(keep_version=target_version)` would delete the newer version's
+    # rows outright, leaving an ACTIVE document whose only chunks are the *new* bytes
+    # labelled with the *old* version number — which retrieval then serves silently, since
+    # it matches on `document_version = current_version`.
+    #
+    # **Strictly greater, not `>=`.** `_begin` can use `>=` because it pairs the test with
+    # `status is ACTIVE`; here there is no such pairing, and equality is the *normal* case
+    # twice over — a first ingest targets v1 against the column's server default of 1, and
+    # an FR-ING-04 same-version retry targets exactly the version already recorded. Both
+    # must proceed. Only a document that has moved *past* this job's target has been
+    # overtaken.
+    #
+    # `SUCCEEDED` is the correct outcome: someone newer won and nothing is wrong.
+    if previous_version > target_version:
+        logger.info(
+            "ingest.skipped",
+            reason="a newer version was swapped in mid-job",
+            version=target_version,
+            current_version=previous_version,
+        )
+        await jobs.update_status(
+            job, JobStatus.SUCCEEDED, progress=_PROGRESS_DONE, clear_error=True
+        )
+        await session.commit()
+        return
+
     persisted = await persist_chunk_set(session, plan=plan)
     await documents.mark_active(
         document,
@@ -346,6 +417,25 @@ async def _run(
     # and the job outcome all land together: readers see the previous version until this
     # commit and only the new one after it.
     await session.commit()
+
+    # R-40(3): purge the superseded version's objects **after** the swap commit —
+    # deliberately the reverse of R-39(9)'s purge-then-commit ordering, and for the
+    # symmetric reason. In a deletion the commit is what makes the bytes unreachable, so
+    # purging after it orphans them. Here the commit is what makes them *redundant*: until
+    # it lands, v(previous) is still the document's live content, still serving retrieval,
+    # and still the only thing a rolled-back swap can fall back on. Purging first and then
+    # failing to commit would destroy the original of the version that is still answering
+    # questions, from which nothing can rebuild.
+    #
+    # Outside the transaction by construction: R-36(4)'s justification for moving the
+    # collect step *inside* the swap rests on that transaction holding no network I/O.
+    await _purge_superseded_versions(
+        deps=deps,
+        context=context,
+        first=previous_version,
+        last=target_version,
+        logger=logger,
+    )
 
     logger.info(
         "ingest.completed",
@@ -422,6 +512,22 @@ async def _handle_failure(
         )
         return
 
+    if isinstance(exc, _DocumentDeleted):
+        # The job failed, the document did not. Writing `FAILED` here would drag it back
+        # out of the deletion flow, render it as `Failed` in FR-KBM-04, and offer a Retry
+        # that re-ingests the document the user deleted — the same reasoning as R-39(7) and
+        # as `_begin`'s deletion short-circuit, which likewise leaves `documents.status`
+        # alone. The purge job owns this document's state from here.
+        logger.info("ingest.abandoned", reason="document was deleted mid-ingest")
+        await KnowledgeJobRepository(session).update_status(
+            job,
+            JobStatus.FAILED,
+            error_code=DOCUMENT_DELETED,
+            error_message=str(exc),
+        )
+        await session.commit()
+        return
+
     code, retryable = _classify(exc)
     message = f"{type(exc).__name__}: {exc}"
 
@@ -432,8 +538,7 @@ async def _handle_failure(
         # document that is already correctly marked FAILED.
         return
 
-    max_tries = deps.settings.worker.max_tries
-    if job_try >= max_tries:
+    if is_final_attempt(job_try, settings=deps.settings):
         # The last attempt arq will ever run this task on. arq's own `max_tries` check
         # fires *before* the coroutine is invoked, so if we simply raised `Retry` here the
         # next delivery would be discarded without ever reaching this code and the job
@@ -449,7 +554,7 @@ async def _handle_failure(
         )
         return
 
-    defer = _backoff(job_try, settings=deps.settings)
+    defer = backoff(job_try, settings=deps.settings)
     logger.warning("ingest.retrying", error_code=code, error=message, defer_seconds=round(defer, 1))
     # R-38(5): the job carries the diagnostics; the document keeps its in-flight state so
     # the KB badge does not flap between FAILED and the next stage on every attempt.
@@ -477,6 +582,46 @@ async def _fail(
         job, status, error_code=code, error_message=message
     )
     await session.commit()
+
+
+async def _purge_superseded_versions(
+    *,
+    deps: _Deps,
+    context: _DocumentContext,
+    first: int,
+    last: int,
+    logger: Any,
+) -> None:
+    """Best-effort delete of every version prefix in ``[first, last)`` (R-40(3)).
+
+    A **range**, not just ``first``: a replace whose ingestion failed has already burned
+    its version number, and its original — referenced by nothing, since `storage_uri` has
+    since been repointed — would otherwise survive until the document is deleted.
+
+    **``first < last`` is the guard that matters.** On a first ingest and on every
+    FR-ING-04 same-version retry ``previous_version == target_version``, and without the
+    range this would delete the prefix holding the original of the document that has just
+    gone `ACTIVE` — silently, because nothing reads that object again until a retry, which
+    then fails `OBJECT_MISSING` (terminal) on a document nothing can rebuild. `range()`
+    makes that case a no-op rather than a catastrophe.
+
+    Never raises. The swap is already committed and the document is `ACTIVE`; failing the
+    job over an object-storage blip would render `Failed` for a document that works.
+    """
+    for version in range(first, last):
+        prefix = document_version_prefix(
+            tenant_id=context.tenant_id,
+            knowledge_base_id=context.knowledge_base_id,
+            document_id=context.document_id,
+            version=version,
+        )
+        try:
+            removed = await deps.storage.delete_prefix(prefix)
+            logger.info("ingest.superseded_purged", version=version, objects_removed=removed)
+        except Exception:  # noqa: BLE001 — the swap is durable; never fail the job for this
+            logger.error(
+                "ingest.superseded_purge_failed", version=version, prefix=prefix, exc_info=True
+            )
 
 
 async def _purge_and_fail(
@@ -559,17 +704,3 @@ def _classify(exc: BaseException) -> tuple[str, bool]:
     # alternative is failing a document permanently on a blip; the dead-letter path bounds
     # how long that optimism lasts.
     return _CODE_UNEXPECTED, True
-
-
-def _backoff(job_try: int, *, settings: Settings) -> float:
-    """Exponential backoff with full jitter, capped.
-
-    arq applies no backoff of its own — `Retry(defer=…)` is the only lever — so the shape
-    is chosen here. Full jitter (uniform over the whole window rather than a fixed delay
-    plus noise) keeps a batch of documents that all failed on the same rate-limited
-    embedding call from marching back in lockstep.
-    """
-    worker = settings.worker
-    base = worker.retry_base_seconds
-    window = min(base * (2 ** (job_try - 1)), worker.retry_max_seconds)
-    return random.uniform(base, window) if window > base else window

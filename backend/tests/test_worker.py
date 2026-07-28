@@ -24,7 +24,12 @@ from app.db.models.knowledge_job import KnowledgeJob
 from app.db.repositories.jobs import ENQUEUE_FAILED, KnowledgeJobRepository
 from app.db.repositories.knowledge_bases import KnowledgeBaseRepository
 from app.db.repositories.users import UserRepository
-from app.services.jobs import INGEST_TASK_NAME, WORKER_HEALTH_CHECK_KEY, JobQueueError
+from app.services.jobs import (
+    DELETE_TASK_NAME,
+    INGEST_TASK_NAME,
+    WORKER_HEALTH_CHECK_KEY,
+    JobQueueError,
+)
 from workers.main import WorkerSettings as ArqWorkerSettings
 from workers.main import _sweep_minutes
 from workers.sweeper import sweep_undispatched_jobs
@@ -32,14 +37,15 @@ from workers.sweeper import sweep_undispatched_jobs
 # --- arq wiring ---------------------------------------------------------------------
 
 
-def test_the_registered_task_name_matches_the_enqueue_contract() -> None:
-    """T-202 already enqueues under `INGEST_TASK_NAME`; a rename here orphans those jobs.
+def test_the_registered_task_names_match_the_enqueue_contract() -> None:
+    """The API enqueues under these constants; a rename here orphans every queued job.
 
     Nothing errors when they disagree — arq simply never matches the queued jobs to a
-    function, and documents sit at QUEUED forever. Hence a test rather than a comment.
+    function, and documents sit at QUEUED (or DELETE_PENDING) forever. Hence a test rather
+    than a comment.
     """
     names = [function.name for function in ArqWorkerSettings.functions]
-    assert names == [INGEST_TASK_NAME]
+    assert names == [INGEST_TASK_NAME, DELETE_TASK_NAME]
 
 
 def test_the_heartbeat_is_not_arqs_hour_long_default() -> None:

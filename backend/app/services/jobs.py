@@ -5,10 +5,11 @@ its `202`, but the arq worker is T-207 and does not exist yet. This module is th
 that lets T-202 finish without front-running it — the same move T-106 made when it probed
 MinIO over httpx rather than reach for the object-storage client T-201 had not written.
 
-The contract is one constant and one protocol:
+The contract is a pair of constants and one protocol:
 
-* :data:`INGEST_TASK_NAME` — the arq function name T-207 must register.
-* :class:`JobQueue` — ``enqueue_ingest`` plus ``aclose``.
+* :data:`INGEST_TASK_NAME` / :data:`DELETE_TASK_NAME` — the arq function names the worker
+  must register (T-207 and T-208 respectively).
+* :class:`JobQueue` — ``enqueue_ingest`` / ``enqueue_delete`` plus ``aclose``.
 
 arq resolves function names **worker-side**, so enqueueing a name nothing implements yet
 succeeds and the job simply waits on the broker. Payloads are IDs only, never bytes: the
@@ -36,6 +37,9 @@ log = structlog.get_logger(__name__)
 #: Changing it silently orphans every queued job — treat it as a wire contract.
 INGEST_TASK_NAME = "ingest_document"
 
+#: The FR-ING-05 deletion task (T-208), registered in the same place under the same rule.
+DELETE_TASK_NAME = "delete_document"
+
 #: Redis key the worker heartbeats into, and the `/health/ready/worker` liveness signal
 #: (R-38(2)). arq writes it with a TTL of `health_check_interval + 1`, so its mere
 #: existence means "a worker was alive within the last interval".
@@ -61,6 +65,12 @@ class JobQueue(Protocol):
         """Hand an ingestion job to the broker. Raises :class:`JobQueueError`."""
         ...
 
+    async def enqueue_delete(
+        self, *, job_id: uuid.UUID, document_id: uuid.UUID, idempotency_key: str
+    ) -> None:
+        """Hand an FR-ING-05 deletion job to the broker. Raises :class:`JobQueueError`."""
+        ...
+
     async def aclose(self) -> None:
         """Release any pooled connections."""
         ...
@@ -76,12 +86,16 @@ class NullJobQueue:
     async def enqueue_ingest(
         self, *, job_id: uuid.UUID, document_id: uuid.UUID, idempotency_key: str
     ) -> None:
-        log.info(
-            "job_queue.noop",
-            task=INGEST_TASK_NAME,
-            job_id=str(job_id),
-            document_id=str(document_id),
-        )
+        self._log(INGEST_TASK_NAME, job_id=job_id, document_id=document_id)
+
+    async def enqueue_delete(
+        self, *, job_id: uuid.UUID, document_id: uuid.UUID, idempotency_key: str
+    ) -> None:
+        self._log(DELETE_TASK_NAME, job_id=job_id, document_id=document_id)
+
+    @staticmethod
+    def _log(task: str, *, job_id: uuid.UUID, document_id: uuid.UUID) -> None:
+        log.info("job_queue.noop", task=task, job_id=str(job_id), document_id=str(document_id))
 
     async def aclose(self) -> None:
         return None
@@ -116,14 +130,35 @@ class ArqJobQueue:
     async def enqueue_ingest(
         self, *, job_id: uuid.UUID, document_id: uuid.UUID, idempotency_key: str
     ) -> None:
+        await self._enqueue(
+            INGEST_TASK_NAME,
+            job_id=job_id,
+            document_id=document_id,
+            idempotency_key=idempotency_key,
+        )
+
+    async def enqueue_delete(
+        self, *, job_id: uuid.UUID, document_id: uuid.UUID, idempotency_key: str
+    ) -> None:
+        await self._enqueue(
+            DELETE_TASK_NAME,
+            job_id=job_id,
+            document_id=document_id,
+            idempotency_key=idempotency_key,
+        )
+
+    async def _enqueue(
+        self, task: str, *, job_id: uuid.UUID, document_id: uuid.UUID, idempotency_key: str
+    ) -> None:
         try:
             async with asyncio.timeout(self._timeout):
                 pool = await self._get_pool()
                 # `_job_id` makes the broker itself reject a duplicate enqueue, layering
                 # on top of the FR-ING-04 `knowledge_jobs.idempotency_key`. A retry of
-                # the same document version is therefore a no-op at both levels.
+                # the same document version is therefore a no-op at both levels — and it
+                # is what makes a repeated `DELETE` on an in-flight deletion safe (R-39(2)).
                 await pool.enqueue_job(
-                    INGEST_TASK_NAME,
+                    task,
                     str(document_id),
                     str(job_id),
                     _job_id=idempotency_key,
@@ -179,5 +214,5 @@ async def close_job_queue() -> None:
         _queue = None
 
 
-#: Route dependency for the upload surface (T-202) and, later, retry/replace (T-208/209).
+#: Route dependency for the upload (T-202), delete and retry (T-208) surfaces.
 JobQueueDep = Annotated[JobQueue, Depends(get_job_queue)]

@@ -84,10 +84,26 @@ def test_incremental_embedding_fields() -> None:
         assert col in chunks.columns
 
 
-def test_per_kb_checksum_dedup() -> None:
-    # FR-KBM-08: duplicate detection scoped per knowledge base.
+def test_per_kb_checksum_dedup_is_partial_over_live_rows() -> None:
+    """FR-KBM-08 dedup, narrowed to undeleted rows by R-39(4).
+
+    A full constraint would make re-uploading a previously deleted file a `503`:
+    `find_by_checksum` filters `deleted_at IS NULL`, so it misses the tombstone while the
+    constraint still sees it. The predicate must match the query's.
+    """
     docs = Base.metadata.tables["documents"]
-    assert {"knowledge_base_id", "checksum_sha256"} in _unique_column_sets(docs)
+    matching = [
+        index
+        for index in docs.indexes
+        if index.unique
+        and {column.name for column in index.columns} == {"knowledge_base_id", "checksum_sha256"}
+    ]
+    assert len(matching) == 1, "the per-KB checksum uniqueness index is missing"
+    predicate = matching[0].dialect_options["postgresql"].get("where")
+    assert predicate is not None, "uniqueness must not cover deleted rows"
+    assert "deleted_at IS NULL" in str(predicate)
+    # And the old table-level constraint is gone, or it would still block the re-upload.
+    assert {"knowledge_base_id", "checksum_sha256"} not in _unique_column_sets(docs)
 
 
 def test_chunk_version_uniqueness() -> None:

@@ -23,6 +23,13 @@ from app.db.repositories.audit_log import AuditLogRepository
 _TARGET_USER = "user"
 _TARGET_DOCUMENT = "document"
 
+# Actions that are *not* removals. Everything else falls through to DOCUMENT_DELETE —
+# see `record_document_event`.
+_DOCUMENT_EVENTS = {
+    "upload": AuditEventType.DOCUMENT_UPLOAD,
+    "replace": AuditEventType.DOCUMENT_REPLACE,
+}
+
 
 async def record_auth(
     session: AsyncSession,
@@ -86,14 +93,15 @@ async def record_document_event(
     document_id: uuid.UUID,
     action: str,
 ) -> AuditLog:
-    """Document upload/delete audit event.
+    """Document lifecycle audit event (upload, replace, delete).
 
-    NOTE(T-202): no HTTP surface emits these yet — the documents/ingestion routes are
-    Phase 2. This helper is ready so those flows wire it in one call.
+    `DOCUMENT_DELETE` is the deliberate default rather than a mapping miss: it also covers
+    T-207's ``"malware_purge"``, which removes the stored original and is fairly filed as a
+    deletion. Any *new* action that is not a removal needs its own entry here — until
+    T-209 added ``"replace"`` this was a ternary, so a replace was recorded in a security
+    artefact as a deletion.
     """
-    event_type = (
-        AuditEventType.DOCUMENT_UPLOAD if action == "upload" else AuditEventType.DOCUMENT_DELETE
-    )
+    event_type = _DOCUMENT_EVENTS.get(action, AuditEventType.DOCUMENT_DELETE)
     return await AuditLogRepository(session).record(
         event_type=event_type,
         actor_id=actor_id,

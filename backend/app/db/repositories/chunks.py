@@ -309,8 +309,23 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
 
     # --- FR-ING-05 ------------------------------------------------------------
 
+    async def delete_by_document(self, document_id: uuid.UUID) -> int:
+        """FR-ING-05's "removes vectors": every version's rows, hard-deleted (R-39(3)).
+
+        Not `deactivate` below. R-36(7) had assigned `is_active` exactly this job, but
+        retrieval already excludes the document through `documents.searchable`/`deleted_at`,
+        so the flag would change no query result while retaining ~12 KB per chunk plus its
+        HNSW entry indefinitely — for a document the user asked to delete. That is the same
+        storage argument R-36(4) settled when it made the collect step mandatory. `is_active`
+        is consequently left with no writer anywhere (OI-28).
+        """
+        stmt = delete(DocumentChunk).where(DocumentChunk.document_id == document_id)
+        result = await self.session.execute(stmt)
+        await self.session.flush()
+        return result.rowcount
+
     async def deactivate(self, chunk_ids: Sequence[uuid.UUID]) -> int:
-        """Soft-delete chunks (FR-ING-05). Never used for version management (R-36(7))."""
+        """Soft-delete chunks. **Unused** — R-39(3) made FR-ING-05 a hard delete (OI-28)."""
         if not chunk_ids:
             return 0
         stmt = update(DocumentChunk).where(DocumentChunk.id.in_(chunk_ids)).values(is_active=False)

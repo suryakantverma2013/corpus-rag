@@ -29,6 +29,7 @@ from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
+import workers.ingest
 from app.config import ScannerSettings, Settings, WorkerSettings, get_settings
 from app.db.base import DEFAULT_TENANT_ID
 from app.db.enums import DocumentStatus, JobStatus, JobType
@@ -333,6 +334,69 @@ async def test_a_document_being_deleted_is_never_resurrected(sessions, storage, 
     assert scanner.calls == []
 
 
+async def test_a_deletion_landing_mid_ingest_aborts_the_swap(sessions, storage) -> None:  # noqa: ANN001
+    """R-39(8)'s third point — the one `_begin`'s short-circuit cannot cover.
+
+    `_begin` ran before the parse, the scan and the embedding calls; a `DELETE` arriving
+    after it is invisible there. Without the `FOR UPDATE` re-read in front of `mark_active`,
+    this swap commits `searchable = True` and a version bump over a deletion in progress —
+    resurrecting a document whose bytes the purge may already have removed.
+
+    The delete is injected by patching `_plan_on_a_disposable_session` — the last thing to
+    run before the swap — so it lands in exactly the window the guard exists to close. It
+    writes what `request_deletion` writes, **including the job row**, because the task's own
+    `set_status(INDEXING)` overwrites the status field from its stale ORM instance. That
+    clobber is why the guard cannot rely on `documents.status` alone.
+
+    (Patched at this level rather than at `plan_chunk_set`: that runs *inside* the disposable
+    session, and under this fixture's savepoint nesting the injected write would be rolled
+    back when that session closes.)
+    """
+    document_id, job_id, owner_id = await _fixtures(sessions, storage)
+    real_plan = workers.ingest._plan_on_a_disposable_session
+
+    async def _plan_then_delete(**kwargs):  # noqa: ANN003, ANN202
+        plan = await real_plan(**kwargs)
+        async with sessions() as session:
+            document = await session.get(Document, document_id)
+            assert document is not None
+            document.status = DocumentStatus.DELETE_PENDING
+            document.searchable = False
+            session.add(
+                KnowledgeJob(
+                    document_id=document_id,
+                    job_type=JobType.DELETE,
+                    status=JobStatus.QUEUED,
+                    document_version=1,
+                    idempotency_key=f"delete:{document_id}",
+                )
+            )
+            await session.commit()
+        return plan
+
+    workers.ingest._plan_on_a_disposable_session = _plan_then_delete
+    try:
+        await ingest_document(
+            _ctx(sessions, storage, _StubScanner()), str(document_id), str(job_id)
+        )
+    finally:
+        workers.ingest._plan_on_a_disposable_session = real_plan
+
+    document, job = await _reload(sessions, document_id, job_id)
+    # `searchable` is the one that matters: FR-ING-05 promises the document has left
+    # retrieval, and `mark_active` is the only thing that could put it back.
+    assert document.searchable is False, "the swap resurrected the document"
+    assert document.status is not DocumentStatus.ACTIVE
+    assert document.current_version == 1
+    # Terminal, and recorded on the job — never on the document (R-39(7)).
+    assert job.status is JobStatus.FAILED
+    assert job.error_code == "DOCUMENT_DELETED"
+
+    async with sessions() as session:
+        chunks = await DocumentChunkRepository(session).list_by_document(document_id)
+    assert chunks == [], "the aborted swap must leave no chunk rows behind"
+
+
 # --- failure classification ---------------------------------------------------------
 
 
@@ -454,6 +518,274 @@ async def test_a_detection_leaves_no_chunks_behind(sessions, storage) -> None:  
     async with sessions() as session:
         chunks = await DocumentChunkRepository(session).list_by_document(document_id)
     assert chunks == []
+
+
+# --- replace: the version swap and the superseded purge (T-209, R-40(3)/(4)) --------
+
+
+_V2_TEXT = (
+    "Version two of this handbook replaces the first entirely. "
+    "The Chandrasekhar limit for white dwarf stars is the anchor unique to this revision."
+)
+
+
+async def _stage_replacement(
+    sessions: async_sessionmaker[AsyncSession],
+    storage: LocalFilesystemStorage,
+    *,
+    document_id: uuid.UUID,
+    version: int,
+    payload: bytes,
+) -> uuid.UUID:
+    """Leave behind exactly what `replace_document` leaves behind, and nothing more.
+
+    New original at `v{version}`, `storage_uri` repointed at it, the document back to
+    `QUEUED`, a job at the new target — and `current_version`, `searchable` and the old
+    chunk rows untouched, which is the whole of R-36(3).
+    """
+    async with sessions() as session:
+        document = await session.get(Document, document_id)
+        assert document is not None
+        key = original_key(
+            tenant_id=document.tenant_id,
+            knowledge_base_id=document.knowledge_base_id,
+            document_id=document_id,
+            version=version,
+            filename=document.filename,
+        )
+        stored = await storage.put(key, payload)
+        document.storage_uri = stored.uri
+        document.status = DocumentStatus.QUEUED
+        job = KnowledgeJob(
+            document_id=document_id,
+            job_type=JobType.INGEST,
+            status=JobStatus.QUEUED,
+            document_version=version,
+            idempotency_key=f"ingest:{document_id}:v{version}",
+        )
+        session.add(job)
+        await session.commit()
+        return job.id
+
+
+def _original_key_for(document: Document, *, version: int) -> str:
+    return original_key(
+        tenant_id=document.tenant_id,
+        knowledge_base_id=document.knowledge_base_id,
+        document_id=document.id,
+        version=version,
+        filename=document.filename,
+    )
+
+
+async def test_a_replaced_document_answers_from_the_new_version_only(sessions, storage) -> None:  # noqa: ANN001
+    """The T-206/T-208 precedent applied to replace: prove it with a real query.
+
+    Every field would look correct with the version pointer left behind or the old rows
+    still present — the document would simply serve the wrong text, which no field
+    assertion detects.
+    """
+    document_id, job_id, owner_id = await _fixtures(sessions, storage)
+    embedder = FakeEmbeddingClient()
+    ctx = _ctx(sessions, storage, _StubScanner())
+    ctx["embedder"] = embedder
+    await ingest_document(ctx, str(document_id), str(job_id))
+
+    v2_job_id = await _stage_replacement(
+        sessions, storage, document_id=document_id, version=2, payload=_pdf(_V2_TEXT)
+    )
+    await ingest_document(ctx, str(document_id), str(v2_job_id))
+
+    async with sessions() as session:
+        document = await session.get(Document, document_id)
+        assert document is not None
+        assert document.status is DocumentStatus.ACTIVE
+        assert document.current_version == 2
+        assert document.searchable is True
+
+        chunks = DocumentChunkRepository(session)
+        assert await chunks.list_by_version(document_id, 1) == []
+        assert await chunks.list_by_version(document_id, 2) != []
+
+        hits = await HybridRetriever(session).search(
+            "Chandrasekhar limit for white dwarf stars",
+            await embedder.embed_query("Chandrasekhar limit for white dwarf stars"),
+            filters=RetrievalFilter(owner_id=owner_id),
+        )
+
+    assert hits, "the replaced document returned nothing — current_version did not advance"
+    served = " ".join(hit.chunk_text for hit in hits)
+    assert "Chandrasekhar" in served
+    assert "perihelion" not in served, "the superseded version is still being served"
+
+
+async def test_the_superseded_versions_objects_are_purged_after_the_swap(sessions, storage) -> None:  # noqa: ANN001
+    document_id, job_id, _ = await _fixtures(sessions, storage)
+    ctx = _ctx(sessions, storage, _StubScanner())
+    await ingest_document(ctx, str(document_id), str(job_id))
+
+    async with sessions() as session:
+        document = await session.get(Document, document_id)
+        assert document is not None
+        v1_key = _original_key_for(document, version=1)
+        v2_key = _original_key_for(document, version=2)
+    assert await storage.exists(v1_key)
+
+    v2_job_id = await _stage_replacement(
+        sessions, storage, document_id=document_id, version=2, payload=_pdf(_V2_TEXT)
+    )
+    await ingest_document(ctx, str(document_id), str(v2_job_id))
+
+    assert await storage.exists(v1_key) is False
+    assert await storage.exists(v2_key) is True
+
+
+async def test_a_same_version_retry_does_not_purge_its_own_original(sessions, storage) -> None:  # noqa: ANN001
+    """The `range(first, last)` guard.
+
+    On a first ingest and on every FR-ING-04 same-version retry `previous_version ==
+    target_version`. An unguarded purge would delete the original of the document that has
+    just gone `ACTIVE` — invisibly, until a later retry fails `OBJECT_MISSING` on a
+    document nothing can rebuild.
+    """
+    document_id, job_id, _ = await _fixtures(sessions, storage)
+    ctx = _ctx(sessions, storage, _StubScanner())
+    await ingest_document(ctx, str(document_id), str(job_id))
+
+    async with sessions() as session:
+        document = await session.get(Document, document_id)
+        assert document is not None
+        v1_key = _original_key_for(document, version=1)
+        # A fresh same-version job, exactly as `retry_ingestion` mints one.
+        document.status = DocumentStatus.QUEUED
+        retry = KnowledgeJob(
+            document_id=document_id,
+            job_type=JobType.INGEST,
+            status=JobStatus.QUEUED,
+            document_version=1,
+            idempotency_key=f"ingest:{document_id}:v1:r1",
+        )
+        session.add(retry)
+        await session.commit()
+        retry_id = retry.id
+
+    await ingest_document(ctx, str(document_id), str(retry_id))
+
+    assert await storage.exists(v1_key) is True
+    async with sessions() as session:
+        document = await session.get(Document, document_id)
+        assert document is not None and document.status is DocumentStatus.ACTIVE
+
+
+async def test_versions_skipped_by_a_burned_replace_are_also_purged(sessions, storage) -> None:  # noqa: ANN001
+    """A replace whose ingestion failed has already consumed v2; its original is referenced
+    by nothing once `storage_uri` moves on to v3."""
+    document_id, job_id, _ = await _fixtures(sessions, storage)
+    ctx = _ctx(sessions, storage, _StubScanner())
+    await ingest_document(ctx, str(document_id), str(job_id))
+
+    async with sessions() as session:
+        document = await session.get(Document, document_id)
+        assert document is not None
+        v1_key = _original_key_for(document, version=1)
+        v2_key = _original_key_for(document, version=2)
+        v3_key = _original_key_for(document, version=3)
+        # The failed replace's original, which nothing now points at.
+        await storage.put(v2_key, _pdf(_V2_TEXT))
+
+    v3_job_id = await _stage_replacement(
+        sessions, storage, document_id=document_id, version=3, payload=_pdf(_V2_TEXT)
+    )
+    await ingest_document(ctx, str(document_id), str(v3_job_id))
+
+    assert await storage.exists(v1_key) is False
+    assert await storage.exists(v2_key) is False
+    assert await storage.exists(v3_key) is True
+
+
+async def test_a_failed_swap_leaves_the_old_versions_objects_intact(  # noqa: ANN001
+    sessions, storage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The R-40(3) ordering proof, and the counterpart of the deletion task's
+    crash-between-purge-and-commit test: until the swap commits, v(n) is still the
+    document's live content and its original must survive."""
+    from app.db.repositories.documents import DocumentRepository
+
+    document_id, job_id, _ = await _fixtures(sessions, storage)
+    ctx = _ctx(sessions, storage, _StubScanner())
+    await ingest_document(ctx, str(document_id), str(job_id))
+
+    async with sessions() as session:
+        document = await session.get(Document, document_id)
+        assert document is not None
+        v1_key = _original_key_for(document, version=1)
+
+    v2_job_id = await _stage_replacement(
+        sessions, storage, document_id=document_id, version=2, payload=_pdf(_V2_TEXT)
+    )
+
+    async def _boom(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise RuntimeError("swap failed")
+
+    monkeypatch.setattr(DocumentRepository, "mark_active", _boom)
+
+    with pytest.raises(Retry):
+        await ingest_document(ctx, str(document_id), str(v2_job_id))
+
+    assert await storage.exists(v1_key) is True
+    async with sessions() as session:
+        chunks = DocumentChunkRepository(session)
+        # v1 is still the version serving, rows and all.
+        assert await chunks.list_by_version(document_id, 1) != []
+        document = await session.get(Document, document_id)
+        assert document is not None and document.current_version == 1
+
+
+async def test_a_stale_job_cannot_roll_the_version_pointer_backwards(sessions, storage) -> None:  # noqa: ANN001
+    """R-40(4). `_begin`'s short-circuit pairs `current_version >= document_version` with
+    `status is ACTIVE`, so a stale job against a *non*-ACTIVE document walks straight past
+    it; without the swap guard, `delete_other_versions(keep_version=1)` would then delete
+    the newer version's rows and roll the pointer back to 1.
+    """
+    document_id, job_id, _ = await _fixtures(sessions, storage)
+    ctx = _ctx(sessions, storage, _StubScanner())
+    await ingest_document(ctx, str(document_id), str(job_id))
+
+    v2_job_id = await _stage_replacement(
+        sessions, storage, document_id=document_id, version=2, payload=_pdf(_V2_TEXT)
+    )
+    await ingest_document(ctx, str(document_id), str(v2_job_id))
+
+    async with sessions() as session:
+        document = await session.get(Document, document_id)
+        assert document is not None
+        v2_key = _original_key_for(document, version=2)
+        # A redelivered v1 job arriving after the v2 swap, on a document that is no longer
+        # ACTIVE — so `_begin` cannot short-circuit it.
+        document.status = DocumentStatus.QUEUED
+        stale = KnowledgeJob(
+            document_id=document_id,
+            job_type=JobType.INGEST,
+            status=JobStatus.QUEUED,
+            document_version=1,
+            idempotency_key=f"ingest:{document_id}:v1:stale",
+        )
+        session.add(stale)
+        await session.commit()
+        stale_id = stale.id
+
+    await ingest_document(ctx, str(document_id), str(stale_id))
+
+    async with sessions() as session:
+        document = await session.get(Document, document_id)
+        job = await session.get(KnowledgeJob, stale_id)
+        assert document is not None and job is not None
+        assert document.current_version == 2
+        assert job.status is JobStatus.SUCCEEDED
+        chunks = DocumentChunkRepository(session)
+        assert await chunks.list_by_version(document_id, 2) != []
+    # Nothing was purged: v2 is still the live version.
+    assert await storage.exists(v2_key) is True
 
 
 # --- placement (R-31: ingest in the worker, never in the API process) ---------------
