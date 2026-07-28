@@ -250,6 +250,65 @@ class OpenAISettings(BaseSettings):
     embedding_model: str = Field(default="text-embedding-3-large")
 
 
+class EmbeddingSettings(BaseSettings):
+    """How the worker *drives* the embeddings endpoint (T-205, FR-ING-03).
+
+    Separate from :class:`OpenAISettings` on purpose, following the same split T-203 made
+    between `PARSER_*` and `UPLOAD_*`. Those settings are provider/account facts shared by
+    chat, embeddings and the DeepEval judge — the key, and which model ids to call. These
+    are batching, concurrency and transport for one endpoint; naming them `OPENAI_*` would
+    misfile a worker-throughput knob under the provider account, and the first task that
+    needs a chat timeout would collide on `OPENAI_TIMEOUT_SECONDS`.
+
+    ``backend="fake"`` selects the deterministic in-process client for dev/CI, in the
+    spirit of R-19's sanctioned filesystem object storage and `QUEUE_BACKEND=none`. It is
+    never selected implicitly — see :func:`app.services.embeddings.build_embedding_client`.
+
+    Note `OPENAI_EMBEDDING_MODEL` stays where it is: it is an FR-ING-03 fingerprint input
+    read by the chunker, so renaming it would invalidate every stored fingerprint.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="EMBEDDING_", env_file=".env", extra="ignore")
+
+    backend: Literal["openai", "fake"] = Field(default="openai")
+
+    # Batch shape. Both ceilings come from the API's own documented limits (a 2048-item
+    # array, 300k tokens summed per request). Characters, never `token_count` — R-35(7):
+    # that field is a len/4 estimate and an underestimate is a hard 400 mid-ingestion.
+    max_batch_size: int = Field(default=128)  # TBD(§8.4)
+    max_batch_chars: int = Field(default=200_000)  # TBD(§8.4) — 1 token/char, as §138
+    max_concurrent_requests: int = Field(default=4)  # TBD(§8.4)
+
+    # Transport. The SDK's default timeout is 600s — inside an ingestion worker that is a
+    # hang, not a timeout. Ingestion can afford to ride out a rate-limit blip; a chat turn
+    # (T-206) cannot, hence the separate query budget.
+    timeout_seconds: float = Field(default=60.0)  # TBD(§8.4)
+    query_timeout_seconds: float = Field(default=15.0)  # TBD(§8.4)
+    connect_timeout_seconds: float = Field(default=5.0)  # TBD(§8.4)
+    max_retries: int = Field(default=4)  # TBD(§8.4) — SDK default is 2
+    query_max_retries: int = Field(default=1)  # TBD(§8.4)
+
+    @model_validator(mode="after")
+    def _coherent(self) -> EmbeddingSettings:
+        if not 1 <= self.max_batch_size <= 2048:
+            raise ValueError("EMBEDDING_MAX_BATCH_SIZE must be in 1..2048 (the API array limit)")
+        if self.max_batch_chars < EMBEDDING_MAX_INPUT_CHARS:
+            # Not merely a poor setting: a legal maximum-size chunk would fit in no batch
+            # at all, which is a non-terminating loop in the batch planner — the same class
+            # of bug ChunkerSettings guards against for overlap >= target.
+            raise ValueError(
+                "EMBEDDING_MAX_BATCH_CHARS must be >= "
+                f"{EMBEDDING_MAX_INPUT_CHARS:,} (EMBEDDING_MAX_INPUT_CHARS)"
+            )
+        if self.max_concurrent_requests < 1:
+            raise ValueError("EMBEDDING_MAX_CONCURRENT_REQUESTS must be >= 1")
+        if self.timeout_seconds <= 0 or self.query_timeout_seconds <= 0:
+            raise ValueError("EMBEDDING_TIMEOUT_SECONDS values must be > 0")
+        if self.max_retries < 0 or self.query_max_retries < 0:
+            raise ValueError("EMBEDDING_MAX_RETRIES values must be >= 0")
+        return self
+
+
 class KeycloakSettings(BaseSettings):
     """Keycloak (OIDC) connection settings — auth baseline per R-28.
 
@@ -311,6 +370,7 @@ class Settings(BaseSettings):
     redis: RedisSettings = Field(default_factory=RedisSettings)
     ratelimit: RateLimitSettings = Field(default_factory=RateLimitSettings)
     openai: OpenAISettings = Field(default_factory=OpenAISettings)
+    embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     keycloak: KeycloakSettings = Field(default_factory=KeycloakSettings)
 
 

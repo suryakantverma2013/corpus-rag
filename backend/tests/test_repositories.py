@@ -173,7 +173,8 @@ async def test_mark_delete_pending_clears_searchable(session: AsyncSession) -> N
 # --- chunks --------------------------------------------------------------
 
 
-async def test_active_hash_map_and_deactivate(session: AsyncSession) -> None:
+async def test_deactivate_soft_deletes_chunks(session: AsyncSession) -> None:
+    """`is_active` means FR-ING-05 soft-delete only — never version management (R-36(7))."""
     user = await _make_user(session)
     kb = await _make_kb(session, user)
     doc = await _make_document(session, user, kb)
@@ -181,12 +182,9 @@ async def test_active_hash_map_and_deactivate(session: AsyncSession) -> None:
     c0 = await _make_chunk(session, doc, kb, index=0)
     c1 = await _make_chunk(session, doc, kb, index=1)
 
-    hashes = await repo.active_hash_map(doc.id)
-    assert set(hashes) == {c0.id, c1.id}
-    assert hashes[c0.id] == c0.chunk_hash
-
+    assert {chunk.id for chunk in await repo.list_by_document(doc.id)} == {c0.id, c1.id}
     assert await repo.deactivate([c0.id]) == 1
-    assert set(await repo.active_hash_map(doc.id)) == {c1.id}
+    assert {chunk.id for chunk in await repo.list_by_document(doc.id)} == {c1.id}
 
 
 # --- jobs ----------------------------------------------------------------
