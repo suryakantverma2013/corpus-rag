@@ -6,10 +6,12 @@
 # profiles for anyone who lacks a local one:
 #   docker compose --profile minio    up -d   # + MinIO object storage
 #   docker compose --profile postgres up -d   # + pgvector Postgres
+#   docker compose --profile clamav   up -d   # + ClamAV malware scanner (T-207, R-32)
 #
 # Usage (from repo root):
 #   docker compose -f deployment/docker-compose.yml up -d                    # redis only
 #   docker compose -f deployment/docker-compose.yml --profile minio up -d    # redis + minio
+#   docker compose -f deployment/docker-compose.yml --profile clamav up -d   # redis + clamav
 #   docker compose -f deployment/docker-compose.yml down
 #
 # Credentials here are DEV DEFAULTS and match backend/.env(.example). Override via
@@ -71,7 +73,39 @@ services:
       timeout: 5s
       retries: 5
 
+  # Malware screening for the ingestion worker (T-207, ruling R-32 / spec §8.13).
+  # Profile-gated like the other heavyweights: it wants ~2 GB of RAM for the signature
+  # database, so a developer working on the API alone should not have to run it. With the
+  # profile off, set SCANNER_BACKEND=structural — the in-process structural screens still
+  # run (R-38(7)); there is no setting that disables screening entirely.
+  #
+  # First start is slow: freshclam downloads ~1 GB of signatures before clamd accepts
+  # connections, hence the long start_period. The named volume keeps that download from
+  # repeating on every restart.
+  clamav:
+    image: clamav/clamav:latest
+    profiles: ["clamav"]
+    ports:
+      - "3310:3310"
+    volumes:
+      - clamav-data:/var/lib/clamav
+      # StreamMaxLength MUST exceed the 50 MB upload ceiling. clamd's 25 MB default does
+      # not error on a larger stream — it truncates and reports the prefix clean, i.e. it
+      # fails OPEN on exactly the large files most worth scanning (R-32).
+      - ./clamav/clamd.conf:/etc/clamav/clamd.conf:ro
+    # R-32 sizes this as a real service, not a sidecar: the signature database is held in
+    # memory. Starving it makes clamd die under load, which fails ingestion closed —
+    # correct, but a needless outage.
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "clamdcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+
 volumes:
   minio-data:
   redis-data:
   pgdata:
+  clamav-data:

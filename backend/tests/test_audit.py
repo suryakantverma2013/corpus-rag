@@ -5,6 +5,16 @@ RS256 tokens minted with the test keypair — see conftest). The service commits
 the transactional test session, so the written rows are queryable on the same
 ``session`` and rolled back on teardown. ``GET /api/v1/audit`` is exercised for admin
 access, filtering, and the non-admin 403 gate.
+
+**Every assertion here is scoped to the actor the test minted — never to a global count**
+(T-109). `audit_logs` is append-only and nothing truncates it between runs, so
+``len(list_events(event_type=X)) == 1`` is only true on an empty database. Any row
+committed outside the suite's rollback fixture breaks it: a live ingestion smoke writes an
+FR-ING-05/R-31 malware-purge row, and every one of these tests then fails in a way that
+reads like a real regression rather than pollution (T-212 hit exactly this). Each test uses
+a fresh random ``sub``, so ``actor_id=`` makes the count deterministic regardless of what
+else is in the table. The one null-actor case cannot be filtered that way and narrows on
+its own details payload instead.
 """
 
 from __future__ import annotations
@@ -63,7 +73,9 @@ async def test_login_success_audited(
     )
     assert resp.status_code == 200
 
-    rows = await AuditLogRepository(session).list_events(event_type=AuditEventType.AUTH)
+    rows = await AuditLogRepository(session).list_events(
+        event_type=AuditEventType.AUTH, actor_id=sub
+    )
     assert len(rows) == 1
     assert rows[0].actor_id == sub
     assert rows[0].details["action"] == "login"
@@ -82,11 +94,15 @@ async def test_failed_login_audited_with_null_actor(
     )
     assert resp.status_code == 401
 
-    rows = await AuditLogRepository(session).list_events(event_type=AuditEventType.AUTH)
+    # The one row no actor filter can reach, so it is narrowed by its own payload instead.
+    listed = await AuditLogRepository(session).list_events(event_type=AuditEventType.AUTH)
+    rows = [
+        row
+        for row in listed
+        if row.actor_id is None and row.details.get("email") == "x@corpus.local"
+    ]
     assert len(rows) == 1
-    assert rows[0].actor_id is None
     assert rows[0].details["action"] == "login_failed"
-    assert rows[0].details["email"] == "x@corpus.local"
 
 
 async def test_refresh_audited(
@@ -107,7 +123,9 @@ async def test_refresh_audited(
     resp = await client.post("/api/v1/auth/refresh", json={"refresh_token": "r1"})
     assert resp.status_code == 200
 
-    rows = await AuditLogRepository(session).list_events(event_type=AuditEventType.AUTH)
+    rows = await AuditLogRepository(session).list_events(
+        event_type=AuditEventType.AUTH, actor_id=sub
+    )
     assert len(rows) == 1
     assert rows[0].details["action"] == "refresh"
     assert rows[0].actor_id == sub
@@ -128,7 +146,9 @@ async def test_logout_audited_with_subject(
     resp = await client.post("/api/v1/auth/logout", json={"refresh_token": refresh_jwt})
     assert resp.status_code == 204
 
-    rows = await AuditLogRepository(session).list_events(event_type=AuditEventType.AUTH)
+    rows = await AuditLogRepository(session).list_events(
+        event_type=AuditEventType.AUTH, actor_id=sub
+    )
     assert len(rows) == 1
     assert rows[0].details["action"] == "logout"
     # Subject recovered from the (unverified) refresh-token decode.
@@ -155,7 +175,9 @@ async def test_change_password_audited(
     )
     assert resp.status_code == 204
 
-    rows = await AuditLogRepository(session).list_events(event_type=AuditEventType.AUTH)
+    rows = await AuditLogRepository(session).list_events(
+        event_type=AuditEventType.AUTH, actor_id=sub
+    )
     assert len(rows) == 1
     assert rows[0].details["action"] == "password_change"
     assert rows[0].actor_id == sub
@@ -185,7 +207,9 @@ async def test_create_user_audited(
     )
     assert resp.status_code == 201
 
-    rows = await AuditLogRepository(session).list_events(event_type=AuditEventType.USER_ROLE_CHANGE)
+    rows = await AuditLogRepository(session).list_events(
+        event_type=AuditEventType.USER_ROLE_CHANGE, actor_id=admin_sub
+    )
     assert len(rows) == 1
     assert rows[0].actor_id == admin_sub
     assert rows[0].target_id == str(new_sub)
@@ -217,7 +241,7 @@ async def test_promote_writes_permission_change(
     assert resp.status_code == 200
 
     perm = await AuditLogRepository(session).list_events(
-        event_type=AuditEventType.PERMISSION_CHANGE
+        event_type=AuditEventType.PERMISSION_CHANGE, actor_id=admin_sub
     )
     assert len(perm) == 1
     assert perm[0].actor_id == admin_sub
@@ -241,7 +265,9 @@ async def test_delete_user_audited(
     resp = await client.delete(f"/api/v1/users/{target}", headers=headers)
     assert resp.status_code == 204
 
-    rows = await AuditLogRepository(session).list_events(event_type=AuditEventType.USER_ROLE_CHANGE)
+    rows = await AuditLogRepository(session).list_events(
+        event_type=AuditEventType.USER_ROLE_CHANGE, actor_id=admin_sub
+    )
     assert len(rows) == 1
     assert rows[0].details["action"] == "delete"
     assert rows[0].target_id == str(target)
@@ -266,11 +292,19 @@ async def test_get_audit_returns_and_filters(
     )
     await session.commit()
 
+    # Assertions are scoped to the two actors this test minted, never to the whole table.
+    # `audit_logs` is append-only with no per-test cleanup, so a global count is only ever
+    # right on an empty database — and anything that commits an audit row outside the
+    # suite's rollback fixture (a live ingestion smoke, for instance) makes it fail in a
+    # way that reads like a genuine regression.
     resp = await client.get("/api/v1/audit", headers=headers)
     assert resp.status_code == 200
-    assert len(resp.json()) == 2
+    mine = [row for row in resp.json() if row["actor_id"] in {str(actor), str(admin_sub)}]
+    assert len(mine) == 2
 
-    resp = await client.get("/api/v1/audit", headers=headers, params={"event_type": "AUTH"})
+    resp = await client.get(
+        "/api/v1/audit", headers=headers, params={"event_type": "AUTH", "actor_id": str(actor)}
+    )
     body = resp.json()
     assert len(body) == 1
     assert body[0]["event_type"] == "AUTH"

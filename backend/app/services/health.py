@@ -19,8 +19,23 @@ Coverage per NFR-REL-02:
   bucket check also proves the credentials and the bucket, and it is correct when the
   filesystem backend is selected, where MinIO may legitimately not be running at all.
 
-Worker readiness (also named in NFR-REL-02) is out of scope until the arq worker
-exists (T-207).
+**Worker readiness is a separate surface** (T-207, R-38(2)). NFR-REL-02 asks for readiness
+"for the API and workers", and R-32 adds a ``clamd`` probe to the worker's — but folding
+either into :func:`run_readiness_checks` would make the API report `503` and get pulled
+from the load balancer because ClamAV is down, while it can still serve every chat and
+retrieval request. So `/health/ready` keeps exactly the R-29 contract above, and
+:func:`run_worker_readiness_checks` backs `/health/ready/worker`: two probe targets for two
+deployables.
+
+The worker arm adds:
+
+* **clamav** — ``PING`` over the T-207 INSTREAM client. Only probed when
+  ``SCANNER_BACKEND=clamav``; under ``structural`` there is no daemon to reach and
+  reporting one down would be a false alarm.
+* **worker** — the arq heartbeat key. arq's ``record_health`` rewrites it every
+  ``health_check_interval`` with a TTL of ``interval + 1``, so the key's *existence* is
+  the liveness signal and expiry does the timing for us — no clock comparison, and no
+  false "alive" from a worker that died an hour ago.
 """
 
 from __future__ import annotations
@@ -35,6 +50,8 @@ from sqlalchemy import text
 
 from app.config import get_settings
 from app.db.session import get_engine
+from app.services.clamav import get_clamav_client
+from app.services.jobs import WORKER_HEALTH_CHECK_KEY
 from app.services.object_storage import get_object_storage
 
 # Per-probe wall-clock ceiling. Provisional pending the §8.4 decision. Kept short so
@@ -105,6 +122,47 @@ async def check_object_storage() -> CheckResult:
         return _error(exc)
 
 
+async def check_clamav() -> CheckResult:
+    """Probe `clamd` with ``PING`` (R-32; worker readiness only)."""
+    started = time.perf_counter()
+    try:
+        async with asyncio.timeout(_PROBE_TIMEOUT):
+            await get_clamav_client().ping()
+        return _ok(started)
+    except Exception as exc:  # noqa: BLE001
+        return _error(exc)
+
+
+async def check_worker() -> CheckResult:
+    """Probe for a live arq worker via its heartbeat key.
+
+    arq rewrites the key every ``health_check_interval`` with a TTL of ``interval + 1``,
+    so a missing key means no worker has checked in within that window. Reading existence
+    rather than parsing the payload's timestamp keeps Redis's expiry as the single clock —
+    there is nothing here to skew against the worker's.
+    """
+    started = time.perf_counter()
+    client: aioredis.Redis | None = None
+    try:
+        async with asyncio.timeout(_PROBE_TIMEOUT):
+            client = aioredis.from_url(
+                get_settings().redis.url, socket_connect_timeout=_PROBE_TIMEOUT
+            )
+            raw = await client.get(WORKER_HEALTH_CHECK_KEY)
+        if raw is None:
+            interval = get_settings().worker.heartbeat_seconds
+            return CheckResult(
+                status="error",
+                error=f"no arq worker heartbeat in the last {interval:g}s",
+            )
+        return _ok(started)
+    except Exception as exc:  # noqa: BLE001
+        return _error(exc)
+    finally:
+        if client is not None:
+            await client.aclose()
+
+
 async def run_readiness_checks() -> tuple[bool, dict[str, object]]:
     """Run every probe concurrently and aggregate.
 
@@ -116,6 +174,42 @@ async def run_readiness_checks() -> tuple[bool, dict[str, object]]:
         check_database(), check_broker(), check_object_storage()
     )
     checks = {"database": database, "broker": broker, "object_storage": object_storage}
+    return _aggregate(checks)
+
+
+async def run_worker_readiness_checks() -> tuple[bool, dict[str, object]]:
+    """Readiness for the ingestion worker deployable (T-207, R-38(2)).
+
+    The worker's own dependency set — everything the API needs, because the ingestion task
+    reads the database, the broker and object storage, plus the scanner it must not run
+    without. Same ``(all_ok, payload)`` shape and same 200/503 rule as the API arm, so an
+    orchestrator configures it identically against a different path.
+    """
+    scanner_enabled = get_settings().scanner.backend == "clamav"
+
+    database, broker, object_storage, worker, clamav = await asyncio.gather(
+        check_database(),
+        check_broker(),
+        check_object_storage(),
+        check_worker(),
+        check_clamav() if scanner_enabled else _skipped("SCANNER_BACKEND=structural"),
+    )
+    checks = {
+        "database": database,
+        "broker": broker,
+        "object_storage": object_storage,
+        "worker": worker,
+        "clamav": clamav,
+    }
+    return _aggregate(checks)
+
+
+async def _skipped(reason: str) -> CheckResult:
+    """A probe that does not apply to this configuration. Counts as passing."""
+    return CheckResult(status="ok", error=f"not probed: {reason}")
+
+
+def _aggregate(checks: dict[str, CheckResult]) -> tuple[bool, dict[str, object]]:
     all_ok = all(check.status == "ok" for check in checks.values())
     payload: dict[str, object] = {
         "status": "ok" if all_ok else "degraded",

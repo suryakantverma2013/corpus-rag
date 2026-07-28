@@ -341,6 +341,9 @@ async def _store_and_record(
             document_id=document_id,
             job_type=JobType.INGEST,
             status=JobStatus.QUEUED,
+            # The version the T-207 worker will build (R-38(1)). Must stay in step with
+            # the `v{n}` suffix below, but this column is what the worker reads.
+            document_version=_INITIAL_VERSION,
             # Deterministic and version-scoped: a T-208 retry of this version reuses the
             # key and short-circuits (FR-ING-04); T-209's replace mints a fresh one for v2.
             idempotency_key=f"ingest:{document_id}:v{_INITIAL_VERSION}",

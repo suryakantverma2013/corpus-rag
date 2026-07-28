@@ -36,6 +36,16 @@ log = structlog.get_logger(__name__)
 #: Changing it silently orphans every queued job — treat it as a wire contract.
 INGEST_TASK_NAME = "ingest_document"
 
+#: Redis key the worker heartbeats into, and the `/health/ready/worker` liveness signal
+#: (R-38(2)). arq writes it with a TTL of `health_check_interval + 1`, so its mere
+#: existence means "a worker was alive within the last interval".
+#:
+#: Spelled out rather than derived from `arq.constants` so the API process — which must
+#: read this key but has no reason to import arq — and `workers.main`, which sets it
+#: explicitly, cannot drift apart. The value matches arq's own default
+#: (`default_queue_name + health_check_key_suffix`), and a test pins that equivalence.
+WORKER_HEALTH_CHECK_KEY = "arq:queue:health-check"
+
 
 class JobQueueError(Exception):
     """The job could not be handed to the broker."""

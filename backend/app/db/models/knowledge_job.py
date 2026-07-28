@@ -27,6 +27,15 @@ class KnowledgeJob(CreatedAtMixin, Base):
         UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False
     )
     job_type: Mapped[JobType] = mapped_column(str_enum(JobType), nullable=False)
+    # Which `document_chunks.document_version` this job builds (R-38(1), T-207).
+    #
+    # The worker cannot read this from `documents.current_version`: under R-36(3) a
+    # replace keeps `current_version` pointing at the *old* version until the swap
+    # commits, precisely so the old version keeps serving retrieval while the new one is
+    # built. So the target has to travel with the job. T-202 writes 1; T-209's replace
+    # will write n+1. Kept in step with `idempotency_key`'s `ingest:{doc}:v{n}` suffix,
+    # but this column — not that string — is what the worker reads.
+    document_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     status: Mapped[JobStatus] = mapped_column(str_enum(JobStatus), nullable=False)
     progress: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))

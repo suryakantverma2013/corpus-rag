@@ -4,6 +4,11 @@ The endpoint tests monkeypatch the ``check_*`` probes so they run without live
 Postgres/Redis/MinIO and assert the 200/503 aggregation contract. One guarded test
 exercises the real DB probe against the local ``corpus`` database, skipping (like the
 conftest ``session`` fixture) when Postgres is unreachable.
+
+Extended by T-207 with ``/health/ready/worker`` (R-38(2)). The test that matters most
+there is ``test_clamav_down_takes_the_worker_probe_down_but_not_the_api`` — the whole
+reason for splitting the two paths is that ClamAV being unavailable must not evict the API
+from a load balancer while it can still serve every chat and retrieval request.
 """
 
 from __future__ import annotations
@@ -14,9 +19,11 @@ import httpx
 import pytest
 from httpx import ASGITransport
 
+from app.config import ScannerSettings, Settings
 from app.main import create_app
 from app.services import health
 from app.services.health import CheckResult
+from app.services.jobs import WORKER_HEALTH_CHECK_KEY
 
 
 @pytest.fixture
@@ -34,6 +41,15 @@ def _patch_all_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(health, "check_database", _ok)
     monkeypatch.setattr(health, "check_broker", _ok)
     monkeypatch.setattr(health, "check_object_storage", _ok)
+    monkeypatch.setattr(health, "check_worker", _ok)
+    monkeypatch.setattr(health, "check_clamav", _ok)
+
+
+def _down(error: str):  # noqa: ANN202
+    async def _probe() -> CheckResult:
+        return CheckResult(status="error", error=error)
+
+    return _probe
 
 
 async def test_liveness_ok(probe_client: httpx.AsyncClient) -> None:
@@ -76,6 +92,125 @@ async def test_readiness_broker_down_returns_503(
     # Healthy dependencies are still reported as ok alongside the failed one.
     assert body["checks"]["database"]["status"] == "ok"
     assert body["checks"]["object_storage"]["status"] == "ok"
+
+
+# --- worker readiness (T-207, R-38(2)) --------------------------------------------
+
+
+async def test_worker_readiness_all_up(
+    probe_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_all_ok(monkeypatch)
+
+    resp = await probe_client.get("/health/ready/worker")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert set(body["checks"]) == {
+        "database",
+        "broker",
+        "object_storage",
+        "worker",
+        "clamav",
+    }
+
+
+async def test_a_missing_heartbeat_fails_the_worker_probe(
+    probe_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_all_ok(monkeypatch)
+    monkeypatch.setattr(health, "check_worker", _down("no arq worker heartbeat"))
+
+    resp = await probe_client.get("/health/ready/worker")
+
+    assert resp.status_code == 503
+    assert resp.json()["checks"]["worker"]["status"] == "error"
+
+
+async def test_clamav_down_takes_the_worker_probe_down_but_not_the_api(
+    probe_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-38(2)'s entire justification, asserted directly.
+
+    One unreachable ClamAV, two different answers: the worker cannot ingest (R-32 fails
+    closed), but the API can still serve every chat and retrieval request, so evicting it
+    from the load balancer would be an outage manufactured out of a degraded dependency.
+    """
+    _patch_all_ok(monkeypatch)
+    monkeypatch.setattr(health, "check_clamav", _down("ConnectionRefusedError"))
+
+    worker = await probe_client.get("/health/ready/worker")
+    api = await probe_client.get("/health/ready")
+
+    assert worker.status_code == 503
+    assert worker.json()["checks"]["clamav"]["status"] == "error"
+
+    assert api.status_code == 200
+    assert "clamav" not in api.json()["checks"]
+
+
+async def test_the_clamav_probe_is_skipped_when_no_daemon_is_configured(
+    probe_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under `SCANNER_BACKEND=structural` there is no daemon; reporting one down is noise."""
+    _patch_all_ok(monkeypatch)
+
+    def _structural() -> Settings:
+        return Settings(scanner=ScannerSettings(backend="structural"))
+
+    monkeypatch.setattr(health, "get_settings", _structural)
+    monkeypatch.setattr(
+        health, "check_clamav", _down("should not be called under SCANNER_BACKEND=structural")
+    )
+
+    resp = await probe_client.get("/health/ready/worker")
+
+    assert resp.status_code == 200
+    assert resp.json()["checks"]["clamav"]["status"] == "ok"
+    assert "structural" in resp.json()["checks"]["clamav"]["error"]
+
+
+async def test_the_worker_probe_reads_the_arq_heartbeat_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercises the real probe body against a stubbed Redis client."""
+    seen: list[str] = []
+
+    class _Redis:
+        async def get(self, key: str) -> bytes | None:
+            seen.append(key)
+            return b"Jul-28 16:00:00 j_complete=3 j_failed=0"
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(health.aioredis, "from_url", lambda *a, **k: _Redis())  # noqa: ARG005
+
+    result = await health.check_worker()
+
+    assert result.status == "ok"
+    assert seen == [WORKER_HEALTH_CHECK_KEY]
+
+
+async def test_the_worker_probe_fails_when_the_key_has_expired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """arq sets a TTL of `heartbeat + 1`, so an absent key means nobody checked in."""
+
+    class _Redis:
+        async def get(self, key: str) -> bytes | None:
+            return None
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(health.aioredis, "from_url", lambda *a, **k: _Redis())  # noqa: ARG005
+
+    result = await health.check_worker()
+
+    assert result.status == "error"
+    assert "heartbeat" in (result.error or "")
 
 
 async def test_database_probe_against_local_db() -> None:

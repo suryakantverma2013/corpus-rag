@@ -65,6 +65,40 @@ class DocumentRepository(BaseRepository[Document]):
         await self.session.flush()
         return document
 
+    async def mark_active(
+        self,
+        document: Document,
+        *,
+        chunk_count: int,
+        current_version: int,
+        page_count: int | None = None,
+    ) -> Document:
+        """The end of a successful ingestion (T-207) — five writes that must land together.
+
+        The caller commits this in the **same transaction** as `persist_chunk_set`, and
+        that commit *is* R-36(3)'s swap: readers see the previous version until it lands
+        and only the new one after.
+
+        **`current_version` is not bookkeeping.** T-206's retrieval query filters
+        `document_chunks.document_version = documents.current_version` (R-37(9)), and
+        `persist_chunk_set` deliberately does not touch the pointer. Advance it here or a
+        re-ingested document reaches `ACTIVE`, lists in the KB modal, and matches nothing
+        at all — a failure that is invisible until someone asks a question about it.
+
+        `error_message` is cleared: a document that failed, was retried and now serves must
+        not keep showing the old reason in the FR-KBM-04 surface.
+        """
+        document.status = DocumentStatus.ACTIVE
+        document.chunk_count = chunk_count
+        document.current_version = current_version
+        if page_count is not None:
+            document.page_count = page_count
+        # FR-RET-04: nothing retrieves a document until it is genuinely queryable.
+        document.searchable = True
+        document.error_message = None
+        await self.session.flush()
+        return document
+
     async def mark_delete_pending(self, document: Document) -> Document:
         """Synchronous deletion gate: DELETE_PENDING + not searchable (FR-ING-05)."""
         document.status = DocumentStatus.DELETE_PENDING

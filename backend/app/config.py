@@ -206,6 +206,125 @@ class RedisSettings(BaseSettings):
     url: str = Field(default="redis://localhost:6379/0")
 
 
+class WorkerSettings(BaseSettings):
+    """How the arq ingestion worker runs (T-207, FR-ING-04, NFR-REL-01).
+
+    Named for the process, not the broker: :class:`QueueSettings` selects *how the API
+    dispatches*, :class:`RedisSettings` is *where*, and these are the worker's own
+    execution policy. `workers.main.WorkerSettings` (arq's class, same name, different
+    module) reads every value here — nothing else does.
+
+    **`max_tries` is load-bearing beyond arq's own use of it.** arq checks it at the top
+    of `run_job` and, once exceeded, finishes the job *without invoking the task at all*
+    (`arq/worker.py`), so the task can never observe its own dead-letter. `workers.ingest`
+    therefore reads this same value to detect the final attempt and write
+    `JobStatus.DEAD_LETTER` itself — the two must not drift, which is why there is one
+    setting and not an arq knob plus a task constant.
+
+    ``heartbeat_seconds`` is likewise not cosmetic: arq's `record_health` writes the
+    health-check key with a TTL of ``interval + 1``, and that TTL *is* the
+    `/health/ready/worker` signal (R-38(2)). arq's own default is 3600 s, which would make
+    the probe useless.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="WORKER_", env_file=".env", extra="ignore")
+
+    max_tries: int = Field(default=5)  # TBD(§8.4)
+    # Wall-clock ceiling for one ingestion attempt. Generous because a 50 MB PDF's parse
+    # and a multi-batch embedding run are both minutes-scale; note that the parser and
+    # chunker run in `asyncio.to_thread`, which **cannot be cancelled**, so this bounds
+    # the worker's bookkeeping, not the thread (see `app.ingestion.parsers`).
+    job_timeout_seconds: float = Field(default=900.0)  # TBD(§8.4)
+    max_jobs: int = Field(default=4)  # TBD(§8.4)
+
+    # Retry backoff: min(base * 2**(job_try - 1), max), jittered. arq does not back off on
+    # its own — a plain exception is not even retried — so `workers.ingest` computes this
+    # and raises `arq.worker.Retry(defer=...)`.
+    retry_base_seconds: float = Field(default=10.0)  # TBD(§8.4)
+    retry_max_seconds: float = Field(default=600.0)  # TBD(§8.4)
+
+    heartbeat_seconds: float = Field(default=30.0)  # TBD(§8.4)
+
+    # ENQUEUE_FAILED sweeper (T-202 commits the job row and returns 202 even when the
+    # broker is down). `min_age` keeps the sweeper off jobs a live enqueue is still
+    # racing to dispatch.
+    sweep_interval_seconds: float = Field(default=300.0)  # TBD(§8.4)
+    sweep_min_age_seconds: float = Field(default=120.0)  # TBD(§8.4)
+    sweep_batch_size: int = Field(default=100)  # TBD(§8.4)
+
+    @model_validator(mode="after")
+    def _coherent(self) -> WorkerSettings:
+        if self.max_tries < 1:
+            raise ValueError("WORKER_MAX_TRIES must be >= 1")
+        if self.max_jobs < 1:
+            raise ValueError("WORKER_MAX_JOBS must be >= 1")
+        if self.job_timeout_seconds <= 0:
+            raise ValueError("WORKER_JOB_TIMEOUT_SECONDS must be > 0")
+        if self.retry_base_seconds <= 0 or self.retry_max_seconds < self.retry_base_seconds:
+            raise ValueError("WORKER_RETRY_MAX_SECONDS must be >= WORKER_RETRY_BASE_SECONDS > 0")
+        if self.heartbeat_seconds <= 0:
+            raise ValueError("WORKER_HEARTBEAT_SECONDS must be > 0")
+        if self.sweep_min_age_seconds < 0 or self.sweep_interval_seconds <= 0:
+            raise ValueError("WORKER_SWEEP_* seconds must be positive")
+        return self
+
+
+class ScannerSettings(BaseSettings):
+    """Malware-screening backend selection (T-207, R-31 §8.12 / R-32 §8.13).
+
+    ``backend="structural"`` disables only the **signature** screen — the in-process
+    structural checks (disguised DOCM, PDF active content) always run. That asymmetry is
+    deliberate (R-38(7)): a dev box without a 2 GB `clamd` still gets the cheap screens,
+    and there is no setting anywhere that turns *all* screening off.
+
+    Note this is not the fail-open escape hatch R-32 forbids. Selecting `structural` is an
+    explicit, logged deployment choice; an *unreachable* `clamd` under `backend="clamav"`
+    still fails the job closed.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="SCANNER_", env_file=".env", extra="ignore")
+
+    backend: Literal["clamav", "structural"] = Field(default="clamav")
+
+
+class ClamAVSettings(BaseSettings):
+    """`clamd` connection for the INSTREAM signature screen (T-207, R-32).
+
+    R-32 selects ClamAV reached by a small in-tree async client rather than the sync,
+    unmaintained `clamd`/`pyclamd` PyPI packages — so there is no SDK to configure here,
+    only the socket and the framing.
+
+    ``max_stream_bytes`` is a **safety control, not a tuning knob** (R-38(6)). R-32 makes
+    `StreamMaxLength > 50 MB` normative because clamd's 25 MB default *fails open*: it
+    truncates the stream and reports the truncated prefix clean. No INSTREAM command
+    reports the daemon's configured limit, so a misconfigured `clamd` is undetectable at
+    runtime. The client therefore refuses to stream a payload above this value rather than
+    risk a silent truncation, and :class:`Settings` rejects a value below
+    ``UPLOAD_MAX_FILE_BYTES`` at boot. Keep it in step with `deployment/clamav/clamd.conf`.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="CLAMAV_", env_file=".env", extra="ignore")
+
+    host: str = Field(default="localhost")
+    port: int = Field(default=3310)
+    # A cold clamd can take a while on a large archive; this is the whole-scan budget.
+    timeout_seconds: float = Field(default=120.0)  # TBD(§8.4)
+    # Readiness probes must fail fast — they are not scanning anything.
+    ping_timeout_seconds: float = Field(default=2.0)  # TBD(§8.4)
+    # INSTREAM chunk size. clamd rejects any single chunk above its own limit; 64 KiB is
+    # the size the reference client uses.
+    chunk_bytes: int = Field(default=64 * 1024)
+    max_stream_bytes: int = Field(default=100 * 1024 * 1024)  # must exceed FR-ERR-01's 50 MB
+
+    @model_validator(mode="after")
+    def _coherent(self) -> ClamAVSettings:
+        if self.chunk_bytes < 1024:
+            raise ValueError("CLAMAV_CHUNK_BYTES must be >= 1024")
+        if self.timeout_seconds <= 0 or self.ping_timeout_seconds <= 0:
+            raise ValueError("CLAMAV_*_TIMEOUT_SECONDS must be > 0")
+        return self
+
+
 class RateLimitSettings(BaseSettings):
     """slowapi rate limiting — auth/chat/upload throttle (NFR-SEC-07, T-105).
 
@@ -309,6 +428,71 @@ class EmbeddingSettings(BaseSettings):
         return self
 
 
+class RetrievalSettings(BaseSettings):
+    """Hybrid retrieval shape — dense + sparse arms and their fusion (T-206, R-37).
+
+    Retrieval-quality knobs, not limits: nothing here rejects a query. Unlike the
+    `CHUNKER_*` settings none of these is an FR-ING-03 fingerprint input, so all of them are
+    tunable at zero re-embed cost.
+
+    ``fts_language`` is the one setting here with a hard external coupling: the T-101 GIN
+    index is built on the literal expression ``to_tsvector('english', chunk_text)``, and
+    Postgres serves a functional index only for a query whose expression matches it. Change
+    this without rebuilding that index and the sparse arm silently degrades to a sequential
+    scan over every chunk — correct answers, unusable latency. Hence the validator.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="RETRIEVAL_", env_file=".env", extra="ignore")
+
+    # Per-arm candidate depth, fetched before fusion.
+    dense_candidates: int = Field(default=50)  # TBD(§8.4)
+    sparse_candidates: int = Field(default=50)  # TBD(§8.4)
+
+    # RRF damping (R-37(1)). 60 is the value from the original Cormack et al. formulation
+    # and the de-facto default; it is large enough that one arm's rank-1 hit does not by
+    # itself outrank a chunk both arms returned.
+    rrf_k: int = Field(default=60)  # TBD(§8.4)
+
+    # How many fused candidates hybrid search returns. This is the reranker's input, NOT
+    # the FR-RET-02 top-K — that one is the count of *reranked* passages that become the
+    # grounding context, it belongs to T-306, and it is still an open §8.4 TBD.
+    fusion_top_k: int = Field(default=30)  # TBD(§8.4)
+
+    # HNSW search-list size. pgvector's default is 40, so any deeper candidate fetch
+    # silently loses recall without raising this — the index simply cannot produce that
+    # many neighbours from a list it never grew.
+    hnsw_ef_search: int = Field(default=100)  # TBD(§8.4)
+
+    #: Must match the T-101 index expression verbatim — see the class docstring.
+    fts_language: str = Field(default="english")
+
+    #: R-35(5) / R-37(6) adjacent-overlap dedupe. A kill switch for diagnosis, not a taste.
+    dedupe_adjacent: bool = Field(default=True)
+
+    @model_validator(mode="after")
+    def _coherent(self) -> RetrievalSettings:
+        if self.dense_candidates < 1 or self.sparse_candidates < 1:
+            raise ValueError("RETRIEVAL_*_CANDIDATES must be >= 1")
+        if self.rrf_k < 1:
+            raise ValueError("RETRIEVAL_RRF_K must be >= 1")
+        if self.fusion_top_k < 1:
+            raise ValueError("RETRIEVAL_FUSION_TOP_K must be >= 1")
+        if self.hnsw_ef_search < self.dense_candidates:
+            # Not a preference: HNSW cannot return more rows than its search list holds, so
+            # this configuration asks for candidates the index will never produce.
+            raise ValueError(
+                "RETRIEVAL_HNSW_EF_SEARCH must be >= RETRIEVAL_DENSE_CANDIDATES "
+                "(HNSW cannot return more neighbours than its search list)"
+            )
+        if self.fts_language != "english":
+            raise ValueError(
+                "RETRIEVAL_FTS_LANGUAGE must be 'english' to match the "
+                "ix_document_chunks_chunk_text_fts index expression; changing it requires "
+                "a migration that rebuilds that index"
+            )
+        return self
+
+
 class KeycloakSettings(BaseSettings):
     """Keycloak (OIDC) connection settings — auth baseline per R-28.
 
@@ -368,10 +552,29 @@ class Settings(BaseSettings):
     chunker: ChunkerSettings = Field(default_factory=ChunkerSettings)
     queue: QueueSettings = Field(default_factory=QueueSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
+    worker: WorkerSettings = Field(default_factory=WorkerSettings)
+    scanner: ScannerSettings = Field(default_factory=ScannerSettings)
+    clamav: ClamAVSettings = Field(default_factory=ClamAVSettings)
     ratelimit: RateLimitSettings = Field(default_factory=RateLimitSettings)
     openai: OpenAISettings = Field(default_factory=OpenAISettings)
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
+    retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
     keycloak: KeycloakSettings = Field(default_factory=KeycloakSettings)
+
+    @model_validator(mode="after")
+    def _coherent(self) -> Settings:
+        # R-38(6): the one invariant that spans two groups, so it cannot live on either.
+        # A `clamd` stream ceiling below the upload ceiling means the largest legal upload
+        # is unscannable — and the failure mode R-32 names is that clamd *truncates* and
+        # reports the prefix clean, i.e. it fails open silently. Refuse to boot instead.
+        if self.clamav.max_stream_bytes < self.upload.max_file_bytes:
+            raise ValueError(
+                f"CLAMAV_MAX_STREAM_BYTES ({self.clamav.max_stream_bytes:,}) must be >= "
+                f"UPLOAD_MAX_FILE_BYTES ({self.upload.max_file_bytes:,}) — a smaller value "
+                "leaves the largest legal upload unscannable (R-32, §8.13). Raise it here "
+                "and in clamd.conf's StreamMaxLength together."
+            )
+        return self
 
 
 @lru_cache

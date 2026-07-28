@@ -290,11 +290,21 @@ async def test_retrieval_never_sees_two_versions_of_a_chunk(session: AsyncSessio
     chunked = _chunked(_PAGES)
     await _ingest(session, doc, chunked, 1)
     await _ingest(session, doc, chunked, 2)
+    # T-207 moves this pointer in the same transaction as the swap. T-206's retriever
+    # filters `document_version = documents.current_version` (R-37(9)), so a swap that
+    # writes v2 rows without advancing the pointer makes the document unretrievable —
+    # which is precisely the coupling this line stands in for until T-207 exists.
+    doc.current_version = 2
+    await session.flush()
 
     client = FakeEmbeddingClient()
     query = await client.embed_query(_PAGES[0])
     hits = await PgVectorRetriever(session).search(
-        query, filters=RetrievalFilter(tenant_id=DEFAULT_TENANT_ID, document_ids=[doc.id])
+        _PAGES[0],
+        query,
+        filters=RetrievalFilter(
+            owner_id=doc.owner_id, tenant_id=DEFAULT_TENANT_ID, document_ids=[doc.id]
+        ),
     )
     assert len(hits) == 3
     assert len({hit.chunk_index for hit in hits}) == 3

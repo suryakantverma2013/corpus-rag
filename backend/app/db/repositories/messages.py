@@ -19,10 +19,14 @@ class MessageRepository(BaseRepository[Message]):
     model = Message
 
     async def list_by_conversation(self, conversation_id: uuid.UUID) -> list[Message]:
+        """Oldest first, ordered by `seq` — never by `created_at` (T-108).
+
+        A turn writes the user message and the answer in one transaction, so they share a
+        `created_at` (`now()` is the transaction timestamp) and any tiebreak on the random
+        UUID `id` is a coin flip on showing the answer above the question.
+        """
         stmt = (
-            select(Message)
-            .where(Message.conversation_id == conversation_id)
-            .order_by(Message.created_at, Message.id)
+            select(Message).where(Message.conversation_id == conversation_id).order_by(Message.seq)
         )
         return list((await self.session.scalars(stmt)).all())
 

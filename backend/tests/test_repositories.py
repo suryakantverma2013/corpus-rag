@@ -215,12 +215,24 @@ async def test_job_idempotency_and_status_timestamps(session: AsyncSession) -> N
 
 
 async def test_conversation_ordering_and_rename(session: AsyncSession) -> None:
+    """FR-SBR-03 sidebar order survives a rename in the same transaction (T-108).
+
+    The bug this pins: `TimestampMixin.updated_at` defaults to `now()`, the *transaction*
+    timestamp, so renaming A gave it exactly B's timestamp and "most recently updated
+    first" decided the sidebar on a random-UUID tiebreak. `Conversation` overrides the
+    column to `clock_timestamp()`, which advances mid-transaction.
+    """
     user = await _make_user(session)
     repo = ConversationRepository(session)
     a = await repo.add(Conversation(owner_id=user.id, tenant_id=DEFAULT_TENANT_ID, title="A"))
     b = await repo.add(Conversation(owner_id=user.id, tenant_id=DEFAULT_TENANT_ID, title="B"))
     # Touch A so it becomes most-recently-updated.
     await repo.rename(a, "A renamed")
+
+    # The root-cause assertion: the clock actually moved inside the transaction. Without
+    # it the ordering below would pass or fail on the value of two random UUIDs.
+    assert a.updated_at > b.updated_at
+
     listed = await repo.list_by_owner(user.id)
     assert [c.id for c in listed][0] == a.id
     assert {c.id for c in listed} == {a.id, b.id}
@@ -244,6 +256,42 @@ async def test_message_feedback_and_evaluation(session: AsyncSession) -> None:
     assert ai.evaluation["faithfulness"] == 0.95
 
 
+async def test_message_order_survives_a_shared_created_at(session: AsyncSession) -> None:
+    """Messages written in one transaction keep insertion order (T-108).
+
+    Eight rather than two, because the old `(created_at, id)` ordering was a *coin flip*:
+    a two-message test passed half the time by luck, which is how this survived from T-102
+    to T-207. With eight the odds of the broken implementation passing are 1 in 8! — and
+    the first assertion below proves the tie condition it needs is genuinely present, so
+    the test cannot quietly stop exercising the bug if `created_at` ever changes.
+    """
+    user = await _make_user(session)
+    conv = await ConversationRepository(session).add(
+        Conversation(owner_id=user.id, tenant_id=DEFAULT_TENANT_ID, title="chat")
+    )
+    repo = MessageRepository(session)
+    written = [
+        await repo.add(
+            Message(
+                conversation_id=conv.id,
+                role=MessageRole.USER if i % 2 == 0 else MessageRole.AI,
+                content=f"turn {i}",
+            )
+        )
+        for i in range(8)
+    ]
+
+    # The tie is real: `now()` is frozen for the transaction, so every row shares it.
+    assert len({m.created_at for m in written}) == 1
+
+    listed = await repo.list_by_conversation(conv.id)
+    assert [m.content for m in listed] == [f"turn {i}" for i in range(8)]
+    # `seq` is what carries the order, and it is strictly increasing.
+    seqs = [m.seq for m in listed]
+    assert seqs == sorted(seqs)
+    assert len(set(seqs)) == len(seqs)
+
+
 # --- retrieval (OI-18 interface) ----------------------------------------
 
 
@@ -261,7 +309,10 @@ async def test_dense_search_ranks_and_filters(session: AsyncSession) -> None:
 
     retriever = PgVectorRetriever(session)
     hits = await retriever.search(
-        _onehot(1), filters=RetrievalFilter(knowledge_base_ids=[kb.id]), top_k=3
+        "anything",
+        _onehot(1),
+        filters=RetrievalFilter(owner_id=user.id, knowledge_base_ids=[kb.id]),
+        top_k=3,
     )
     assert hits, "expected results"
     # Nearest is the matching one-hot vector, with cosine similarity ~1.0.
@@ -270,7 +321,10 @@ async def test_dense_search_ranks_and_filters(session: AsyncSession) -> None:
 
     # A different KB scope returns nothing (in-query access filter, FR-RET-04).
     other = await retriever.search(
-        _onehot(1), filters=RetrievalFilter(knowledge_base_ids=[uuid.uuid4()]), top_k=3
+        "anything",
+        _onehot(1),
+        filters=RetrievalFilter(owner_id=user.id, knowledge_base_ids=[uuid.uuid4()]),
+        top_k=3,
     )
     assert other == []
 
@@ -282,7 +336,10 @@ async def test_dense_search_excludes_inactive(session: AsyncSession) -> None:
     await _make_chunk(session, doc, kb, index=0, embedding=_onehot(0), is_active=False)
 
     hits = await PgVectorRetriever(session).search(
-        _onehot(0), filters=RetrievalFilter(knowledge_base_ids=[kb.id]), top_k=3
+        "anything",
+        _onehot(0),
+        filters=RetrievalFilter(owner_id=user.id, knowledge_base_ids=[kb.id]),
+        top_k=3,
     )
     assert hits == []
 
@@ -295,23 +352,37 @@ async def test_audit_log_record_and_filtered_list(session: AsyncSession) -> None
     other = await _make_user(session)
     repo = AuditLogRepository(session)
 
-    await repo.record(
+    # `audit_logs` is append-only and nothing truncates it between tests, so every
+    # assertion below is scoped to the rows this test created. A global count is only ever
+    # right on an empty database, and a single committed row from outside the suite's
+    # rollback fixture — a live ingestion smoke writes one — turns it into a failure that
+    # looks like a genuine regression rather than test pollution.
+    login = await repo.record(
         event_type=AuditEventType.AUTH, actor_id=actor.id, details={"action": "login"}
     )
-    await repo.record(
+    role_change = await repo.record(
         event_type=AuditEventType.USER_ROLE_CHANGE,
         actor_id=actor.id,
         target_id=str(other.id),
         details={"action": "create"},
     )
-    # A pre-auth failed login (actor_id null).
-    await repo.record(event_type=AuditEventType.AUTH, details={"action": "login_failed"})
+    # A pre-auth failed login (actor_id null) — the one row no actor filter can reach.
+    failed = await repo.record(event_type=AuditEventType.AUTH, details={"action": "login_failed"})
+    created = {login.id, role_change.id, failed.id}
 
-    # No filter → all three, newest-first (id tiebreak keeps it deterministic).
-    assert len(await repo.list_events()) == 3
+    # No filter → all three of ours are present.
+    listed = await repo.list_events()
+    assert created <= {row.id for row in listed}
+    # Ordering *among these three* is not insertion order and must not be asserted as
+    # such: `now()` is the transaction timestamp, so all three share a `created_at` and
+    # the `id DESC` tiebreak decides — on random UUIDs. That is the T-108 bug, not this
+    # test's subject.
+    ours = [row.id for row in listed if row.id in created]
+    assert ours == sorted(created, reverse=True)
     # Filter by event type.
     auth_rows = await repo.list_events(event_type=AuditEventType.AUTH)
-    assert len(auth_rows) == 2
+    assert {login.id, failed.id} <= {row.id for row in auth_rows}
+    assert role_change.id not in {row.id for row in auth_rows}
     assert all(r.event_type is AuditEventType.AUTH for r in auth_rows)
     # Filter by actor (excludes the null-actor row).
     actor_rows = await repo.list_events(actor_id=actor.id)
