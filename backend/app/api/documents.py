@@ -58,6 +58,7 @@ from app.services.documents import (
     MissingConversationError,
     NotReplaceableError,
     NotRetryableError,
+    ProcessingLockedError,
     QuotaExceededError,
     UploadScope,
 )
@@ -82,6 +83,19 @@ _NOT_REPLACEABLE = "Only an active or failed document can be replaced."  # TBD(�
 _DUPLICATE_CHECKSUM = (  # TBD(§8.4) copy
     "That file is already in your knowledge base as a different document."
 )
+_PROCESSING_LOCKED = (  # TBD(§8.4) copy — FR-STA-02 / FR-ORC-04, R-43
+    "Knowledge-base actions are paused while a response is being generated. "
+    "Try again once the answer finishes."
+)
+
+#: FR-STA-02's four gated verbs answer `409`, not `423` or `429`. `429` is disqualified
+#: outright — these routes already carry `@limiter.limit`, so the client could not tell a
+#: throttle from a busy chat. `423 Locked` describes a locked *resource*, and what is locked
+#: here is the caller's session, not the document. `409` is the vocabulary this surface
+#: already uses for `NotRetryableError` / `NotReplaceableError`: one status, one handler.
+_PROCESSING_LOCKED_RESPONSE = {
+    status.HTTP_409_CONFLICT: {"description": "A response is generating for this user."},
+}
 
 
 class UploadResponse(BaseModel):
@@ -105,6 +119,7 @@ class UploadResponse(BaseModel):
     responses={
         status.HTTP_200_OK: {"description": "Duplicate checksum — not re-ingested."},
         status.HTTP_202_ACCEPTED: {"description": "Accepted; ingestion queued."},
+        **_PROCESSING_LOCKED_RESPONSE,
     },
     summary="Upload a document",
 )
@@ -130,6 +145,8 @@ async def upload_document(
             storage=storage,
             queue=queue,
         )
+    except ProcessingLockedError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, _PROCESSING_LOCKED) from exc
     except (FileTooLargeError, ObjectTooLargeError) as exc:
         raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, _TOO_LARGE) from exc
     except UnsupportedFileTypeError as exc:
@@ -191,6 +208,7 @@ class RetryResponse(BaseModel):
         status.HTTP_200_OK: {"description": "Already deleted — nothing queued."},
         status.HTTP_202_ACCEPTED: {"description": "Accepted; the document left retrieval."},
         status.HTTP_404_NOT_FOUND: {"description": "No such document for this caller."},
+        **_PROCESSING_LOCKED_RESPONSE,
     },
     summary="Delete a document",
 )
@@ -212,6 +230,8 @@ async def delete_document(
             session=session,
             queue=queue,
         )
+    except ProcessingLockedError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, _PROCESSING_LOCKED) from exc
     except DocumentNotFoundError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, _DOCUMENT_NOT_FOUND) from exc
 
@@ -232,7 +252,9 @@ async def delete_document(
     responses={
         status.HTTP_202_ACCEPTED: {"description": "Accepted; ingestion re-queued."},
         status.HTTP_404_NOT_FOUND: {"description": "No such document for this caller."},
-        status.HTTP_409_CONFLICT: {"description": "The document is not in FAILED."},
+        status.HTTP_409_CONFLICT: {
+            "description": "The document is not in FAILED, or a response is generating."
+        },
     },
     summary="Retry a failed ingestion",
 )
@@ -256,6 +278,8 @@ async def retry_document(
             session=session,
             queue=queue,
         )
+    except ProcessingLockedError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, _PROCESSING_LOCKED) from exc
     except DocumentNotFoundError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, _DOCUMENT_NOT_FOUND) from exc
     except NotRetryableError as exc:
@@ -577,7 +601,10 @@ async def get_document(
         status.HTTP_202_ACCEPTED: {"description": "Accepted; the new version is queued."},
         status.HTTP_404_NOT_FOUND: {"description": "No such document for this caller."},
         status.HTTP_409_CONFLICT: {
-            "description": "Not ACTIVE/FAILED, or the bytes belong to another document."
+            "description": (
+                "Not ACTIVE/FAILED, the bytes belong to another document, "
+                "or a response is generating."
+            )
         },
     },
     summary="Replace a document with a new version",
@@ -605,6 +632,8 @@ async def replace_document(
             storage=storage,
             queue=queue,
         )
+    except ProcessingLockedError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, _PROCESSING_LOCKED) from exc
     except DocumentNotFoundError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, _DOCUMENT_NOT_FOUND) from exc
     except NotReplaceableError as exc:

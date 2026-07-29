@@ -96,6 +96,20 @@ first start — no manual step.
 Schema and indexes are created later by Alembic (T-101):
 `cd backend && uv run alembic upgrade head`.
 
+Then provision the LangGraph checkpointer tables (T-301, FR-PER-01):
+`cd backend && uv run python -m app.services.checkpointer`.
+
+These four tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`,
+`checkpoint_migrations`) live in the same `corpus` database but are **owned by
+langgraph, not Alembic** — `alembic upgrade head` does not create them, and
+`app/db/migrations/env.py` deliberately excludes them from autogenerate. The step is
+idempotent, so re-run it on every deploy alongside the migration; it is a separate
+command rather than something the API does on first use because `CREATE INDEX
+CONCURRENTLY` cannot run inside a transaction, two API workers starting together would
+race each other's migration inserts, and the API process should not hold DDL privileges
+(ruling R-42(7)). If it is skipped, the first chat request fails with a
+`CheckpointerNotProvisionedError` naming this command.
+
 ## Configuration
 
 Backend settings read from `backend/.env` (see `backend/.env.example` for the full

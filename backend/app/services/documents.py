@@ -52,6 +52,7 @@ from app.db.models.users import User
 from app.db.repositories.documents import DocumentRepository
 from app.db.repositories.jobs import DOCUMENT_DELETED, SUPERSEDED, KnowledgeJobRepository
 from app.db.repositories.knowledge_bases import KnowledgeBaseRepository
+from app.db.repositories.processing_lock import ProcessingLockRepository
 from app.security.content_validation import (
     UnsupportedFileTypeError,
     detect_file_type,
@@ -149,6 +150,48 @@ class DuplicateChecksumError(Exception):
     document, and answering with a different `document_id` is a lie the GUI renders as
     success.
     """
+
+
+class ProcessingLockedError(Exception):
+    """The caller has a chat turn generating; FR-STA-02 pauses this action (R-43 → 409).
+
+    Carries the conversation that holds the gate so the route can say *which* chat is busy —
+    the caller may have several open, and "you can't upload right now" without saying why is
+    the version of this message users file bugs about.
+    """
+
+    def __init__(self, conversation_id: uuid.UUID | None) -> None:
+        super().__init__("a response is being generated for this user")
+        self.conversation_id = conversation_id
+
+
+# --- the R-24 action gate ------------------------------------------------------
+
+
+async def _reject_if_processing(
+    session: AsyncSession, *, owner_id: uuid.UUID, settings: Settings | None = None
+) -> None:
+    """FR-STA-02 / FR-ORC-04 — refuse a mutating file operation mid-turn (R-24, R-43).
+
+    Called first in each of R-24's four verbs (upload, delete, retry, replace), **before**
+    any side effect: `_resolve_knowledge_base` creates a KB on demand and `replace_document`
+    buffers 50 MB, neither of which should happen for a request that is about to be refused.
+
+    Read-only, and keyed on the **caller**. There is no admin exemption because none is
+    needed: the gate an admin trips is their own in-flight turn, never the document owner's.
+    Read routes are never gated — FR-STA-02 names only these four verbs, and a knowledge-base
+    modal that froze while the user chatted would be a spectacular misreading of it.
+
+    The lock is **advisory** (R-43): an expired or unpublished gate simply lets the action
+    through, which R-24 sanctions by placing consistency on FR-ING-04/05 + FR-RET-04 and
+    citation validity on serve-time FR-CIT-06.
+    """
+    settings = settings or get_settings()
+    if not settings.graph.lock_enforced:
+        return
+    held = await ProcessingLockRepository(session).active_for(owner_id)
+    if held is not None:
+        raise ProcessingLockedError(held.conversation_id)
 
 
 # --- result ------------------------------------------------------------------
@@ -360,6 +403,8 @@ async def upload_document(
     """Validate, store, record and enqueue one upload (FR-ING-02)."""
     settings = settings or get_settings()
     filename = upload.filename or "upload"
+
+    await _reject_if_processing(session, owner_id=user.id, settings=settings)
 
     kb = await _resolve_knowledge_base(
         session, user=user, scope=scope, conversation_id=conversation_id
@@ -613,6 +658,8 @@ async def request_deletion(
     The row is loaded `FOR UPDATE` so this transaction and a concurrent ingest swap
     serialise on the document rather than on ordering luck (R-39(8)).
     """
+    await _reject_if_processing(session, owner_id=user.id)
+
     document = await _load_authorized(
         session, document_id=document_id, user=user, is_admin=is_admin, for_update=True
     )
@@ -680,6 +727,8 @@ async def retry_ingestion(
     queue: JobQueue,
 ) -> RetryOutcome:
     """FR-ING-06's retry: re-run ingestion for a terminally failed document (R-39(5))."""
+    await _reject_if_processing(session, owner_id=user.id)
+
     document = await _load_authorized(
         session, document_id=document_id, user=user, is_admin=is_admin, for_update=True
     )
@@ -775,6 +824,8 @@ async def replace_document(
     """
     settings = settings or get_settings()
     filename = upload.filename or "upload"
+
+    await _reject_if_processing(session, owner_id=user.id, settings=settings)
 
     # --- 1. authorize and gate *before* buffering 50 MB --------------------------------
     # Without this pre-check any authenticated caller can make the server hold a 50 MB body

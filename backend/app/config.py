@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import ClassVar, Literal
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import Field, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -21,11 +22,41 @@ class DatabaseSettings(BaseSettings):
 
     Points at the developer's local pgvector-enabled `corpus` database; the schema
     and indexes are owned by Alembic (T-101).
+
+    Two drivers read this one setting: SQLAlchemy over **asyncpg** (everything in
+    `app/db/`) and **psycopg3** under the LangGraph checkpointer (T-301, FR-PER-01),
+    which cannot parse SQLAlchemy's `+driver` scheme. Hence :attr:`psycopg_dsn` —
+    derived, never configured separately.
     """
 
     model_config = SettingsConfigDict(env_prefix="DATABASE_", env_file=".env", extra="ignore")
 
     url: str = Field(default="postgresql+asyncpg://postgres:postgres@localhost:5432/corpus")
+
+    @computed_field
+    @property
+    def psycopg_dsn(self) -> str:
+        """`url` as a psycopg3 conninfo URI (R-42(8)).
+
+        A **scheme-only** rewrite: everything after the scheme is passed through
+        untouched, because the credentials in `url` are already percent-encoded and
+        re-encoding them is the one way this could corrupt a password.
+
+        Derived rather than a second `CHECKPOINTER_DSN` setting on purpose: two
+        independently-set DSNs can point at different databases, and nothing would
+        notice until a resume silently found no checkpoint for a live conversation.
+        """
+        return urlunsplit(urlsplit(self.url)._replace(scheme="postgresql"))
+
+    @model_validator(mode="after")
+    def _coherent(self) -> DatabaseSettings:
+        if not self.url.startswith("postgresql"):
+            raise ValueError(
+                "DATABASE_URL must be a PostgreSQL URL — pgvector is the R-17 storage "
+                "baseline and FR-PER-01 pins the LangGraph AsyncPostgresSaver to the "
+                "same database"
+            )
+        return self
 
 
 class MinioSettings(BaseSettings):
@@ -533,6 +564,111 @@ class RetrievalSettings(BaseSettings):
         return self
 
 
+class CheckpointerSettings(BaseSettings):
+    """LangGraph checkpointer — the FR-PER-01 execution-state store (T-301, R-42).
+
+    Infrastructure, not orchestration policy: everything here is about the psycopg
+    connection pool that persists graph state. The policy knobs (retry bound,
+    durability, timeouts) are :class:`GraphSettings` — the same split as
+    `OPENAI_`/`EMBEDDING_` and `PARSER_`/`CHUNKER_`.
+
+    ``backend`` is explicit and is never inferred from a missing credential (the
+    `EMBEDDING_BACKEND` rule). `memory` is dev/CI only and is refused outright when
+    `ENVIRONMENT=production` — see :meth:`Settings._coherent`, the enforceable form of
+    FR-PER-01's "never `InMemorySaver` in production".
+    """
+
+    model_config = SettingsConfigDict(env_prefix="CHECKPOINTER_", env_file=".env", extra="ignore")
+
+    backend: Literal["postgres", "memory"] = Field(default="postgres")
+
+    # Pool sizing. Separate from the SQLAlchemy engine's pool by construction: this is a
+    # psycopg pool and that one is asyncpg, so they cannot be shared even in principle.
+    pool_min_size: int = Field(default=1)  # TBD(§8.4)
+    pool_max_size: int = Field(default=8)  # TBD(§8.4)
+    pool_timeout_seconds: float = Field(default=10.0)  # TBD(§8.4)
+    connect_timeout_seconds: int = Field(default=5)  # TBD(§8.4) — psycopg wants whole seconds
+
+    # langgraph's own `LANGGRAPH_STRICT_MSGPACK` defaults to *false*, and its docstring
+    # spells out the consequence: "any Python callable stored in checkpoint data will be
+    # imported and executed on load". R-42(2) makes `RAGState` scalars and lists of
+    # scalars, so strict mode costs nothing and closes a deserialization-RCE surface on a
+    # table that anyone with database write access could poison.
+    strict_msgpack: bool = Field(default=True)
+
+    @model_validator(mode="after")
+    def _coherent(self) -> CheckpointerSettings:
+        if self.pool_min_size < 0:
+            raise ValueError("CHECKPOINTER_POOL_MIN_SIZE must be >= 0")
+        if self.pool_max_size < 1:
+            raise ValueError("CHECKPOINTER_POOL_MAX_SIZE must be >= 1")
+        if self.pool_max_size < self.pool_min_size:
+            raise ValueError("CHECKPOINTER_POOL_MAX_SIZE must be >= CHECKPOINTER_POOL_MIN_SIZE")
+        if self.pool_timeout_seconds <= 0 or self.connect_timeout_seconds <= 0:
+            raise ValueError("CHECKPOINTER_*_TIMEOUT_SECONDS must be > 0")
+        return self
+
+
+class GraphSettings(BaseSettings):
+    """Orchestration policy for the FR-ORC-01/07 workflow (T-301, R-42).
+
+    Nothing here opens a socket — that is :class:`CheckpointerSettings`.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="GRAPH_", env_file=".env", extra="ignore")
+
+    # FR-ORC-07 requires `retry_count` to be bounded "to guarantee termination" and never
+    # says by what. 1 means at most two full retrieve→rerank→generate→gate cycles: each
+    # retry costs a second rerank *and* a second generation, and NFR-PRF-02 already makes
+    # the user wait for the whole gate before a single token appears, so a second cycle
+    # roughly doubles time-to-first-token for a query that has already failed groundedness.
+    # Abstaining (FR-RET-05) is cheaper and more honest. Settle together with the FR-RET-05
+    # groundedness threshold — they trade off directly (see §8.4).
+    max_retries: int = Field(default=1)  # TBD(§8.4)
+
+    # NOT langgraph's default, which is "async": there a checkpoint is persisted *while*
+    # the next step runs, so a process killed mid-turn can lose the last superstep — which
+    # is precisely the guarantee FR-PER-01 ("recovery after failures") and NFR-REL-03
+    # ("durability comes from the checkpointer, not process memory") are buying. Costs one
+    # round-trip per superstep on a pool-local connection.
+    durability: Literal["sync", "async", "exit"] = Field(default="sync")  # TBD(§8.4)
+
+    node_timeout_seconds: float = Field(default=120.0)  # TBD(§8.4)
+
+    # langgraph's own default, made explicit because it is a correctness bound here, not a
+    # runaway guard: the worst-case path grows with `max_retries`, and a limit that does
+    # not admit it turns an FR-RET-05 abstention into a GraphRecursionError → 500. The
+    # relationship is asserted from the topology in tests/test_graph.py — config must not
+    # import the graph.
+    recursion_limit: int = Field(default=25)  # TBD(§8.4)
+
+    # The R-24 processing gate (T-302, R-43). Not a free number, and the tension is the same
+    # double duty `WORKER_JOB_TIMEOUT_SECONDS` carries: too short and the gate lifts during a
+    # healthy slow turn; too long and a crashed run locks the user out of their own uploads
+    # for the whole remainder. Both failures are bounded — R-24 makes the lock advisory, so
+    # an early lift degrades UX and never correctness.
+    lock_ttl_seconds: float = Field(default=180.0)  # TBD(§8.4)
+
+    # A kill switch for diagnosis, on the `RETRIEVAL_DEDUPE_ADJACENT` precedent — never the
+    # handling path for a bug. Turning it off stops the four mutating document routes
+    # answering 409; the graph still takes and releases the lock.
+    lock_enforced: bool = Field(default=True)
+
+    @model_validator(mode="after")
+    def _coherent(self) -> GraphSettings:
+        if self.max_retries < 0:
+            raise ValueError("GRAPH_MAX_RETRIES must be >= 0")
+        if self.node_timeout_seconds <= 0:
+            raise ValueError("GRAPH_NODE_TIMEOUT_SECONDS must be > 0")
+        if self.recursion_limit < 1:
+            raise ValueError("GRAPH_RECURSION_LIMIT must be >= 1")
+        # A gate that cannot outlive one node is meaningless: `retrieve` alone may run for
+        # `node_timeout_seconds`, so a shorter TTL would expire inside a single healthy step.
+        if self.lock_ttl_seconds < self.node_timeout_seconds:
+            raise ValueError("GRAPH_LOCK_TTL_SECONDS must be >= GRAPH_NODE_TIMEOUT_SECONDS")
+        return self
+
+
 class KeycloakSettings(BaseSettings):
     """Keycloak (OIDC) connection settings — auth baseline per R-28.
 
@@ -584,6 +720,17 @@ class Settings(BaseSettings):
     app_name: str = "Corpus"
     environment: str = "development"
 
+    # structlog's `cache_logger_on_first_use`. True is right for a long-lived process and
+    # is the default. It is a *setting* rather than a constant because caching latches every
+    # module-level logger onto the processor chain configured at its first use, and nothing
+    # un-latches it afterwards — not `structlog.configure`, not
+    # `structlog.testing.capture_logs`. `app.main` builds the app at import time
+    # (`app = create_app()`, the uvicorn entrypoint), so by the time any test fixture runs
+    # the latch has already closed; only an environment decision made *before* the import
+    # can open it. `tests/conftest.py` sets it false for exactly that reason, and it doubles
+    # as a local-debugging knob.
+    log_cache_loggers: bool = True
+
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     minio: MinioSettings = Field(default_factory=MinioSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
@@ -600,6 +747,8 @@ class Settings(BaseSettings):
     openai: OpenAISettings = Field(default_factory=OpenAISettings)
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
+    checkpointer: CheckpointerSettings = Field(default_factory=CheckpointerSettings)
+    graph: GraphSettings = Field(default_factory=GraphSettings)
     keycloak: KeycloakSettings = Field(default_factory=KeycloakSettings)
 
     @model_validator(mode="after")
@@ -614,6 +763,16 @@ class Settings(BaseSettings):
                 f"UPLOAD_MAX_FILE_BYTES ({self.upload.max_file_bytes:,}) — a smaller value "
                 "leaves the largest legal upload unscannable (R-32, §8.13). Raise it here "
                 "and in clamd.conf's StreamMaxLength together."
+            )
+        # R-42(9): the enforceable form of FR-PER-01's "never `InMemorySaver` in
+        # production". An in-memory saver loses every conversation on restart, which makes
+        # NFR-REL-03's stateless-API claim false — and the failure is silent, since the
+        # graph runs perfectly right up until the process dies. Refuse to boot instead.
+        if self.environment == "production" and self.checkpointer.backend == "memory":
+            raise ValueError(
+                "CHECKPOINTER_BACKEND=memory is forbidden when ENVIRONMENT=production "
+                "(FR-PER-01): conversation durability comes from the checkpointer "
+                "(NFR-REL-03). Set CHECKPOINTER_BACKEND=postgres."
             )
         return self
 

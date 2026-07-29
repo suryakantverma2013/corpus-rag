@@ -15,6 +15,7 @@ from app.db.models.document_chunk import DocumentChunk
 from app.db.models.knowledge_base import KnowledgeBase
 from app.db.models.knowledge_job import KnowledgeJob
 from app.db.models.message import Message
+from app.db.models.processing_lock import ProcessingLock
 from app.db.models.users import User
 
 __all__ = [
@@ -26,5 +27,6 @@ __all__ = [
     "KnowledgeBase",
     "KnowledgeJob",
     "Message",
+    "ProcessingLock",
     "User",
 ]

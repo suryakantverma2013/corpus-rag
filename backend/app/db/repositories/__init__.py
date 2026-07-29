@@ -10,6 +10,7 @@ from app.db.repositories.documents import DocumentListing, DocumentRepository
 from app.db.repositories.jobs import KnowledgeJobRepository
 from app.db.repositories.knowledge_bases import KnowledgeBaseRepository
 from app.db.repositories.messages import MessageRepository
+from app.db.repositories.processing_lock import ProcessingLockRepository
 from app.db.repositories.retrieval import PgVectorRetriever
 from app.db.repositories.users import UserRepository
 
@@ -24,5 +25,6 @@ __all__ = [
     "KnowledgeJobRepository",
     "MessageRepository",
     "PgVectorRetriever",
+    "ProcessingLockRepository",
     "UserRepository",
 ]

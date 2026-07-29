@@ -12,7 +12,10 @@ public key. Keycloak HTTP calls (token/admin endpoints) are stubbed with `respx`
 
 from __future__ import annotations
 
+import asyncio
 import os
+import selectors
+import sys
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
@@ -22,6 +25,27 @@ from collections.abc import AsyncIterator, Callable, Iterator
 # time via the lru_cached settings; setting it here guarantees the limiter is built
 # with `memory://`. `setdefault` lets an explicit env override win.
 os.environ.setdefault("RATELIMIT_STORAGE_URI", "memory://")
+
+# Same reasoning, one failure later (T-302). FastAPI resolves `JobQueueDep` *before* the
+# handler body, so any route carrying it builds and module-globally caches a real arq Redis
+# pool — even for a request that is about to be refused, and even in a test that never
+# reaches the enqueue. That pool is bound to the creating test's event loop, so the failure
+# surfaces in `test_job_queue`'s own teardown ("Event loop is closed") hundreds of tests
+# later, in a different file. Selecting the null backend here makes the accident impossible
+# rather than relying on every future test module remembering to override the dependency.
+# The arq path is still covered: `test_job_queue` constructs `ArqJobQueue` directly.
+os.environ.setdefault("QUEUE_BACKEND", "none")
+
+# Keep every module's logger observable by `structlog.testing.capture_logs` (T-302).
+# `cache_logger_on_first_use=True` latches a module-level `structlog.get_logger(__name__)`
+# onto the processor chain configured at its first use, and nothing un-latches it — so a
+# log assertion silently sees nothing. This *must* be an environment decision rather than a
+# fixture: `app.main` builds the app at import time (`app = create_app()`, the uvicorn
+# entrypoint), so the latch closes during the first `from app...` import, long before any
+# fixture runs. Three T-302 telemetry tests passed alone and failed in the full suite on
+# exactly that ordering. The processor chain is unchanged, so the suite still exercises
+# production's.
+os.environ.setdefault("LOG_CACHE_LOGGERS", "false")
 
 import httpx  # noqa: E402
 import jwt  # noqa: E402
@@ -36,6 +60,27 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 from sqlalchemy.pool import NullPool  # noqa: E402
 
 from app.config import get_settings  # noqa: E402
+
+
+def pytest_asyncio_loop_factories(config, item):  # noqa: ANN001, ANN201, ARG001
+    """Pin a selector event loop on Windows (T-301, FR-PER-01).
+
+    The LangGraph checkpointer is psycopg-backed, and psycopg's async driver waits on
+    sockets with ``loop.add_reader``. Windows' default `ProactorEventLoop` does not
+    implement it, so *every* psycopg connection raises
+    ``InterfaceError: Psycopg cannot use the 'ProactorEventLoop'``. Verified on this box:
+    under a selector loop psycopg and asyncpg both work, side by side, in one loop.
+
+    This changes the loop for the whole suite on win32, which is why T-301 re-ran the
+    full suite when it landed. Linux/uvloop is untouched.
+
+    Return **exactly one** factory: pytest-asyncio parametrizes every async test over the
+    mapping it gets back, and hides the parameter only when there is a single entry.
+    Returning ``None`` or an empty mapping is a `UsageError`.
+    """
+    if sys.platform == "win32":
+        return {"selector": lambda: asyncio.SelectorEventLoop(selectors.SelectSelector())}
+    return {"default": asyncio.EventLoop}
 
 
 @pytest.fixture(autouse=True)
@@ -159,6 +204,24 @@ def _reset_stream_registry() -> Iterator[None]:
     registry.reset()
     yield
     registry.reset()
+
+
+@pytest.fixture(autouse=True)
+async def _reset_graph_and_checkpointer() -> AsyncIterator[None]:
+    """Drop the process-global graph and checkpointer after every test (T-301).
+
+    Both are module globals rather than `lru_cache`d values because
+    `AsyncPostgresSaver.__init__` captures ``asyncio.get_running_loop()``. pytest-asyncio
+    gives each test its own loop, so a provider leaking out of one test hands the *next*
+    one a psycopg pool bound to a loop that is already closed — which surfaces as an
+    unrelated failure somewhere downstream. Teardown-only: nothing needs building up front.
+    """
+    yield
+    from app.rag.graph import close_graph
+    from app.services.checkpointer import close_checkpointer
+
+    await close_graph()
+    await close_checkpointer()
 
 
 @pytest.fixture

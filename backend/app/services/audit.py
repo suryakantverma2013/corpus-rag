@@ -22,6 +22,7 @@ from app.db.repositories.audit_log import AuditLogRepository
 
 _TARGET_USER = "user"
 _TARGET_DOCUMENT = "document"
+_TARGET_CONVERSATION = "conversation"
 
 # Actions that are *not* removals. Everything else falls through to DOCUMENT_DELETE —
 # see `record_document_event`.
@@ -48,6 +49,40 @@ async def record_auth(
         target_type=_TARGET_USER,
         target_id=str(actor_id) if actor_id is not None else None,
         details={"action": action, **(details or {})},
+    )
+
+
+async def record_authorization_denied(
+    session: AsyncSession,
+    *,
+    actor_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    turn_index: int | None = None,
+) -> AuditLog:
+    """FR-ORC-02 — a caller was refused a conversation that is not theirs (T-302, R-43).
+
+    Filed under ``AUTH`` with an ``action`` discriminator rather than a new
+    :class:`AuditEventType` member, which is this module's existing convention: ``AUTH``
+    already multiplexes login / login_failed / logout / refresh / password_change, and
+    ``AuditEventType`` is a six-member *category* enum whose NFR-SEC-08 category for this is
+    "auth". A new member would cost a hand-written CHECK-constraint migration
+    (`native_enum=False`) to buy a filter ``details`` already provides.
+
+    Written only for the **ownership** failure. A conversation that no longer exists is a
+    resumed run whose chat was deleted (R-42(11)/T-401) — ordinary, and not a security
+    event; the graph logs that case instead.
+
+    Not idempotent on resume: ``audit_log`` has no idempotency key, so a `govern` that
+    re-executes after a crash appends a second row. ``turn_index`` is carried so duplicates
+    are recognisable, which is the honest fix — a genuine second attempt and a replayed one
+    are not distinguishable from inside the node.
+    """
+    return await AuditLogRepository(session).record(
+        event_type=AuditEventType.AUTH,
+        actor_id=actor_id,
+        target_type=_TARGET_CONVERSATION,
+        target_id=str(conversation_id),
+        details={"action": "chat_access_denied", "turn_index": turn_index},
     )
 
 

@@ -82,8 +82,26 @@ uv run uvicorn app.main:app --reload      # API  -> http://127.0.0.1:8000  (/hea
 uv run pytest                             # tests
 uv run ruff check . && uv run ruff format .
 uv run alembic upgrade head               # apply DB migrations
+uv run python -m app.services.checkpointer  # provision LangGraph checkpointer tables (once)
 uv run arq workers.main.WorkerSettings    # background worker (after T-207)
 ```
 
 > Windows dev: uvloop is Unix-only — uvicorn falls back to asyncio locally; it
 > engages on Linux deployments.
+
+> **Windows dev, event loop (T-301).** The conversation checkpointer (FR-PER-01) is
+> psycopg-backed, and psycopg's async driver needs `loop.add_reader`, which Windows'
+> default `ProactorEventLoop` does not implement. uvicorn picks that loop unless it is
+> running with a subprocess, so **`--reload` works but a bare `uvicorn app.main:app` does
+> not**. Either use `--reload`, or be explicit:
+>
+> ```
+> uv run uvicorn app.main:app --loop app.runtime:selector_loop
+> ```
+>
+> On the wrong loop the app still boots; the first chat turn raises a
+> `CheckpointerConfigError` naming both fixes. Linux/macOS and uvloop are unaffected.
+
+> The checkpointer tables are **not** owned by Alembic — see `deployment/README.md`. The
+> bootstrap command above is idempotent and belongs beside `alembic upgrade head` in any
+> deploy script.
