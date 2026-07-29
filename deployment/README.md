@@ -29,6 +29,11 @@ docker compose -f deployment/docker-compose.yml up -d
 # ...also a containerized MinIO (only if you have no MinIO on :9000)
 docker compose -f deployment/docker-compose.yml --profile minio up -d
 
+# ...on different ports, when something else already holds 9000/9001. Point
+# backend/.env's MINIO_ENDPOINT at the same port you publish here.
+MINIO_API_PORT=9100 MINIO_CONSOLE_PORT=9101 \
+  docker compose -f deployment/docker-compose.yml --profile minio up -d minio
+
 # ...also a containerized pgvector (only if you have no local Postgres)
 docker compose -f deployment/docker-compose.yml --profile postgres up -d
 

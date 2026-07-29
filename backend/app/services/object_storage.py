@@ -31,7 +31,7 @@ import os
 import shutil
 import uuid
 from collections.abc import AsyncIterator
-from contextlib import AsyncExitStack, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from pathlib import PurePosixPath
 from typing import Annotated, Protocol, runtime_checkable
 
@@ -382,6 +382,38 @@ def _error_code(exc: Exception) -> str:
     return str(response.get("Error", {}).get("Code", ""))
 
 
+def _translate_s3_error(exc: Exception, key: str | None) -> ObjectStorageError:
+    if key is not None and _error_code(exc) in _MISSING_CODES:
+        return ObjectNotFoundError(key)
+    return ObjectStorageError(f"{type(exc).__name__}: {exc}")
+
+
+@asynccontextmanager
+async def _s3_errors(key: str | None = None) -> AsyncIterator[None]:
+    """Turn every botocore failure into an :class:`ObjectStorageError`.
+
+    The seam's whole point is that callers above it never import botocore, and they act on
+    that: the upload and replace routes map `ObjectStorageError` to the normative `503`, and
+    the ingestion worker's `_classify` maps it to a **retryable** `OBJECT_STORAGE_UNAVAILABLE`.
+    Anything that escapes as a raw botocore exception therefore lands in the wrong bucket at
+    every layer at once.
+
+    **`ClientError` alone is not enough**, which is how this was missed: a bucket that
+    answers with an error code raises `ClientError`, but a daemon that is simply *down*
+    raises `EndpointConnectionError` — a `BotoCoreError`, a sibling class, not a subclass.
+    So the only failure mode the translation covered was the one where the service is
+    reachable. Verified live (T-213): with MinIO stopped, `POST /api/v1/documents` propagated
+    `EndpointConnectionError` out of the route and answered `500` instead of `503`, and the
+    purge dead-lettered as the generic `DELETE_FAILED` rather than `OBJECT_STORAGE_UNAVAILABLE`.
+    """
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    try:
+        yield
+    except (ClientError, BotoCoreError) as exc:
+        raise _translate_s3_error(exc, key) from exc
+
+
 class S3ObjectStorage:
     """MinIO / AWS S3 backend over ``aioboto3`` (R-19).
 
@@ -445,21 +477,22 @@ class S3ObjectStorage:
         from botocore.exceptions import ClientError
 
         client = await self._get_client()
-        try:
-            await client.head_bucket(Bucket=self.bucket)
-        except ClientError as exc:
-            if _error_code(exc) not in _MISSING_CODES or not self._auto_create_bucket:
-                raise
+        async with _s3_errors():
             try:
-                await client.create_bucket(Bucket=self.bucket)
-            except ClientError as create_exc:
-                # Lost a race with another worker — that is a success for our purposes.
-                if _error_code(create_exc) not in {
-                    "BucketAlreadyOwnedByYou",
-                    "BucketAlreadyExists",
-                }:
+                await client.head_bucket(Bucket=self.bucket)
+            except ClientError as exc:
+                if _error_code(exc) not in _MISSING_CODES or not self._auto_create_bucket:
                     raise
-            log.info("object_storage.bucket_created", bucket=self.bucket)
+                try:
+                    await client.create_bucket(Bucket=self.bucket)
+                except ClientError as create_exc:
+                    # Lost a race with another worker — that is a success for our purposes.
+                    if _error_code(create_exc) not in {
+                        "BucketAlreadyOwnedByYou",
+                        "BucketAlreadyExists",
+                    }:
+                        raise
+                log.info("object_storage.bucket_created", bucket=self.bucket)
         self._bucket_ready = True
 
     async def aclose(self) -> None:
@@ -493,7 +526,8 @@ class S3ObjectStorage:
         await self.ensure_bucket()
         client = await self._get_client()
         extra = {"ContentType": content_type} if content_type else {}
-        response = await client.put_object(Bucket=self.bucket, Key=key, Body=payload, **extra)
+        async with _s3_errors():
+            response = await client.put_object(Bucket=self.bucket, Key=key, Body=payload, **extra)
         return StoredObject(
             key=key,
             uri=self.uri_for(key),
@@ -503,26 +537,18 @@ class S3ObjectStorage:
         )
 
     async def get(self, key: str) -> bytes:
-        from botocore.exceptions import ClientError
-
         client = await self._get_client()
-        try:
+        async with _s3_errors(key):
             response = await client.get_object(Bucket=self.bucket, Key=_validate_key(key))
             async with response["Body"] as body:
                 return await body.read()
-        except ClientError as exc:
-            raise self._translate(exc, key) from exc
 
     async def stream(
         self, key: str, *, chunk_size: int = _DEFAULT_CHUNK_SIZE
     ) -> AsyncIterator[bytes]:
-        from botocore.exceptions import ClientError
-
         client = await self._get_client()
-        try:
+        async with _s3_errors(key):
             response = await client.get_object(Bucket=self.bucket, Key=_validate_key(key))
-        except ClientError as exc:
-            raise self._translate(exc, key) from exc
         body = response["Body"]
         try:
             # aiobotocore hands back either a StreamingBody (``iter_chunks``) or, when a
@@ -541,7 +567,8 @@ class S3ObjectStorage:
     async def delete(self, key: str) -> None:
         # S3 DELETE is idempotent: a missing key still returns 204.
         client = await self._get_client()
-        await client.delete_object(Bucket=self.bucket, Key=_validate_key(key))
+        async with _s3_errors():
+            await client.delete_object(Bucket=self.bucket, Key=_validate_key(key))
 
     async def delete_prefix(self, prefix: str) -> int:
         """Delete every key under ``prefix`` with concurrent single-object deletes.
@@ -558,14 +585,15 @@ class S3ObjectStorage:
         removed = 0
         paginator = client.get_paginator("list_objects_v2")
         batch: list[str] = []
-        async for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
-            for item in page.get("Contents", []):
-                batch.append(item["Key"])
-                if len(batch) == _S3_DELETE_CONCURRENCY:
-                    removed += await self._delete_many(client, batch)
-                    batch = []
-        if batch:
-            removed += await self._delete_many(client, batch)
+        async with _s3_errors():
+            async for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+                for item in page.get("Contents", []):
+                    batch.append(item["Key"])
+                    if len(batch) == _S3_DELETE_CONCURRENCY:
+                        removed += await self._delete_many(client, batch)
+                        batch = []
+            if batch:
+                removed += await self._delete_many(client, batch)
         return removed
 
     async def _delete_many(self, client, keys: list[str]) -> int:  # noqa: ANN001
@@ -576,24 +604,20 @@ class S3ObjectStorage:
         from botocore.exceptions import ClientError
 
         client = await self._get_client()
-        try:
-            await client.head_object(Bucket=self.bucket, Key=_validate_key(key))
-        except ClientError as exc:
-            if _error_code(exc) in _MISSING_CODES:
-                return False
-            raise
+        async with _s3_errors():
+            try:
+                await client.head_object(Bucket=self.bucket, Key=_validate_key(key))
+            except ClientError as exc:
+                if _error_code(exc) in _MISSING_CODES:
+                    return False
+                raise
         return True
 
     async def check_health(self) -> None:
         """Verify the bucket is reachable *and* the credentials work (``HeadBucket``)."""
         client = await self._get_client()
-        await client.head_bucket(Bucket=self.bucket)
-
-    @staticmethod
-    def _translate(exc: Exception, key: str) -> ObjectStorageError:
-        if _error_code(exc) in _MISSING_CODES:
-            return ObjectNotFoundError(key)
-        return ObjectStorageError(str(exc))
+        async with _s3_errors():
+            await client.head_bucket(Bucket=self.bucket)
 
 
 # --- factory / DI ------------------------------------------------------------

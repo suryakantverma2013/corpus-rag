@@ -19,15 +19,20 @@
 
 services:
   # Optional: only for developers without an existing MinIO. Enable with
-  # `--profile minio`. This project's Corpus dev box reuses the MinIO already
-  # running on :9000/:9001 (bucket `corpus`, isolated from any other buckets).
+  # `--profile minio`.
+  #
+  # Ports are env-driven because the service this profile replaces is usually already
+  # holding 9000/9001 — a foreign MinIO on the default ports is the exact situation that
+  # makes someone enable this profile, and a hardcoded mapping then refuses to start.
+  # Set MINIO_API_PORT/MINIO_CONSOLE_PORT (and MINIO_ENDPOINT in backend/.env to match)
+  # to run alongside it; the defaults are unchanged for anyone with the ports free.
   minio:
     image: minio/minio
     profiles: ["minio"]
     command: server /data --console-address ":9001"
     ports:
-      - "9000:9000"   # S3 API
-      - "9001:9001"   # web console -> http://localhost:9001
+      - "${MINIO_API_PORT:-9000}:9000"       # S3 API
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"   # web console
     environment:
       MINIO_ROOT_USER: "${MINIO_ACCESS_KEY:-minioadmin}"
       MINIO_ROOT_PASSWORD: "${MINIO_SECRET_KEY:-minioadmin}"

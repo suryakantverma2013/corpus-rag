@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator
 from pathlib import PurePath
 
 import pytest
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, EndpointConnectionError
 
 from app.config import MinioSettings, Settings, StorageSettings
 from app.services import object_storage as storage_module
@@ -24,6 +24,7 @@ from app.services.object_storage import (
     InvalidKeyError,
     LocalFilesystemStorage,
     ObjectNotFoundError,
+    ObjectStorageError,
     ObjectTooLargeError,
     S3ObjectStorage,
     artifact_key,
@@ -289,13 +290,18 @@ class _FakeS3Client:
         self.pages = pages or []
         self.calls: list[tuple[str, dict]] = []
         self.deleted_keys: list[str] = []
-        self.head_bucket_error: ClientError | None = None
-        self.get_error: ClientError | None = None
-        self.head_object_error: ClientError | None = None
-        self.delete_error: ClientError | None = None
+        # Deliberately `Exception`, not `ClientError`: a daemon that is down raises a
+        # `BotoCoreError`, which is a sibling of `ClientError` rather than a subclass.
+        self.head_bucket_error: Exception | None = None
+        self.get_error: Exception | None = None
+        self.head_object_error: Exception | None = None
+        self.delete_error: Exception | None = None
+        self.put_error: Exception | None = None
 
     async def put_object(self, **kwargs):  # noqa: ANN003, ANN202
         self.calls.append(("put_object", kwargs))
+        if self.put_error:
+            raise self.put_error
         return {"ETag": '"abc123"'}
 
     async def get_object(self, **kwargs):  # noqa: ANN003, ANN202
@@ -394,10 +400,62 @@ async def test_s3_translates_missing_key_errors() -> None:
     client.head_object_error = _client_error("404", "HeadObject")
     assert await store.exists("gone.pdf") is False
 
-    # A non-404 failure must surface, not be mistaken for "missing".
+    # A non-404 failure must surface, not be mistaken for "missing" — and it must surface
+    # as an `ObjectStorageError`, since that is the only class callers above the seam
+    # handle (the routes map it to `503`, the ingest worker to a retryable failure).
     client.head_object_error = _client_error("AccessDenied", "HeadObject")
-    with pytest.raises(ClientError):
+    with pytest.raises(ObjectStorageError) as raised:
         await store.exists("gone.pdf")
+    assert not isinstance(raised.value, ObjectNotFoundError)
+
+
+async def test_s3_translates_connection_failures_not_just_client_errors() -> None:
+    """A storage daemon that is *down* must still surface as `ObjectStorageError` (T-213).
+
+    `EndpointConnectionError` is a `BotoCoreError`, a **sibling** of `ClientError`, so
+    translating only `ClientError` covered exactly the case where the service is reachable.
+    Everything above this seam keys off `ObjectStorageError`: the upload and replace routes
+    map it to the normative `503`, and the ingestion worker's `_classify` maps it to a
+    retryable `OBJECT_STORAGE_UNAVAILABLE`. Found live with MinIO stopped — the upload route
+    propagated the raw botocore error and answered `500`, and a dead-lettered purge was
+    coded `DELETE_FAILED` rather than naming the outage.
+    """
+    down = EndpointConnectionError(endpoint_url="http://localhost:9100/corpus")
+
+    store, client = _fake_s3()
+    client.put_error = down
+    with pytest.raises(ObjectStorageError):
+        await store.put("a/b.pdf", b"hello")
+
+    store, client = _fake_s3(pages=[["k1"]])
+    client.delete_error = down
+    with pytest.raises(ObjectStorageError):
+        await store.delete_prefix("tenants/x/")
+
+    store, client = _fake_s3()
+    client.get_error = down
+    with pytest.raises(ObjectStorageError) as raised:
+        await store.get("a/b.pdf")
+    # Down is not the same as absent: a retryable outage must never be reported as the
+    # terminal `ObjectNotFoundError`, which the ingest worker classifies as OBJECT_MISSING
+    # and never retries.
+    assert not isinstance(raised.value, ObjectNotFoundError)
+
+    store, client = _fake_s3()
+    client.head_object_error = down
+    with pytest.raises(ObjectStorageError):
+        await store.exists("a/b.pdf")
+
+    store, client = _fake_s3()
+    store._bucket_ready = False  # noqa: SLF001
+    client.head_bucket_error = down
+    with pytest.raises(ObjectStorageError):
+        await store.ensure_bucket()
+
+    store, client = _fake_s3()
+    client.head_bucket_error = down
+    with pytest.raises(ObjectStorageError):
+        await store.check_health()
 
 
 async def test_s3_delete_prefix_paginates_across_pages() -> None:
@@ -417,7 +475,7 @@ async def test_s3_delete_prefix_propagates_failures() -> None:
     store, client = _fake_s3(pages=[["k1"]])
     client.delete_error = _client_error("AccessDenied", "DeleteObject")
 
-    with pytest.raises(ClientError):
+    with pytest.raises(ObjectStorageError):
         await store.delete_prefix("tenants/x/")
 
 
