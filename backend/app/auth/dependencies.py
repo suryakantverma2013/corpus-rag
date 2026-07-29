@@ -13,7 +13,7 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.auth.keycloak_client import KeycloakClient
 from app.auth.principal import Principal
@@ -21,7 +21,7 @@ from app.auth.tokens import TokenValidationError, validate_access_token
 from app.config import Settings, get_settings
 from app.db.models.users import User
 from app.db.repositories.users import UserRepository
-from app.db.session import get_session
+from app.db.session import get_session, get_stream_sessionmaker
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -84,3 +84,7 @@ CurrentUser = Annotated[User, Depends(get_current_user)]
 RequireAdmin = Annotated[Principal, Depends(require_admin)]
 Keycloak = Annotated[KeycloakClient, Depends(get_keycloak_client)]
 DbSession = Annotated[AsyncSession, Depends(get_session)]
+SettingsDep = Annotated[Settings, Depends(get_settings)]
+# For handlers that outlive their request (SSE streams, T-210) — see
+# `get_stream_sessionmaker`. Never use this where `DbSession` will do.
+StreamSessionmaker = Annotated[async_sessionmaker[AsyncSession], Depends(get_stream_sessionmaker)]

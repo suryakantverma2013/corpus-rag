@@ -10,7 +10,7 @@ Values come from the environment / a local `.env`; defaults align with the
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import Field, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -266,6 +266,46 @@ class WorkerSettings(BaseSettings):
             raise ValueError("WORKER_HEARTBEAT_SECONDS must be > 0")
         if self.sweep_min_age_seconds < 0 or self.sweep_interval_seconds <= 0:
             raise ValueError("WORKER_SWEEP_* seconds must be positive")
+        return self
+
+
+class SseSettings(BaseSettings):
+    """The live document-status channel (T-210, FR-KBM-09, R-41 §8.22).
+
+    Under R-41(2) the channel learns of changes by **polling**, so every one of these is a
+    load knob rather than a preference: an open stream costs one indexed query every
+    ``poll_interval_seconds``, and the floor this surface adds to database load is
+    ``streams x users / interval``. Shortening the interval to make the FR-KBM-04 badge
+    feel livelier raises that floor for every connected user at once — measure first.
+
+    ``stall_after_seconds`` defaults to ``None``, meaning *derive it* from
+    :attr:`WorkerSettings.job_timeout_seconds` (see :meth:`Settings.stall_after`). It is
+    deliberately not a free number: arq's ``arq:in-progress:{job_id}`` guard has a TTL of
+    ``job_timeout + 10`` and no worker re-picks a job while that key lives, so a threshold
+    below it would mark a *healthy* long ingestion as stalled — which is the same knob's
+    third duty, on top of the two §8.4 already records for it.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="SSE_", env_file=".env", extra="ignore")
+
+    poll_interval_seconds: float = Field(default=1.5)  # TBD(§8.4)
+    # Keepalive. `EventSourceResponse` sends a comment frame on this interval so idle
+    # proxies do not sever a stream that is simply watching an idle knowledge base.
+    ping_seconds: float = Field(default=15.0)  # TBD(§8.4)
+    # None = derive from WORKER_JOB_TIMEOUT_SECONDS; see the class docstring.
+    stall_after_seconds: float | None = Field(default=None)  # TBD(§8.4)
+    max_streams_per_user: int = Field(default=4)  # TBD(§8.4)
+
+    @model_validator(mode="after")
+    def _coherent(self) -> SseSettings:
+        if self.poll_interval_seconds <= 0:
+            raise ValueError("SSE_POLL_INTERVAL_SECONDS must be > 0")
+        if self.ping_seconds <= 0:
+            raise ValueError("SSE_PING_SECONDS must be > 0")
+        if self.stall_after_seconds is not None and self.stall_after_seconds <= 0:
+            raise ValueError("SSE_STALL_AFTER_SECONDS must be > 0 when set")
+        if self.max_streams_per_user < 1:
+            raise ValueError("SSE_MAX_STREAMS_PER_USER must be >= 1")
         return self
 
 
@@ -553,6 +593,7 @@ class Settings(BaseSettings):
     queue: QueueSettings = Field(default_factory=QueueSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     worker: WorkerSettings = Field(default_factory=WorkerSettings)
+    sse: SseSettings = Field(default_factory=SseSettings)
     scanner: ScannerSettings = Field(default_factory=ScannerSettings)
     clamav: ClamAVSettings = Field(default_factory=ClamAVSettings)
     ratelimit: RateLimitSettings = Field(default_factory=RateLimitSettings)
@@ -575,6 +616,26 @@ class Settings(BaseSettings):
                 "and in clamd.conf's StreamMaxLength together."
             )
         return self
+
+    # R-41(5): the stall threshold spans two groups, so like the invariant above it cannot
+    # live on either one. Derived rather than defaulted to a literal because the value it
+    # depends on is a §8.4 TBD — pinning a number here would let the two drift the moment
+    # `WORKER_JOB_TIMEOUT_SECONDS` is finally settled.
+    STALL_MARGIN_SECONDS: ClassVar[float] = 60.0  # TBD(§8.4)
+
+    @property
+    def stall_after(self) -> float:
+        """Seconds of silence after which an in-flight document is reported `stalled`.
+
+        The floor is arq's in-progress guard (`job_timeout + 10`), below which a *healthy*
+        long ingestion would be flagged; the margin sits above that so the flag means
+        "nothing is coming" rather than "this is taking a while". An explicit
+        `SSE_STALL_AFTER_SECONDS` wins — an operator who has measured their own corpus
+        knows better than this formula, and clamping their value would hide the override.
+        """
+        if self.sse.stall_after_seconds is not None:
+            return self.sse.stall_after_seconds
+        return self.worker.job_timeout_seconds + self.STALL_MARGIN_SECONDS
 
 
 @lru_cache

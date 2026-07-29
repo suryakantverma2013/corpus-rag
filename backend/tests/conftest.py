@@ -28,7 +28,11 @@ import jwt  # noqa: E402
 import pytest  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError  # noqa: E402
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E402
+from sqlalchemy.ext.asyncio import (  # noqa: E402
+    AsyncConnection,
+    AsyncSession,
+    create_async_engine,
+)
 from sqlalchemy.pool import NullPool  # noqa: E402
 
 from app.config import get_settings  # noqa: E402
@@ -51,7 +55,13 @@ def _reset_rate_limiter() -> Iterator[None]:
 
 
 @pytest.fixture
-async def session() -> AsyncIterator[AsyncSession]:
+async def db_connection() -> AsyncIterator[AsyncConnection]:
+    """One connection in an outer transaction, rolled back on teardown.
+
+    Split out of `session` so a test can open **more than one** session on the same
+    transaction — which the T-210 SSE stream needs, since it opens a short-lived session
+    per poll tick (R-41(7)) and must still see the rows the test seeded.
+    """
     engine = create_async_engine(get_settings().database.url, poolclass=NullPool)
     try:
         conn = await engine.connect()
@@ -60,17 +70,24 @@ async def session() -> AsyncIterator[AsyncSession]:
         pytest.skip(f"Postgres not reachable for repository tests: {exc}")
 
     txn = await conn.begin()
+    try:
+        yield conn
+    finally:
+        if txn.is_active:
+            await txn.rollback()
+        await conn.close()
+        await engine.dispose()
+
+
+@pytest.fixture
+async def session(db_connection: AsyncConnection) -> AsyncIterator[AsyncSession]:
     db_session = AsyncSession(
-        bind=conn, expire_on_commit=False, join_transaction_mode="create_savepoint"
+        bind=db_connection, expire_on_commit=False, join_transaction_mode="create_savepoint"
     )
     try:
         yield db_session
     finally:
         await db_session.close()
-        if txn.is_active:
-            await txn.rollback()
-        await conn.close()
-        await engine.dispose()
 
 
 # ---- Auth fixtures (T-103) ---------------------------------------------------
@@ -130,10 +147,24 @@ def patch_jwks(
     return public
 
 
+@pytest.fixture(autouse=True)
+def _reset_stream_registry() -> Iterator[None]:
+    """Isolate the per-user SSE stream counter between tests (T-210, R-41(7)).
+
+    The registry is process-global, and a route test that never drains its stream leaves
+    its slot held — which would surface as an unrelated later test getting a `429`.
+    """
+    from app.services.document_events import registry
+
+    registry.reset()
+    yield
+    registry.reset()
+
+
 @pytest.fixture
-def app(session: AsyncSession):  # noqa: ANN201 (FastAPI app)
+def app(session: AsyncSession, db_connection: AsyncConnection):  # noqa: ANN201 (FastAPI app)
     """App instance with the DB session overridden to the transactional test session."""
-    from app.db.session import get_session
+    from app.db.session import get_session, get_stream_sessionmaker
     from app.main import create_app
 
     application = create_app()
@@ -141,7 +172,18 @@ def app(session: AsyncSession):  # noqa: ANN201 (FastAPI app)
     async def _override_session() -> AsyncIterator[AsyncSession]:
         yield session
 
+    def _stream_sessionmaker() -> AsyncSession:
+        # A *real* short-lived session per poll tick (R-41(7)), bound to the test's
+        # connection so it joins the transaction the fixture rolls back. Not the shared
+        # `session` object: reusing it would hand the stream a populated identity map,
+        # and the engine would then read stale attribute values instead of the SELECT's —
+        # exactly the coupling `_read_states` expunges to avoid.
+        return AsyncSession(
+            bind=db_connection, expire_on_commit=False, join_transaction_mode="create_savepoint"
+        )
+
     application.dependency_overrides[get_session] = _override_session
+    application.dependency_overrides[get_stream_sessionmaker] = lambda: _stream_sessionmaker
     try:
         yield application
     finally:

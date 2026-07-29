@@ -15,9 +15,11 @@ All three FR-ERR rejection strings are provisional pending §8.4 — the limits 
 
 from __future__ import annotations
 
+import json
 import uuid
+from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, assert_never
 
 from fastapi import (
     APIRouter,
@@ -31,13 +33,22 @@ from fastapi import (
     status,
 )
 from pydantic import BaseModel
+from sse_starlette.sse import EventSourceResponse
 
-from app.auth.dependencies import CurrentPrincipal, CurrentUser, DbSession
+from app.auth.dependencies import (
+    CurrentPrincipal,
+    CurrentUser,
+    DbSession,
+    SettingsDep,
+    StreamSessionmaker,
+)
 from app.db.enums import DocumentStatus, KBVisibility
 from app.db.repositories.documents import DocumentListing, DocumentRepository
 from app.security.content_validation import UnsupportedFileTypeError
 from app.security.rate_limit import limiter, principal_or_ip_key, upload_limit
+from app.services import document_events
 from app.services import documents as documents_service
+from app.services.document_events import DocumentState
 from app.services.documents import (
     ConversationNotFoundError,
     DocumentNotFoundError,
@@ -65,6 +76,7 @@ _NO_CONVERSATION = "A conversation_id is required for chat-scope uploads."
 _CONVERSATION_NOT_FOUND = "Conversation not found."
 _STORAGE_DOWN = "Storage service unavailable — please try again."
 _DOCUMENT_NOT_FOUND = "Document not found."
+_TOO_MANY_STREAMS = "Too many open document streams — close one and try again."  # TBD(§8.4) copy
 _NOT_RETRYABLE = "Only a failed document can be retried."  # TBD(§8.4) copy
 _NOT_REPLACEABLE = "Only an active or failed document can be replaced."  # TBD(§8.4) copy
 _DUPLICATE_CHECKSUM = (  # TBD(§8.4) copy
@@ -400,6 +412,134 @@ async def list_documents(
         offset=offset,
     )
     return [_to_response(listing) for listing in listings]
+
+
+# --- live status channel (T-210, FR-KBM-09, R-41) -----------------------------
+
+
+class DocumentEventResponse(DocumentResponse):
+    """The list/get DTO plus the one field the live channel adds (R-41(4)/(5)).
+
+    Subclassed rather than redefined so the stream cannot drift from the route it mirrors:
+    a field added to `DocumentResponse` appears here automatically, and a live table whose
+    contents depended on whether the modal happened to be open when a change landed is
+    exactly the failure this inheritance rules out.
+
+    `stalled` is **derived, not stored** — no `DocumentStatus` carries it (R-38(3): a state
+    exists to be written by a transition, and nothing transitions into "stalled") and
+    FR-KBM-04 gains no ninth label. It means "an in-flight document has gone quiet longer
+    than a worker could legitimately be silent", which T-212 measured as up to
+    `job_timeout + 10` seconds behind arq's in-progress guard. It is **never** true for
+    `DELETE_PENDING`/`DELETING`; R-39(7) requires those keep rendering as `Deleting`.
+    """
+
+    stalled: bool
+
+
+def _to_event_response(state: DocumentState) -> DocumentEventResponse:
+    return DocumentEventResponse(
+        **_to_response(state.listing).model_dump(),
+        stalled=state.stalled,
+    )
+
+
+@router.get(
+    "/events",
+    summary="Live document-status stream (SSE)",
+    response_class=EventSourceResponse,
+    responses={
+        status.HTTP_200_OK: {
+            "description": (
+                "An SSE stream. `snapshot` carries the full set on connect, `document` one "
+                "changed row, `removed` a document id that has left the set."
+            ),
+            "content": {"text/event-stream": {}},
+        },
+        status.HTTP_400_BAD_REQUEST: {"description": "scope=chat without a conversation_id."},
+        status.HTTP_404_NOT_FOUND: {"description": "No such conversation for this caller."},
+        status.HTTP_429_TOO_MANY_REQUESTS: {"description": "Too many concurrent streams."},
+    },
+)
+async def stream_documents(
+    user: CurrentUser,
+    session: DbSession,
+    sessionmaker: StreamSessionmaker,
+    settings: SettingsDep,
+    scope: Annotated[UploadScope | None, Query()] = None,
+    conversation_id: Annotated[uuid.UUID | None, Query()] = None,
+) -> EventSourceResponse:
+    """FR-KBM-09's live surface (R-41).
+
+    Filters, scope resolution and authorization are deliberately identical to
+    `list_documents` — same parameter spelling, same `400`/`404`, same caller scoping with
+    no admin widening — so the stream and the page it updates can never disagree about
+    what the caller may see.
+
+    **Authenticated by the ordinary `Authorization` header (R-41(3)).** A browser's
+    `EventSource` cannot send one, so the GUI (T-508) consumes this with `fetch` +
+    `ReadableStream` and parses the frames itself. Every query-string alternative was
+    rejected: a raw token there is written to access logs, proxy logs, `Referer` headers
+    and browser history, and stays valid in all of them long after the tab closes.
+
+    The `session` dependency resolves the scope **once, before streaming starts**, so a bad
+    request still fails as an ordinary `400`/`404` — once the `200` and the first byte are
+    out, there is no status code left to fail with. The loop itself uses `sessionmaker`.
+    """
+    knowledge_base_id: uuid.UUID | None = None
+    if scope is not None:
+        try:
+            knowledge_base_id = await documents_service.resolve_scope_kb_id(
+                session, user=user, scope=scope, conversation_id=conversation_id
+            )
+        except MissingConversationError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, _NO_CONVERSATION) from exc
+        except ConversationNotFoundError as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, _CONVERSATION_NOT_FOUND) from exc
+        # A scope that resolves to no knowledge base yet (nothing uploaded to it) still
+        # gets a stream: the KB is created on demand by the first upload, and a client that
+        # opened the modal a moment early must not be left without the events describing it.
+
+    try:
+        document_events.registry.acquire(user.id, limit=settings.sse.max_streams_per_user)
+    except document_events.TooManyStreamsError as exc:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, _TOO_MANY_STREAMS) from exc
+
+    async def publish() -> AsyncIterator[dict[str, str]]:
+        try:
+            events = document_events.stream_document_events(
+                sessionmaker,
+                owner_id=user.id,
+                knowledge_base_id=knowledge_base_id,
+                poll_interval=settings.sse.poll_interval_seconds,
+                stall_after=settings.stall_after,
+            )
+            async for event in events:
+                yield _frame(event)
+        finally:
+            # `finally`, not after the loop: the normal end of an SSE stream is the client
+            # vanishing, which reaches this generator as `GeneratorExit`/`CancelledError`.
+            # Releasing only on a clean exit would leak a slot per closed tab until the
+            # user hit the cap and could open no more.
+            document_events.registry.release(user.id)
+
+    return EventSourceResponse(publish(), ping=int(settings.sse.ping_seconds))
+
+
+def _frame(event: document_events.DocumentEvent) -> dict[str, str]:
+    """One SSE frame. `data` is JSON in every case, so the client has one parse path."""
+    match event:
+        case document_events.Snapshot(documents=documents):
+            payload = [_to_event_response(state).model_dump(mode="json") for state in documents]
+            return {"event": "snapshot", "data": json.dumps(payload)}
+        case document_events.DocumentChanged(state=state):
+            return {
+                "event": "document",
+                "data": _to_event_response(state).model_dump_json(),
+            }
+        case document_events.DocumentRemoved(document_id=document_id):
+            return {"event": "removed", "data": json.dumps({"document_id": str(document_id)})}
+        case _:  # pragma: no cover — exhaustive over the union; keeps mypy honest if it grows
+            assert_never(event)
 
 
 @router.get(

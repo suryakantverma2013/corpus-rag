@@ -39,3 +39,19 @@ async def get_session() -> AsyncIterator[AsyncSession]:
     """FastAPI dependency yielding an `AsyncSession` (caller commits)."""
     async with get_sessionmaker()() as session:
         yield session
+
+
+def get_stream_sessionmaker() -> async_sessionmaker[AsyncSession]:
+    """The session **factory**, for handlers that outlive a request (T-210, R-41(7)).
+
+    `get_session` is wrong for an SSE stream: it yields one session and holds it until the
+    handler returns, which for a stream means until the user closes the modal. A pool slot
+    per open viewer would starve ordinary requests. Streams therefore take the factory and
+    open a short-lived session per poll tick.
+
+    A thin wrapper over `get_sessionmaker` rather than that function used directly, so it
+    is a distinct dependency key — tests override this one to bind the stream to the same
+    transaction-scoped session the rest of the suite uses, without redirecting every other
+    route's session at the same time.
+    """
+    return get_sessionmaker()

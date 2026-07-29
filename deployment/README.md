@@ -17,6 +17,7 @@ via the environment for anything shared.
 | MinIO API | `localhost:9000` | S3 object storage — reuse existing, or `--profile minio` |
 | MinIO console | http://localhost:9001 | Web UI — login `minioadmin` / `minioadmin` |
 | Postgres *(profile)* | `localhost:5432` | Local instance, or `--profile postgres`; DB `corpus` |
+| ClamAV *(profile)* | `localhost:3310` | Malware screening at the head of the ingestion worker (R-32); `--profile clamav` |
 
 ## Bring services up / down
 
@@ -37,6 +38,11 @@ MINIO_API_PORT=9100 MINIO_CONSOLE_PORT=9101 \
 # ...also a containerized pgvector (only if you have no local Postgres)
 docker compose -f deployment/docker-compose.yml --profile postgres up -d
 
+# ...also ClamAV, required by the ingestion worker unless SCANNER_BACKEND=structural.
+# First start downloads ~1 GB of signatures and can take several minutes before clamd
+# accepts connections; the named volume means later starts skip the download.
+docker compose -f deployment/docker-compose.yml --profile clamav up -d clamav
+
 # status / logs
 docker compose -f deployment/docker-compose.yml ps
 docker compose -f deployment/docker-compose.yml logs -f
@@ -51,7 +57,21 @@ Quick checks:
 ```bash
 redis-cli -u redis://localhost:6379/0 ping          # -> PONG
 # MinIO: open http://localhost:9001 and sign in with minioadmin / minioadmin
+
+# ClamAV — ask the daemon itself, not `docker ps`:
+docker exec deployment-clamav-1 clamdscan --ping 1  # -> PONG
+docker exec deployment-clamav-1 clamdscan --version # -> ClamAV <ver>/<sigs>/<date>
 ```
+
+> **The `clamav` container reports `unhealthy` even when clamd is working.** The
+> image's `clamdcheck.sh` runs `echo PING | nc localhost 3310`; `/etc/hosts` resolves
+> `localhost` to `::1` first, and `clamd.conf` here pins `TCPAddr 0.0.0.0`, so the
+> probe talks to an address clamd does not listen on. `nc 127.0.0.1 3310` answers
+> `PONG` and so does the application's own client, which connects by address rather
+> than name — the daemon is fine and ingestion screens normally. Verify with the
+> `clamdscan --ping` command above rather than the container's health column.
+> Nothing in compose gates on that healthcheck, but an orchestrator that restarts on
+> it would loop, so override the healthcheck (or drop `TCPAddr`) before deploying.
 
 ## Database bootstrap (one-time)
 
