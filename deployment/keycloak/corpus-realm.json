@@ -12,11 +12,19 @@
   "failureFactor": 30,
   "roles": {
     "realm": [
-      { "name": "admin", "description": "Corpus Administrator — full user mgmt, unrestricted docs (spec §4.9)" },
-      { "name": "user", "description": "Corpus Non-Administrator — own/authorized docs only (spec §4.9)" }
+      {
+        "name": "admin",
+        "description": "Corpus Administrator \u2014 full user mgmt, unrestricted docs (spec \u00a74.9)"
+      },
+      {
+        "name": "user",
+        "description": "Corpus Non-Administrator \u2014 own/authorized docs only (spec \u00a74.9)"
+      }
     ]
   },
-  "defaultRoles": ["user"],
+  "defaultRoles": [
+    "user"
+  ],
   "clients": [
     {
       "clientId": "corpus-backend",
@@ -54,17 +62,43 @@
       "firstName": "Corpus",
       "lastName": "Administrator",
       "credentials": [
-        { "type": "password", "value": "CHANGE_ME_admin-password", "temporary": false }
+        {
+          "type": "password",
+          "value": "CHANGE_ME_admin-password",
+          "temporary": false
+        }
       ],
-      "realmRoles": ["admin", "user"]
+      "realmRoles": [
+        "admin",
+        "user"
+      ]
     },
     {
       "username": "service-account-corpus-backend",
       "enabled": true,
       "serviceAccountClientId": "corpus-backend",
       "clientRoles": {
-        "realm-management": ["manage-users"]
+        "realm-management": [
+          "manage-users",
+          "query-users",
+          "view-realm",
+          "view-users"
+        ]
       }
     }
-  ]
+  ],
+  "components": {
+    "org.keycloak.userprofile.UserProfileProvider": [
+      {
+        "name": "declarative-user-profile",
+        "providerId": "declarative-user-profile",
+        "subComponents": {},
+        "config": {
+          "kc.user.profile.config": [
+            "{\"attributes\": [{\"name\": \"username\", \"displayName\": \"${username}\", \"validations\": {\"length\": {\"min\": 3, \"max\": 255}, \"username-prohibited-characters\": {}, \"up-username-not-idn-homograph\": {}}, \"permissions\": {\"view\": [], \"edit\": [\"admin\"]}, \"multivalued\": false}, {\"name\": \"email\", \"displayName\": \"${email}\", \"validations\": {\"email\": {}, \"length\": {\"max\": 255}}, \"required\": {\"roles\": [\"user\"]}, \"permissions\": {\"view\": [], \"edit\": [\"admin\"]}, \"multivalued\": false}, {\"name\": \"firstName\", \"displayName\": \"${firstName}\", \"validations\": {\"length\": {\"max\": 255}, \"person-name-prohibited-characters\": {}}, \"permissions\": {\"view\": [], \"edit\": [\"admin\"]}, \"multivalued\": false}, {\"name\": \"lastName\", \"displayName\": \"${lastName}\", \"validations\": {\"length\": {\"max\": 255}, \"person-name-prohibited-characters\": {}}, \"permissions\": {\"view\": [], \"edit\": [\"admin\"]}, \"multivalued\": false}], \"groups\": [{\"name\": \"user-metadata\", \"displayHeader\": \"User metadata\", \"displayDescription\": \"Attributes, which refer to user metadata\"}]}"
+          ]
+        }
+      }
+    ]
+  }
 }

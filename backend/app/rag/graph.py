@@ -40,6 +40,7 @@ from app.rag import telemetry
 from app.rag.errors import (
     ACCESS_DENIED,
     ACCESS_DENIED_CODE,
+    BLOCKED_INJECTION,
     SYSTEM_FAILURE,
     classify,
     copy_for,
@@ -71,6 +72,7 @@ log = structlog.get_logger(__name__)
 __all__ = [
     "ABSTAIN_EMPTY_SCOPE",
     "ACCESS_DENIED",
+    "BLOCKED_INJECTION",
     "NODE_NAMES",
     "SYSTEM_FAILURE",
     "build_graph",
@@ -248,20 +250,118 @@ async def lock(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
 
 
 async def screen(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
-    """FR-ORC-07 / NFR-SEC-05 — prompt-injection screening, *before* retrieval. T-303."""
-    return {"injection_verdict": "clean"}
+    """FR-ORC-07 / NFR-SEC-05 — prompt-injection screening, *before* retrieval (T-303, R-44).
+
+    Screens **the query only** (R-44(1)). Retrieved document text is not screened here and is
+    never blocked: it is neutralised and fenced by `app.rag.prompts`, which is where NFR-SEC-05's
+    "treated as data, never as system instructions" actually lives. Blocking on chunk text would
+    be a denial-of-service against the caller's own knowledge base — one uploaded security policy
+    containing "ignore previous instructions" would make every query that retrieves it
+    permanently unanswerable — and the chunk is already inside the caller's FR-RET-04 scope, so
+    there is no privilege boundary a block would be defending.
+
+    **Fails closed**, unlike `lock`. This node has no `try`, so a screening error routes through
+    `handle_node_error` to `finalize` with no retrieval and no generation. That is deliberate and
+    is the R-32 direction ("unreachable scanner → job fails closed"): the gate is advisory and
+    degrades safely, a screen is not. It is also why nothing here does I/O — the rules are
+    compiled at import, so the only way to reach that path is a bug.
+
+    `suspicious` proceeds to retrieval and changes nothing downstream (R-44(4)). Its purpose is
+    to keep the block tier narrow: Corpus is document QA, so a user asking *about* injection is a
+    real question, and the tier is what lets a lower-precision rule report without refusing.
+    Appending "be careful" to the prompt on a suspicious turn was considered and rejected — an
+    instruction to an already-compromised channel is a suggestion, not a control.
+    """
+    from app.security.prompt_injection import screen_query
+
+    ctx = runtime.context
+    if not get_settings().graph.screen_enabled:
+        # Diagnosis path only (see `GraphSettings.screen_enabled`). Logged at warning so a box
+        # left in this state is visible rather than quietly unscreened.
+        log.warning("security.injection.screen_disabled", conversation_id=str(ctx.conversation_id))
+        return {"injection_verdict": "clean", "injection_rule": None}
+
+    result = screen_query(state.get("query", ""))
+    if result.verdict != "clean":
+        # Named outside the closed `graph.turn.*` vocabulary so R-43(5)'s span-pairing contract
+        # and `telemetry.EVENT_NAMES` are untouched — this is a security event, not a turn
+        # boundary. The rule *code* only: R-43(5)'s "no payload text ever" applies with extra
+        # force here, since the text in question is attacker-chosen.
+        log.warning(
+            f"security.injection.{result.verdict}",
+            conversation_id=str(ctx.conversation_id),
+            owner_id=str(ctx.owner_id),
+            turn_index=state.get("turn_index"),
+            rule=result.rule,
+        )
+    return {"injection_verdict": result.verdict, "injection_rule": result.rule}
 
 
 async def route(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
-    """FR-ORC-07 / FR-RET-03 — query classification and strategy routing. T-304.
+    """FR-ORC-07 / FR-RET-03 — query classification and strategy routing (T-304, R-45).
 
-    `hybrid` is FR-RET-03's own default for an unclassified query, so the stub is the
-    real fallback rather than a stand-in. T-304 must fan sub-queries out **inside**
-    `retrieve` (`asyncio.gather`), never via `Send`: `Send` returns concurrent updates to
-    one channel and would force merge reducers onto `retrieved_chunk_ids`, which R-42(4)
-    rules out.
+    One schema-constrained call on the cheap `OPENAI_ROUTER_MODEL` classifies the query and
+    returns the derived probes; `app.rag.router` owns the prompt, the closed class set and
+    FR-RET-03's class→strategy mapping.
+
+    **Fails open, and that is the point** (R-45(2)). Unlike `screen` — which has no `try`
+    because a security control must fail closed — everything here is wrapped, because
+    `hybrid` with no probes is exactly what FR-RET-03 prescribes for an unclassified query.
+    Letting a retrieval-quality optimisation turn a healthy turn into `SYSTEM_FAILURE` would
+    make the product worse than not having the optimisation at all. The history read is inside
+    the guard for the same reason: a router that cannot see the tail classifies worse, it does
+    not fail.
+
+    `sub_queries` carries **derived probes only** (R-45(3)) — T-305 always retrieves with
+    `query` itself as well, so an empty list means "just the query" and a bad rewrite can
+    never remove the original signal. T-305 must fan those out **inside** `retrieve`
+    (`asyncio.gather`), never via `Send`: `Send` returns concurrent updates to one channel and
+    would force merge reducers onto `retrieved_chunk_ids`, which R-42(4) rules out.
     """
-    return {"strategy": "hybrid"}
+    from app.rag.history import load_router_tail
+    from app.rag.router import FALLBACK, classify_query
+
+    ctx = runtime.context
+    settings = get_settings()
+    query = state.get("query", "")
+
+    if not settings.graph.router_enabled:
+        # Deliberate "stop paying for the extra call", not a failure path — hence info, where
+        # the screen's kill switch logs a warning. Turning this off removes an improvement;
+        # turning that one off removes a control.
+        log.info("rag.router.disabled", conversation_id=str(ctx.conversation_id))
+        return {"query_class": None, "strategy": FALLBACK.strategy, "sub_queries": []}
+
+    try:
+        history = []
+        if settings.router.history_turns > 0:
+            async with ctx.sessionmaker() as session:
+                history = await load_router_tail(
+                    session,
+                    ctx.conversation_id,
+                    turns=settings.router.history_turns,
+                    max_chars=settings.router.history_max_chars,
+                )
+        chat = ctx.chat
+        if chat is None:
+            from app.services.llm import get_chat_client
+
+            chat = get_chat_client()
+        decision = await classify_query(query=query, chat=chat, history=history, settings=settings)
+    except Exception:
+        log.warning(
+            "rag.router.failed",
+            conversation_id=str(ctx.conversation_id),
+            turn_index=state.get("turn_index"),
+            exc_info=True,
+        )
+        decision = FALLBACK
+
+    return {
+        "query_class": decision.query_class,
+        "strategy": decision.strategy,
+        "sub_queries": list(decision.sub_queries),
+    }
 
 
 async def retrieve(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
@@ -329,9 +429,14 @@ async def abstain(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
 
     A terminal *node*, not an edge to `END`: an abstention is a response. It is persisted,
     telemetered and rendered like any other, so it must pass through `finalize`.
+
+    The blocked branch answers `BLOCKED_INJECTION`, not `SYSTEM_FAILURE`. Until T-303 it did the
+    latter, which FR-ERR-04 reserves for *unclassified errors* — a blocked prompt is neither
+    unclassified nor an error, and R-43(6) had already said injection-`blocked` carries its own
+    copy. No `error_code` is set, matching the abstain branch below (R-44(5)).
     """
     if state.get("injection_verdict") == "blocked":
-        return {"outcome": "blocked", "answer": SYSTEM_FAILURE, "citation_ids": []}
+        return {"outcome": "blocked", "answer": BLOCKED_INJECTION, "citation_ids": []}
     return {
         "outcome": "abstained",
         "answer": state.get("answer") or ABSTAIN_EMPTY_SCOPE,

@@ -52,14 +52,30 @@ _MAX_THREAD_CHECKPOINT_BYTES = 64 * 1024  # TBD(§8.4)
 # --- test doubles -------------------------------------------------------------
 
 
+class _StubScalars:
+    def __init__(self, rows: list[object]) -> None:
+        self._rows = rows
+
+    def all(self) -> list[object]:
+        return self._rows
+
+
 class _StubSession:
-    """Only what `govern` asks of a session (see `tests/test_graph.py`)."""
+    """What `govern` and the T-304 router ask of a session (see `tests/test_graph.py`).
+
+    `scalars` is here for the router's history-tail read. Without it `route` would fail open on
+    every turn in this file — passing, but exercising the fallback rather than the router, and
+    logging a spurious failure on each run.
+    """
 
     def __init__(self, conversation: Conversation | None) -> None:
         self._conversation = conversation
 
     async def get(self, model: type, id_: uuid.UUID) -> Conversation | None:  # noqa: ARG002
         return self._conversation
+
+    async def scalars(self, statement: object) -> _StubScalars:  # noqa: ARG002
+        return _StubScalars([])
 
     async def __aenter__(self) -> _StubSession:
         return self
@@ -363,9 +379,15 @@ async def main(thread_id):
     owner_id = uuid.UUID({owner!r})
     conversation = Conversation(id=conversation_id, owner_id=owner_id, tenant_id=uuid.UUID(int=0))
 
+    class Rows:
+        def all(self):
+            return []
+
     class S:
         async def get(self, model, id_):
             return conversation
+        async def scalars(self, statement):
+            return Rows()
         async def __aenter__(self):
             return self
         async def __aexit__(self, *exc):

@@ -435,6 +435,12 @@ class OpenAISettings(BaseSettings):
 
     api_key: str = Field(default="")
     chat_model: str = Field(default="gpt-4o")
+    # The FR-RET-03 router (T-304, R-45(1)). Deliberately *not* `chat_model`: the router
+    # emits a handful of tokens of JSON on the critical path before retrieval, so it wants
+    # the cheapest, fastest model that can follow a schema, while `chat_model` is chosen for
+    # answer quality. One knob per job also means tuning either cannot silently move the
+    # other's cost. # TBD(§8.4)
+    router_model: str = Field(default="gpt-4o-mini")
     # text-embedding-3-large (3072-dim) matches the `document_chunks.embedding`
     # VECTOR(3072) column (app.db.base.EMBEDDING_DIM). # TBD(§8.4)
     embedding_model: str = Field(default="text-embedding-3-large")
@@ -496,6 +502,97 @@ class EmbeddingSettings(BaseSettings):
             raise ValueError("EMBEDDING_TIMEOUT_SECONDS values must be > 0")
         if self.max_retries < 0 or self.query_max_retries < 0:
             raise ValueError("EMBEDDING_MAX_RETRIES values must be >= 0")
+        return self
+
+
+class LlmSettings(BaseSettings):
+    """How the app *drives* the chat-completions endpoint (T-304, R-45; T-307 extends).
+
+    The same split as `OPENAI_*` vs `EMBEDDING_*`, for the same reason: which model to call
+    is a provider/account fact, while transport and per-call-site budgets are properties of
+    the call site. ``router_*`` mirrors `EMBEDDING_QUERY_*` exactly — one endpoint, two
+    callers with very different patience, and the one on the chat critical path gets the
+    short leash.
+
+    ``backend="fake"`` selects the deterministic in-process client for dev and CI, on the
+    `EMBEDDING_BACKEND=fake` / `QUEUE_BACKEND=none` precedent. It is never selected
+    implicitly — see :func:`app.services.llm.build_chat_client`.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="LLM_", env_file=".env", extra="ignore")
+
+    backend: Literal["openai", "fake"] = Field(default="openai")
+
+    # Generation (T-307). The SDK's default is 600s, which on a request path is a hang.
+    timeout_seconds: float = Field(default=90.0)  # TBD(§8.4)
+    connect_timeout_seconds: float = Field(default=5.0)  # TBD(§8.4)
+    max_retries: int = Field(default=2)  # TBD(§8.4)
+
+    # The FR-RET-03 router. Short and nearly retry-free on purpose: the call sits *before*
+    # retrieval on a path NFR-PRF-02 already makes the user wait through, and R-45(2) makes
+    # the router fail open — so waiting 90s for a classification is strictly worse than
+    # giving up at 8s and retrieving with `hybrid`, which is what an unclassified query gets
+    # anyway.
+    router_timeout_seconds: float = Field(default=8.0)  # TBD(§8.4)
+    router_max_retries: int = Field(default=1)  # TBD(§8.4)
+
+    @model_validator(mode="after")
+    def _coherent(self) -> LlmSettings:
+        if self.timeout_seconds <= 0 or self.router_timeout_seconds <= 0:
+            raise ValueError("LLM_*_TIMEOUT_SECONDS values must be > 0")
+        if self.connect_timeout_seconds <= 0:
+            raise ValueError("LLM_CONNECT_TIMEOUT_SECONDS must be > 0")
+        if self.max_retries < 0 or self.router_max_retries < 0:
+            raise ValueError("LLM_*_MAX_RETRIES values must be >= 0")
+        return self
+
+
+class RouterSettings(BaseSettings):
+    """FR-RET-03 query-adaptive routing policy (T-304, R-45).
+
+    Quality and cost knobs, not limits: nothing here rejects a query, and every failure to
+    honour one degrades to `hybrid` rather than to an error (R-45(2)).
+
+    The two probe bounds are what keep `RAGState.sub_queries` inside FR-PER-03's
+    "ids and scalars" spirit — they are the reason HyDE's hypothetical passage needs no new
+    state field (R-45(3)/(4)) — and they bound the retrieval fan-out T-305 pays for: each
+    probe is a second dense **and** sparse query.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ROUTER_", env_file=".env", extra="ignore")
+
+    #: Derived probes *in addition to* the original query, which T-305 always retrieves with
+    #: (R-45(3)). 3 means at most 4 probes → 8 arm queries, run concurrently.
+    max_sub_queries: int = Field(default=3)  # TBD(§8.4)
+
+    #: Per-probe character ceiling. Sized for a HyDE passage — a decomposed sub-question is
+    #: far shorter — and enforced by truncation, never by discarding the probe.
+    max_probe_chars: int = Field(default=400)  # TBD(§8.4)
+
+    #: Generous rather than tight: a cap that truncates the JSON mid-object produces exactly
+    #: the malformed payload R-45(2) has to throw away, so shaving tokens here buys nothing
+    #: and costs whole classifications.
+    max_output_tokens: int = Field(default=800)  # TBD(§8.4)
+
+    #: How much conversation tail the router sees (R-45(6)). Enough to resolve "what about
+    #: the second one?" without turning a cheap classification into a full-history call —
+    #: R-30's untruncated history belongs to the *generator*, not to the router.
+    history_turns: int = Field(default=4)  # TBD(§8.4)
+    history_max_chars: int = Field(default=600)  # TBD(§8.4)
+
+    @model_validator(mode="after")
+    def _coherent(self) -> RouterSettings:
+        if self.max_sub_queries < 0:
+            # 0 is meaningful: classify and record, but never fan out.
+            raise ValueError("ROUTER_MAX_SUB_QUERIES must be >= 0")
+        if self.max_probe_chars < 1:
+            raise ValueError("ROUTER_MAX_PROBE_CHARS must be >= 1")
+        if self.max_output_tokens < 1:
+            raise ValueError("ROUTER_MAX_OUTPUT_TOKENS must be >= 1")
+        if self.history_turns < 0:
+            raise ValueError("ROUTER_HISTORY_TURNS must be >= 0")
+        if self.history_max_chars < 1:
+            raise ValueError("ROUTER_HISTORY_MAX_CHARS must be >= 1")
         return self
 
 
@@ -654,6 +751,23 @@ class GraphSettings(BaseSettings):
     # answering 409; the graph still takes and releases the lock.
     lock_enforced: bool = Field(default=True)
 
+    # The T-303 prompt-injection screen (NFR-SEC-05, R-44). Switchable *because* the screen is
+    # defence in depth: R-44(3) puts the requirement on the structural controls (the system
+    # prompt carries no untrusted bytes, authorization never reaches the prompt, FR-CIT-06(2)
+    # rejects an unsupplied citation), and none of those has a flag. A false-positive storm on
+    # a pattern rule needs a diagnosis path that is not "ship a hotfix"; the isolation it backs
+    # up must not have one. Note the contrast with R-32's ClamAV pass, which fails *closed* —
+    # there the scanner is the only control, so disabling it removes the protection outright.
+    screen_enabled: bool = Field(default=True)
+
+    # The T-304 FR-RET-03 router (R-45(2)). Same precedent as the two switches above, and the
+    # weakest of the three claims on a flag: the router is a retrieval-quality optimisation
+    # whose off state is `hybrid` — which FR-RET-03 itself prescribes for an unclassified
+    # query — so turning it off removes no requirement, it removes an improvement. Note this
+    # is *not* the failure path: R-45(2) makes the node fail open on its own, so this flag is
+    # for a deliberate "stop paying for the extra call", not for coping with a broken one.
+    router_enabled: bool = Field(default=True)
+
     @model_validator(mode="after")
     def _coherent(self) -> GraphSettings:
         if self.max_retries < 0:
@@ -746,6 +860,8 @@ class Settings(BaseSettings):
     ratelimit: RateLimitSettings = Field(default_factory=RateLimitSettings)
     openai: OpenAISettings = Field(default_factory=OpenAISettings)
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
+    llm: LlmSettings = Field(default_factory=LlmSettings)
+    router: RouterSettings = Field(default_factory=RouterSettings)
     retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
     checkpointer: CheckpointerSettings = Field(default_factory=CheckpointerSettings)
     graph: GraphSettings = Field(default_factory=GraphSettings)

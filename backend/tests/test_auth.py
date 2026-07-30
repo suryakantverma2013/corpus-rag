@@ -91,7 +91,7 @@ async def test_login_ok(
 ) -> None:
     kc = get_settings().keycloak
     sub = uuid.uuid4()
-    access = make_token(sub=sub, email="admin@corpus.local")
+    access = make_token(sub=sub, email="admin@corpus.test")
     respx_mock.post(kc.token_endpoint).respond(
         json={
             "access_token": access,
@@ -102,7 +102,7 @@ async def test_login_ok(
     )
 
     resp = await client.post(
-        "/api/v1/auth/login", json={"email": "admin@corpus.local", "password": "pw"}
+        "/api/v1/auth/login", json={"email": "admin@corpus.test", "password": "pw"}
     )
 
     assert resp.status_code == 200
@@ -231,6 +231,34 @@ async def test_change_password_ok(
     )
     assert resp.status_code == 204
     assert reset.called
+
+
+async def test_change_password_reports_a_forbidden_reset_as_a_server_fault(
+    client: httpx.AsyncClient, session, make_token: Callable[..., str], respx_mock
+) -> None:
+    """T-110: change-password is the second route that reaches the Admin API.
+
+    `reset-password` needs the service account's `manage-users` role, so it can hit exactly the
+    under-provisioned condition the /users routes hit — and the user's own credentials are
+    perfectly fine, which is why this must not be a 401/403 (blaming them) or a 503 (promising
+    it will pass).
+    """
+    kc = get_settings().keycloak
+    sub = uuid.uuid4()
+    await UserRepository(session).upsert_from_claims(sub=sub, email="u@corpus.test")
+    token = make_token(sub=sub, email="u@corpus.test", roles=("user",))
+    respx_mock.post(kc.token_endpoint).respond(
+        json={"access_token": "svc", "refresh_token": "r", "expires_in": 60, "token_type": "Bearer"}
+    )
+    respx_mock.put(f"{kc.admin_url}/users/{sub}/reset-password").respond(403)
+
+    resp = await client.post(
+        "/api/v1/auth/change-password",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": "old", "new_password": "new"},
+    )
+    assert resp.status_code == 500
+    assert "unavailable" not in resp.text.lower(), "a missing role is not an outage"
 
 
 async def test_change_password_wrong_current_401(

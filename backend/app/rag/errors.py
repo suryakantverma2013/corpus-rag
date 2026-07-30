@@ -22,6 +22,7 @@ import enum
 __all__ = [
     "ACCESS_DENIED",
     "ACCESS_DENIED_CODE",
+    "BLOCKED_INJECTION",
     "FAILURE_COPY",
     "SYSTEM_FAILURE",
     "FailureClass",
@@ -40,6 +41,29 @@ ACCESS_DENIED_CODE = "ACCESS_DENIED"
 
 #: FR-ERR-04's named last resort. Also normative copy.
 SYSTEM_FAILURE = "System Failure: Please try again."
+
+#: NFR-SEC-05 / R-44(5) — what a turn blocked by the T-303 injection screen answers.
+#:
+#: It lives here rather than in `app.rag.prompts` because this module already holds every
+#: user-facing *outcome* string (`ACCESS_DENIED` is likewise not a `FailureClass`), so T-402's
+#: persist step and T-505's display have one import for all of them.
+#:
+#: R-43(6) asserted that injection-`blocked` has "[its] own copy and routing"; until T-303 the
+#: `abstain` node answered `SYSTEM_FAILURE` on that branch, which FR-ERR-04 reserves for
+#: *unclassified errors* — a blocked prompt is neither unclassified nor an error.
+#:
+#: The copy deliberately **names no rule and echoes no part of the query**: telling an attacker
+#: which pattern fired turns each attempt into a probe, and echoing the input would render
+#: attacker-chosen text back into the transcript. `RAGState.injection_rule` carries the code
+#: for operators; the user gets an instruction they can act on.
+#:
+#: There is no `error_code` on this path, matching the abstain path, which also sets none:
+#: `injection_verdict`/`injection_rule` are already the discriminators, and a third name for
+#: the same fact would be one more thing to keep in step.
+BLOCKED_INJECTION = (  # TBD(§8.4)
+    "I can't answer that as written — it reads as an attempt to change how I work rather "
+    "than as a question about your documents. Try rephrasing it as a question."
+)
 
 
 class FailureClass(enum.StrEnum):
@@ -103,6 +127,19 @@ _CODE_TO_CLASS: dict[str, FailureClass] = {
     "EMBEDDING_RESPONSE_INVALID": FailureClass.RETRIEVAL_UNAVAILABLE,
     "EMBEDDING_UNAVAILABLE": FailureClass.RETRIEVAL_UNAVAILABLE,
     "EMBEDDING_RATE_LIMITED": FailureClass.RATE_LIMITED,
+    # `app.services.llm` (T-304). These matter for T-307, not for the router: R-45(2) makes
+    # the router fail open, so its exceptions never reach `classify`. They are mapped here
+    # because *translating* an SDK error is what stops it being an `openai.OpenAIError`, so
+    # without these entries the fall-through below would file every generation failure as
+    # SYSTEM_FAILURE — the same defect T-302 fixed for `type(exc).__name__`.
+    "CHAT_FAILED": FailureClass.LLM_ERROR,
+    "CHAT_CONFIG": FailureClass.LLM_ERROR,
+    "CHAT_AUTH": FailureClass.LLM_ERROR,
+    "CHAT_REJECTED": FailureClass.LLM_ERROR,
+    "CHAT_REFUSED": FailureClass.LLM_ERROR,
+    "CHAT_RESPONSE_INVALID": FailureClass.LLM_ERROR,
+    "CHAT_UNAVAILABLE": FailureClass.LLM_ERROR,
+    "CHAT_RATE_LIMITED": FailureClass.RATE_LIMITED,
 }
 
 

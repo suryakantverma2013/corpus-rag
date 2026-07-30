@@ -46,9 +46,9 @@ async def _admin_headers(
 ) -> tuple[uuid.UUID, dict[str, str]]:
     admin_sub = uuid.uuid4()
     await UserRepository(session).upsert_from_claims(
-        sub=admin_sub, email="admin@corpus.local", display_name="Admin"
+        sub=admin_sub, email="admin@corpus.test", display_name="Admin"
     )
-    token = make_token(sub=admin_sub, email="admin@corpus.local", roles=("admin", "user"))
+    token = make_token(sub=admin_sub, email="admin@corpus.test", roles=("admin", "user"))
     return admin_sub, {"Authorization": f"Bearer {token}"}
 
 

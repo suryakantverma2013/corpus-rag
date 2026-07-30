@@ -44,6 +44,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
     from app.rag.retrieval import Retriever
     from app.services.embeddings import EmbeddingClient
+    from app.services.llm import ChatClient
     from app.services.processing_lock import ProcessingLockStore
 
 __all__ = [
@@ -197,4 +198,9 @@ class RAGContext:
     #: double, which is therefore unreachable from a deployment. `None` means "build the
     #: database-backed one from `sessionmaker`", which is what every real run does.
     processing_lock: ProcessingLockStore | None = None
+    #: The chat-completions seam (T-304's router; T-307's generator). Injected for the same
+    #: reason as the two above — it is the only route to `FakeChatClient`, so the double stays
+    #: unreachable from a deployment. `None` means "build the one `LLM_BACKEND` names", which
+    #: is what every real run does.
+    chat: ChatClient | None = None
     is_admin: bool = False

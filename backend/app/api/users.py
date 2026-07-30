@@ -15,6 +15,8 @@ from fastapi import APIRouter, HTTPException, Query, status
 from app.auth import users_service
 from app.auth.dependencies import DbSession, Keycloak, RequireAdmin
 from app.auth.keycloak_client import (
+    KeycloakForbiddenError,
+    KeycloakRejectedError,
     KeycloakUnavailableError,
     TooManyAttemptsError,
     UserConflictError,
@@ -29,7 +31,17 @@ _CONFLICT = "A user with that email already exists."
 _NOT_FOUND = "User not found."
 _SELF = "You cannot perform this action on your own account."
 _RATE_LIMITED = "Too many attempts — try again later."
+# 503: transient by construction (T-110) — Keycloak unreachable, timed out, or 5xx. The copy
+# says "unavailable" and means it, so nothing that needs a configuration change may use it.
 _UPSTREAM = "Authentication service unavailable."
+# 500: the server's own Keycloak credentials are wrong or under-provisioned, or we sent a
+# request Keycloak rejected. The caller is an authenticated administrator who did nothing
+# wrong and can do nothing about it, so the copy points at the one place that can — the logs,
+# where `keycloak.admin_call_failed` carries the method, path and status. # TBD(§8.4)
+_MISCONFIGURED = (
+    "User administration is not configured correctly on the server. "
+    "Check the server logs for details."
+)
 
 
 @router.post("", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
@@ -50,6 +62,8 @@ async def create_user(
         raise HTTPException(status.HTTP_409_CONFLICT, _CONFLICT) from exc
     except TooManyAttemptsError as exc:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, _RATE_LIMITED) from exc
+    except (KeycloakForbiddenError, KeycloakRejectedError) as exc:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, _MISCONFIGURED) from exc
     except KeycloakUnavailableError as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, _UPSTREAM) from exc
 
@@ -64,6 +78,8 @@ async def list_users(
 ) -> list[UserResponse]:
     try:
         return await users_service.list_users(kc=kc, first=first, limit=limit, search=search)
+    except (KeycloakForbiddenError, KeycloakRejectedError) as exc:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, _MISCONFIGURED) from exc
     except KeycloakUnavailableError as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, _UPSTREAM) from exc
 
@@ -86,6 +102,8 @@ async def update_user(
         raise HTTPException(status.HTTP_404_NOT_FOUND, _NOT_FOUND) from exc
     except TooManyAttemptsError as exc:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, _RATE_LIMITED) from exc
+    except (KeycloakForbiddenError, KeycloakRejectedError) as exc:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, _MISCONFIGURED) from exc
     except KeycloakUnavailableError as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, _UPSTREAM) from exc
 
@@ -100,5 +118,7 @@ async def delete_user(
         raise HTTPException(status.HTTP_409_CONFLICT, _SELF) from exc
     except UserNotFoundError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, _NOT_FOUND) from exc
+    except (KeycloakForbiddenError, KeycloakRejectedError) as exc:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, _MISCONFIGURED) from exc
     except KeycloakUnavailableError as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, _UPSTREAM) from exc

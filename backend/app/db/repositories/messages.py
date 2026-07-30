@@ -30,6 +30,24 @@ class MessageRepository(BaseRepository[Message]):
         )
         return list((await self.session.scalars(stmt)).all())
 
+    async def list_tail(self, conversation_id: uuid.UUID, *, limit: int) -> list[Message]:
+        """The last ``limit`` messages, returned oldest first (T-304, R-45(6)).
+
+        `ORDER BY seq DESC LIMIT n` reversed in Python, rather than loading the conversation
+        and slicing: the router asks this on every turn, and the caller that needs a bounded
+        tail is the one that must not pay for an unbounded read. `ix_messages_conversation_id_seq`
+        serves the ordering, so this is an index scan of `limit` rows either way.
+        """
+        if limit <= 0:
+            return []
+        stmt = (
+            select(Message)
+            .where(Message.conversation_id == conversation_id)
+            .order_by(Message.seq.desc())
+            .limit(limit)
+        )
+        return list(reversed(list((await self.session.scalars(stmt)).all())))
+
     async def set_feedback(self, message: Message, feedback: Feedback | None) -> Message:
         message.feedback = feedback
         await self.session.flush()

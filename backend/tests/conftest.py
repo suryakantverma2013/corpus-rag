@@ -36,6 +36,14 @@ os.environ.setdefault("RATELIMIT_STORAGE_URI", "memory://")
 # The arq path is still covered: `test_job_queue` constructs `ArqJobQueue` directly.
 os.environ.setdefault("QUEUE_BACKEND", "none")
 
+# Third instance of the same lesson (T-304). `route` reaches for the process-wide chat client
+# whenever `RAGContext.chat` is not injected, so any future graph test that forgets the
+# injection would build a real `AsyncOpenAI` — caching a loop-bound httpx pool, and, if a key
+# happens to be present in the environment, billing a classification per test run. The
+# deterministic backend makes that accident impossible; the OpenAI path is still covered,
+# because `test_llm.py` constructs `OpenAIChatClient` directly.
+os.environ.setdefault("LLM_BACKEND", "fake")
+
 # Keep every module's logger observable by `structlog.testing.capture_logs` (T-302).
 # `cache_logger_on_first_use=True` latches a module-level `structlog.get_logger(__name__)`
 # onto the processor chain configured at its first use, and nothing un-latches it — so a
@@ -154,7 +162,7 @@ def make_token(rsa_keys: tuple[rsa.RSAPrivateKey, rsa.RSAPublicKey]) -> Callable
     def _make(
         *,
         sub: uuid.UUID | None = None,
-        email: str = "admin@corpus.local",
+        email: str = "admin@corpus.test",
         roles: tuple[str, ...] = ("admin", "user"),
         signing_key: rsa.RSAPrivateKey | None = None,
         **overrides: object,
@@ -219,9 +227,13 @@ async def _reset_graph_and_checkpointer() -> AsyncIterator[None]:
     yield
     from app.rag.graph import close_graph
     from app.services.checkpointer import close_checkpointer
+    from app.services.llm import close_chat_client
 
     await close_graph()
     await close_checkpointer()
+    # Same loop-affinity argument, one client further along (T-304): the SDK pools inside a
+    # client bound to the creating loop.
+    await close_chat_client()
 
 
 @pytest.fixture

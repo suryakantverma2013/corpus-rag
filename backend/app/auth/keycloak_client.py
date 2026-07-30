@@ -12,8 +12,11 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+import structlog
 
 from app.config import KeycloakSettings
+
+log = structlog.get_logger(__name__)
 
 _TIMEOUT = 15.0
 _FORM_HEADERS = {"Content-Type": "application/x-www-form-urlencoded"}
@@ -32,7 +35,40 @@ class TooManyAttemptsError(KeycloakError):
 
 
 class KeycloakUnavailableError(KeycloakError):
-    """Keycloak unreachable or returned an unexpected error → 503."""
+    """Keycloak was unreachable, timed out, or failed server-side (5xx) → 503.
+
+    **Retryable, and that is the whole meaning of the class** (T-110). `503` promises the
+    caller and every proxy between "transient, try later", so only conditions that can
+    actually clear on their own belong here. Everything that needs a human to change
+    configuration is :class:`KeycloakForbiddenError` or :class:`KeycloakRejectedError`.
+    """
+
+
+class KeycloakForbiddenError(KeycloakError):
+    """The Admin API refused **our own** service-account credentials (401/403) → 500.
+
+    Not the caller's problem: these routes are already admin-gated, so the request reaching
+    Keycloak was authorized by us — what failed is the backend's own credential. Two causes,
+    one remedy shape: the service account lacks a `realm-management` role (403), or its token
+    was rejected because `KEYCLOAK_CLIENT_SECRET` is wrong or the account is disabled (401).
+
+    **This class exists because T-110 lost time to its absence.** A 403 here used to become
+    `KeycloakUnavailableError` → `503 "Authentication service unavailable."`, so an
+    under-provisioned service account was reported as an outage: `POST /users` worked while
+    `GET /users` "failed" — a combination no real outage can produce, and the only clue that
+    the message was wrong. Passing the 403 through to the caller would be the *other* lie
+    (they are authorized; we are not), hence 500.
+    """
+
+
+class KeycloakRejectedError(KeycloakError):
+    """Keycloak rejected the request *we* built (400/422) → 500.
+
+    A bug on our side — a malformed representation, an unsupported field — and therefore
+    never something the caller can act on and never retryable. Kept apart from
+    :class:`KeycloakForbiddenError` because the operator's next step differs completely
+    (read the payload we sent vs grant a role), even though both render the same 500.
+    """
 
 
 class UserNotFoundError(KeycloakError):
@@ -225,6 +261,29 @@ class KeycloakClient:
         if resp.status_code == 409:
             raise UserConflictError(_conflict_detail(resp))
         if resp.status_code not in expected:
+            # T-110: discriminate before falling through. The catch-all used to file every
+            # unexpected status as `Unavailable` → 503, which told operators the auth service
+            # was down whenever our own service account was short a role. The log line is part
+            # of the fix, not decoration: it is the only place the offending method, path and
+            # status appear, and its absence is what made the original diagnosis three probes
+            # long instead of one.
+            log.error(
+                "keycloak.admin_call_failed",
+                method=method,
+                path=path,
+                status_code=resp.status_code,
+                detail=resp.text[:300],
+            )
+            if resp.status_code in (401, 403):
+                raise KeycloakForbiddenError(
+                    f"{method} {path} returned {resp.status_code}: the backend's Keycloak "
+                    "service account is missing a realm-management role, or its credentials "
+                    "were rejected (see deployment/keycloak/README.md)"
+                )
+            if resp.status_code in (400, 422):
+                raise KeycloakRejectedError(f"{method} {path} returned {resp.status_code}")
+            # Anything left is either an upstream 5xx or a status we did not enumerate in
+            # `expected` — both genuinely "unexpected", so both keep the retryable class.
             raise KeycloakUnavailableError(f"{method} {path} returned {resp.status_code}")
         return resp
 

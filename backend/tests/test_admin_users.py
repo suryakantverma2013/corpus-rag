@@ -36,9 +36,9 @@ async def _admin_headers(
     """Seed an admin caller's local row and return (sub, auth headers)."""
     admin_sub = uuid.uuid4()
     await UserRepository(session).upsert_from_claims(
-        sub=admin_sub, email="admin@corpus.local", display_name="Admin"
+        sub=admin_sub, email="admin@corpus.test", display_name="Admin"
     )
-    token = make_token(sub=admin_sub, email="admin@corpus.local", roles=("admin", "user"))
+    token = make_token(sub=admin_sub, email="admin@corpus.test", roles=("admin", "user"))
     return admin_sub, {"Authorization": f"Bearer {token}"}
 
 
@@ -379,3 +379,80 @@ async def test_delete_upstream_503(
 
     resp = await client.delete(f"/api/v1/users/{target}", headers=headers)
     assert resp.status_code == 503
+
+
+@pytest.mark.parametrize(
+    ("upstream", "expected"),
+    [
+        # Our own service account is short a realm-management role, or its token was
+        # rejected: the *server* is misconfigured, so 500 — never 503 (which promises the
+        # condition clears on its own) and never 403 (which would blame the caller, who is
+        # an authenticated admin).
+        (403, 500),
+        (401, 500),
+        # Keycloak rejected a request we built — our bug, equally un-retryable.
+        (400, 500),
+        (422, 500),
+        # Genuinely transient: upstream failure or an unenumerated status.
+        (500, 503),
+        (502, 503),
+        (418, 503),
+    ],
+)
+async def test_admin_api_status_codes_map_to_the_right_class(
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    make_token: Callable[..., str],
+    respx_mock,
+    upstream: int,
+    expected: int,
+) -> None:
+    """T-110: the catch-all used to file **every** unexpected status as 503.
+
+    That is what made an under-provisioned service account read as an outage — `POST /users`
+    succeeded while `GET /users` "failed", a combination no real outage produces. The split
+    matters beyond diagnosis: `503` tells every proxy and retrying client "try again later",
+    and a missing role never heals on retry.
+    """
+    kc = get_settings().keycloak
+    _, headers = await _admin_headers(session, make_token)
+
+    respx_mock.post(kc.token_endpoint).respond(json=_SVC_TOKEN)
+    respx_mock.get(f"{kc.admin_url}/users").respond(upstream)
+
+    resp = await client.get("/api/v1/users", headers=headers)
+    assert resp.status_code == expected, f"{upstream} upstream should map to {expected}"
+
+
+async def test_a_forbidden_admin_call_is_logged_with_its_status_and_path(
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    make_token: Callable[..., str],
+    respx_mock,
+) -> None:
+    """The log line is part of the fix, not decoration.
+
+    The response body deliberately says nothing about roles or paths — the caller cannot act
+    on either — so this event is the *only* place the cause is recorded. Its absence is what
+    made the original T-110 diagnosis take three probes.
+    """
+    import structlog
+
+    kc = get_settings().keycloak
+    _, headers = await _admin_headers(session, make_token)
+
+    respx_mock.post(kc.token_endpoint).respond(json=_SVC_TOKEN)
+    respx_mock.get(f"{kc.admin_url}/users").respond(403, json={"error": "HTTP 403 Forbidden"})
+
+    with structlog.testing.capture_logs() as logs:
+        resp = await client.get("/api/v1/users", headers=headers)
+
+    assert resp.status_code == 500
+    failures = [entry for entry in logs if entry["event"] == "keycloak.admin_call_failed"]
+    assert len(failures) == 1
+    assert failures[0]["status_code"] == 403
+    assert failures[0]["path"] == "/users"
+    assert failures[0]["method"] == "GET"
+    # And the caller is told nothing that only an operator can use.
+    assert "403" not in resp.text
+    assert "role" not in resp.text.lower()

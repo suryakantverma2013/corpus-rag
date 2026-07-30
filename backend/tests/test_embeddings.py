@@ -387,7 +387,26 @@ async def test_live_query_matches_the_column_width() -> None:
     assert len(vector) == EMBEDDING_DIM
 
 
-async def test_live_batch_is_aligned_and_deterministic() -> None:
+async def test_live_batch_is_aligned() -> None:
+    """The batched vector for a text must be *the same text's* vector, not its neighbour's.
+
+    This is the live counterpart of `test_response_order_is_taken_from_the_index_not_the_list`:
+    it is what catches a transposed corpus, where every vector is individually valid and every
+    chunk is wrong.
+
+    **It asserts similarity, not equality — and that is a correction.** As written in T-205 the
+    assertion was `first[0] == second[0]`, which never ran (no API key on the box until
+    2026-07-30, T-304) and is **false**: the endpoint is not bitwise deterministic across
+    requests. Measured over six trials, the vector for the same input differed in ~2,400 of
+    3,072 components on 3 of them, by ~1e-4 each. Exact equality therefore fails roughly one
+    full-suite run in three — a flake that would be blamed on whatever change was in flight.
+    Cosine discriminates with an enormous margin instead: same text scores 1.000000 while the
+    neighbours a transposition would return score 0.67 and 0.59.
+
+    Nothing in the product depends on bitwise stability — FR-ING-03's diff keys on
+    `embedding_fingerprint` (a hash of text + model + versions), never on comparing vectors —
+    which is why this is a test defect and not a design one.
+    """
     client = _live_client()
     try:
         first = await client.embed_texts(["alpha", "beta", "gamma"])
@@ -396,4 +415,12 @@ async def test_live_batch_is_aligned_and_deterministic() -> None:
         await client.aclose()
     assert len(first) == 3
     assert all(len(vector) == EMBEDDING_DIM for vector in first)
-    assert first[0] == second[0]
+
+    def cosine(left: list[float], right: list[float]) -> float:
+        dot = sum(x * y for x, y in zip(left, right, strict=True))
+        norm = math.sqrt(sum(x * x for x in left)) * math.sqrt(sum(y * y for y in right))
+        return dot / norm
+
+    assert cosine(first[0], second[0]) > 0.999
+    # The other half of the claim: the margin is real, so the assertion above is not vacuous.
+    assert cosine(first[0], first[1]) < 0.9

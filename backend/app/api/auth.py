@@ -15,6 +15,8 @@ from app.auth import service
 from app.auth.dependencies import CurrentPrincipal, CurrentUser, DbSession, Keycloak
 from app.auth.keycloak_client import (
     InvalidCredentialsError,
+    KeycloakForbiddenError,
+    KeycloakRejectedError,
     KeycloakUnavailableError,
     TooManyAttemptsError,
 )
@@ -45,6 +47,12 @@ _INVALID_LOGIN = "Invalid email or password."
 _RATE_LIMITED = RATE_LIMITED_COPY
 _WRONG_CURRENT = "Current password is incorrect."
 _UPSTREAM = "Authentication service unavailable."
+# T-110: change-password calls the Admin API's `reset-password`, so it can hit the same
+# under-provisioned-service-account condition as the /users routes. Same reasoning, same 500.
+_MISCONFIGURED = (
+    "Password change is not configured correctly on the server. "
+    "Check the server logs for details."
+)  # TBD(§8.4)
 
 
 def _token_response(tokens: dict[str, Any]) -> TokenResponse:
@@ -130,5 +138,7 @@ async def change_password(
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, _RATE_LIMITED) from exc
     except InvalidCredentialsError as exc:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, _WRONG_CURRENT) from exc
+    except (KeycloakForbiddenError, KeycloakRejectedError) as exc:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, _MISCONFIGURED) from exc
     except KeycloakUnavailableError as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, _UPSTREAM) from exc

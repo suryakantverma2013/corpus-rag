@@ -23,6 +23,7 @@ from app.security.rate_limit import limiter, rate_limit_exceeded_handler
 from app.services.checkpointer import close_checkpointer
 from app.services.embeddings import close_embedding_client
 from app.services.jobs import close_job_queue
+from app.services.llm import close_chat_client
 from app.services.object_storage import close_object_storage
 
 
@@ -56,8 +57,8 @@ def _configure_logging() -> None:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Process-lifetime resources.
 
-    Object storage (T-201), the arq job queue (T-202), the embedding client (T-205) and the
-    LangGraph checkpointer (T-301) all pool connections in clients bound to this event loop,
+    Object storage (T-201), the arq job queue (T-202), the embedding client (T-205), the chat
+    client (T-304) and the LangGraph checkpointer (T-301) all pool connections bound to this loop,
     so all of them are released on shutdown. Nothing is *opened* here: each client is built
     lazily on first use, so a cold MinIO, Redis, OpenAI or Postgres cannot stop the API from
     booting (the readiness probe, NFR-REL-02, is what reports the ones it covers; OpenAI is
@@ -74,6 +75,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await close_object_storage()
         await close_job_queue()
         await close_embedding_client()
+        await close_chat_client()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
