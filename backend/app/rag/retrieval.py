@@ -22,16 +22,28 @@ from app.db.base import DEFAULT_TENANT_ID
 
 @dataclass(frozen=True, slots=True)
 class RetrievalFilter:
-    """Access scope applied inside the retrieval query (FR-RET-04).
+    """Access scope applied inside the retrieval query (FR-RET-04, FR-ORC-06).
 
     ``owner_id`` has **no default on purpose**. FR-RET-04 names tenant *and owner*, and
     under R-25/OI-15 every knowledge base belongs to exactly one user, so a retrieval with
     no owner scope reads another user's documents. A default here would let a call site
     omit it and still compile; requiring it makes every caller state the scope out loud.
+
+    Every field **narrows**; none of them widens. That is the whole shape of the FR-ORC-06
+    ruling (R-46(1)): an ``@``-mention is an instruction to look *there*, so it restricts
+    ``document_ids`` rather than boosting a rank, and a mention naming a document outside
+    the ambient scope therefore retrieves nothing instead of escaping it.
     """
 
     owner_id: uuid.UUID
     tenant_id: uuid.UUID = DEFAULT_TENANT_ID
+    #: The FR-ORC-06 ambient scope, and the switch that turns it on (R-46(2)). Set, it
+    #: restricts retrieval to the owner's GLOBAL knowledge base **plus** the knowledge base
+    #: attached to this conversation — so another chat's attachments are invisible, which
+    #: FR-KBM-03 requires and which an owner-only filter silently gets wrong. ``None`` means
+    #: no conversation scoping at all: the ingestion-side and diagnostic callers that
+    #: predate the graph, and the only ones that should ever leave it unset.
+    conversation_id: uuid.UUID | None = None
     knowledge_base_ids: Sequence[uuid.UUID] = field(default_factory=tuple)
     document_ids: Sequence[uuid.UUID] = field(default_factory=tuple)  # explicit / @-mention
     active_only: bool = True
@@ -76,6 +88,23 @@ class RetrievedChunk:
         """R-35(12) ordinal within the block. See `app.rag.fusion.drop_overlapping_neighbours`."""
         value = self.meta.get("block_chunk_index")
         return value if isinstance(value, int) else None
+
+    @property
+    def locator_label(self) -> str:
+        """The R-34 rendered locator (``"p. 14"``, ``"§ Setup › Install"``, ``"rows 51–100"``).
+
+        Read from the metadata contract rather than re-derived, and read defensively: FR-CIT-04
+        requires clients to use the locator *fields* and never to parse the label, and this is
+        the same rule pointed the other way — nothing here reconstructs a label from `kind` and
+        `page`, so a chunk written before the contract existed yields ``""`` rather than a
+        fabricated address. Used by the T-306 rerank prompt and the T-307 generation prompt;
+        the FR-CIT-03 hover card gets the structured fields from `meta` itself.
+        """
+        locator = self.meta.get("locator")
+        if not isinstance(locator, Mapping):
+            return ""
+        label = locator.get("label")
+        return label if isinstance(label, str) else ""
 
 
 @runtime_checkable

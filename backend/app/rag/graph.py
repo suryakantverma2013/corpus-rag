@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Literal
 
 import structlog
@@ -38,6 +39,7 @@ import structlog
 from app.config import Settings, get_settings
 from app.rag import telemetry
 from app.rag.errors import (
+    ABSTAIN_LOW_GROUNDEDNESS,
     ACCESS_DENIED,
     ACCESS_DENIED_CODE,
     BLOCKED_INJECTION,
@@ -45,7 +47,8 @@ from app.rag.errors import (
     classify,
     copy_for,
 )
-from app.rag.state import RAGContext, RAGState
+from app.rag.retrieval import RetrievalFilter
+from app.rag.state import GateVerdict, RAGContext, RAGState
 
 # Must be set before langgraph's serde module is imported, because it snapshots the flag
 # at import time (see `app.services.checkpointer` for the same call and the reasoning).
@@ -71,6 +74,7 @@ log = structlog.get_logger(__name__)
 
 __all__ = [
     "ABSTAIN_EMPTY_SCOPE",
+    "ABSTAIN_LOW_GROUNDEDNESS",
     "ACCESS_DENIED",
     "BLOCKED_INJECTION",
     "NODE_NAMES",
@@ -364,64 +368,508 @@ async def route(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
     }
 
 
-async def retrieve(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
-    """FR-ORC-01 step 4 / FR-RET-01/04 — hybrid retrieval. T-305.
+def _mentioned_document_ids(state: RAGState) -> tuple[list[uuid.UUID], bool]:
+    """Parse `mentioned_document_ids`; report whether the turn carried any at all.
 
-    Returns nothing until T-305 wires `HybridRetriever`. That is not a hole: an empty
-    result is a legitimate state of the world (a user with no documents), and R-23 pins
-    what happens next.
+    The second half of the return is what makes the R-46(1) narrowing safe. Mentions
+    *restrict* the scope, so "the turn had mentions but none of them parsed" and "the turn
+    had no mentions" must not collapse into the same filter: the first would silently widen
+    retrieval back to the whole ambient scope and answer from documents the user did not
+    ask about. A malformed id is dropped rather than raised on — it is a client bug, and
+    failing the turn over one bad entry in a list of four is a worse answer than honouring
+    the three that parsed.
     """
-    return {"retrieved_chunk_ids": []}
+    raw = state.get("mentioned_document_ids") or []
+    parsed: list[uuid.UUID] = []
+    for value in raw:
+        try:
+            parsed.append(uuid.UUID(str(value)))
+        except ValueError, AttributeError, TypeError:
+            log.warning("graph.mention_unparseable")
+    return parsed, bool(raw)
+
+
+def _retrieval_filter(state: RAGState, ctx: RAGContext) -> RetrievalFilter | None:
+    """The FR-ORC-06 scope for this turn, or ``None`` when it is empty by construction.
+
+    Shared by `retrieve` and `rerank` **because they must never differ**. T-306 re-reads the
+    chunk rows it reranks (`RAGState` carries ids only), and the one way that read could
+    reintroduce the hole R-46(2) closed is by rebuilding the scope slightly differently —
+    an omitted `conversation_id` here would let the reranker read, score and ground in a
+    chunk from another chat that retrieval was never allowed to return.
+
+    ``None`` means "the turn asked for a document set that resolves to nothing" (every
+    `@`-mention malformed), which is not the same as "no mentions" and must not collapse into
+    it — see :func:`_mentioned_document_ids`.
+    """
+    document_ids, had_mentions = _mentioned_document_ids(state)
+    if had_mentions and not document_ids:
+        return None
+    return RetrievalFilter(
+        # The requesting caller, as `lock` is keyed (R-46(7), OI-33) — never the
+        # conversation's owner, which differs on the FR-ORC-02 `is_admin` path.
+        owner_id=ctx.owner_id,
+        tenant_id=ctx.tenant_id,
+        conversation_id=ctx.conversation_id,
+        document_ids=document_ids,
+    )
+
+
+def _message_uuid(value: str | None) -> uuid.UUID | None:
+    """`RAGState.user_message_id` as a UUID, or ``None``.
+
+    ``None`` on a malformed value rather than a raise: the history read is a quality input,
+    not a correctness one, and the cost of getting it wrong here is bounded — the repository
+    answers an unknown id with an empty transcript, never with another conversation's.
+    """
+    if not value:
+        return None
+    try:
+        return uuid.UUID(str(value))
+    except ValueError, AttributeError, TypeError:  # pragma: no cover - we wrote this id
+        log.warning("graph.user_message_id_unparseable")
+        return None
+
+
+def _parse_chunk_ids(values: Sequence[str]) -> list[uuid.UUID]:
+    """Checkpointed chunk ids back to UUIDs, dropping anything malformed.
+
+    Shared by `rerank` and `generate`: both re-read the rows a previous node listed, and both
+    read ids that this graph wrote itself — so a failure here is a bug, not input validation,
+    and dropping the id degrades to "that passage is gone", which both nodes already handle.
+    """
+    parsed: list[uuid.UUID] = []
+    for value in values:
+        try:
+            parsed.append(uuid.UUID(value))
+        except ValueError, AttributeError, TypeError:  # pragma: no cover - we wrote these ids
+            log.warning("graph.chunk_id_unparseable")
+    return parsed
+
+
+async def retrieve(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
+    """FR-ORC-01 step 4 / FR-RET-01/04/FR-ORC-06 — hybrid retrieval (T-305, R-46).
+
+    The FR-ORC-06 scope — "the active chat's attachments + all GLOBAL documents visible to
+    the user + any explicitly `@`-mentioned documents" — is assembled here and applied
+    **entirely inside the query** (FR-RET-04 / NFR-SEC-06). Two halves:
+
+    * The ambient half is `RetrievalFilter.conversation_id`, which
+      `app.db.repositories.retrieval` turns into a knowledge-base predicate. It is derived
+      from `runtime.context`, which is not checkpointed (R-42(3)), so a resumed run scopes
+      to the caller's *current* identity rather than to one captured in a checkpoint.
+    * The explicit half is `mentioned_document_ids`, which **narrows** (R-46(1)). It is
+      AND-ed with the ambient predicate rather than unioned with it, so a mention naming a
+      document outside the caller's scope retrieves nothing instead of reaching it.
+
+    Scoped on `ctx.owner_id` — the requesting caller, as `lock` is. An admin running someone
+    else's conversation therefore grounds in their **own** documents (**OI-33**): the
+    alternative exposes one user's documents to another and nothing in the spec asks for it.
+
+    **Fails closed, like `screen` and unlike `route`.** No `try`: FR-RET-05 says in as many
+    words that an unavailable vector store returns a graceful error and does not fabricate,
+    and `handle_node_error` classifies these as `RETRIEVAL_UNAVAILABLE`. The one degradation
+    is inside `retrieve_for_turn` — a *derived* probe may fail without failing the turn,
+    because R-45(3) makes probes additive to a query that is always searched itself.
+    """
+    from app.db.repositories.retrieval import HybridRetriever
+    from app.rag.search import retrieve_for_turn
+
+    ctx = runtime.context
+    filters = _retrieval_filter(state, ctx)
+    if filters is None:
+        # Every mention was malformed. Under R-46(1) the scope they asked for is empty, so
+        # this retrieves nothing and R-23 abstains — the one outcome that is neither a lie
+        # nor an answer about the wrong documents.
+        log.warning("graph.mentions_all_unparseable", conversation_id=str(ctx.conversation_id))
+        return {"retrieved_chunk_ids": []}
+
+    embeddings = ctx.embeddings
+    if embeddings is None:
+        from app.services.embeddings import get_embedding_client
+
+        embeddings = get_embedding_client()
+
+    hits = await retrieve_for_turn(
+        query=state.get("query", ""),
+        sub_queries=state.get("sub_queries", []),
+        filters=filters,
+        sessionmaker=ctx.sessionmaker,
+        embeddings=embeddings,
+        # FR-RET-01's committed default when nothing is injected. `PgVectorRetriever` stays
+        # reachable through the factory as the sanctioned dense-only fallback.
+        retriever_factory=ctx.retriever_factory or HybridRetriever,
+    )
+    return {"retrieved_chunk_ids": [str(hit.chunk_id) for hit in hits]}
 
 
 async def rerank(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
-    """FR-ORC-07 / FR-RET-02 — cross-encoder rerank to the grounding top-K. T-306."""
-    retrieved = state.get("retrieved_chunk_ids", [])
-    return {"reranked_chunk_ids": list(retrieved), "rerank_scores": []}
+    """FR-ORC-07 / FR-RET-02 — rerank the merged candidates to the grounding top-K (T-306, R-47).
+
+    `app.rag.rerank` owns the rubric, the prompt and the scoring; this node owns the two
+    reads around it.
+
+    **Two failure modes, deliberately different.** The database read has no `try` and fails
+    **closed**, exactly as `retrieve` does: without the chunk text there is nothing to ground
+    in, and FR-RET-05 says the system returns a graceful error rather than fabricating —
+    `handle_node_error` files it as `RETRIEVAL_UNAVAILABLE`. The *model* call fails **open**
+    inside `rerank_passages` (R-47(2)), because the candidates arrive already ordered by the
+    R-46(3) merge and truncating that order is a worse answer than no answer only if you
+    believe the reranker is load-bearing for correctness, which it is not.
+
+    The chunk text is re-read rather than carried: `RAGState` holds ids and scalars only
+    (R-42(2), FR-PER-03). It is read back through `_retrieval_filter` — the *same* scope
+    `retrieve` used, not a reconstruction of it.
+    """
+    from app.db.repositories.retrieval import fetch_chunks
+    from app.rag.rerank import prompt_sources, rerank_passages
+
+    ctx = runtime.context
+    settings = get_settings()
+    retrieved = [str(chunk_id) for chunk_id in state.get("retrieved_chunk_ids") or []]
+    if not retrieved:
+        # R-23: nothing retrieved is a real state of the world, and `generate` abstains on it.
+        return {"reranked_chunk_ids": [], "rerank_scores": []}
+
+    filters = _retrieval_filter(state, ctx)
+    if filters is None:  # pragma: no cover - `retrieve` already returned [] on this branch
+        return {"reranked_chunk_ids": [], "rerank_scores": []}
+
+    chunk_ids = _parse_chunk_ids(retrieved)
+
+    async with ctx.sessionmaker() as session:
+        hits = await fetch_chunks(session, chunk_ids, filters=filters)
+
+    if not hits:
+        # Everything retrieved has since been deleted or fallen out of scope. FR-CIT-06(1)/(5)
+        # would have dropped these citations at serve time anyway; abstaining is the same
+        # answer, one stage earlier and without a wasted generation.
+        log.warning(
+            "graph.rerank_candidates_vanished",
+            conversation_id=str(ctx.conversation_id),
+            retrieved=len(chunk_ids),
+        )
+        return {"reranked_chunk_ids": [], "rerank_scores": []}
+
+    if not settings.graph.rerank_enabled:
+        # A cost switch, not the failure path (R-47(2) already fails open) — hence `info`,
+        # like the router's. Off, grounding is the top-K of the merged order and no
+        # FR-CIT-04 score is published, which is the same contract the fallback path has.
+        log.info("rag.rerank.disabled", conversation_id=str(ctx.conversation_id))
+        top = [str(hit.chunk_id) for hit in hits][: settings.rerank.top_k]
+        return {"reranked_chunk_ids": top, "rerank_scores": []}
+
+    chat = ctx.chat
+    if chat is None:
+        from app.services.llm import get_chat_client
+
+        chat = get_chat_client()
+
+    outcome = await rerank_passages(
+        query=state.get("query", ""),
+        sources=prompt_sources(hits),
+        chat=chat,
+        settings=settings,
+    )
+    return {
+        "reranked_chunk_ids": list(outcome.chunk_ids),
+        # Empty unless every passage in the top-K carries a real score (R-47(2)). The
+        # cross-probe RRF score is **not** substituted — R-46(3) makes it incomparable across
+        # turns, and FR-CIT-04 shows this number to a user.
+        "rerank_scores": list(outcome.scores),
+    }
+
+
+def _abstain_empty_scope() -> RAGState:
+    """R-23 / FR-SYS-02 / §4.12 precedence note (3) — nothing to ground in, so say so.
+
+    Both of `generate`'s empty branches answer identically, and deliberately: "retrieval found
+    nothing" and "everything retrieval found has since been deleted" are the same fact from the
+    user's seat, and giving the second its own copy would explain an internal race to someone
+    who cannot act on it.
+    """
+    return {
+        "answer": ABSTAIN_EMPTY_SCOPE,
+        "outcome": "abstained",
+        "citation_ids": [],
+        "gate_verdict": "pass",
+    }
+
+
+def _realign_scores(
+    previous_ids: Sequence[str], surviving_ids: Sequence[str], scores: Sequence[float]
+) -> list[float]:
+    """Keep `rerank_scores` positionally aligned when a chunk disappears (R-47(2), R-48(5)).
+
+    `rerank_scores` is either empty or exactly as long as `reranked_chunk_ids` — there is no
+    partial state, because the channel holds position-aligned floats and FR-CIT-04 shows those
+    numbers to a user. So narrowing the id list has to carry the scores across by **id**, and
+    anything that does not add up returns empty rather than guessing: an unscored citation
+    renders with no number, which R-47(2) already requires clients to handle.
+    """
+    if len(scores) != len(previous_ids):
+        return []
+    by_id = dict(zip(previous_ids, scores, strict=True))
+    if any(chunk_id not in by_id for chunk_id in surviving_ids):  # pragma: no cover - a subset
+        return []
+    return [by_id[chunk_id] for chunk_id in surviving_ids]
 
 
 async def generate(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
-    """FR-ORC-01 step 5 / FR-SYS-02 — grounded generation. T-307.
+    """FR-ORC-01 step 5 / FR-SYS-02 — grounded generation (T-307, R-48).
 
-    The empty-grounding branch is complete and correct **today**: R-23 makes grounding
-    always-on, so an empty scope abstains (FR-RET-05) instead of answering from
-    pre-training, and §4.12 precedence note (3) says so explicitly.
+    `app.rag.generation` owns the prompt call and the `[S<n>]` segmentation; this node owns
+    the two reads around it and the state it writes.
 
-    The other branch raises rather than returning something plausible. A stub that
-    answered without a model would be indistinguishable from a working system in every
-    test that did not read the text — precisely the failure NFR-VIS/FR-SYS-02 cannot
-    tolerate in a grounded product.
+    **Fails closed** — the third node to do so, with `screen` and `retrieve`, and the
+    deliberate inverse of `route` (R-45(2)) and `rerank` (R-47(2)). Those two have a
+    defensible degraded output; this one's would be an answer that is not grounded, which
+    R-23, FR-SYS-02 and FR-RET-05 forbid in the same breath. There is no `try` and no
+    `GRAPH_GENERATE_ENABLED`: a cost switch needs an off state, and this node's is "no
+    product".
+
+    The chunk text is re-read rather than carried (`RAGState` holds ids and scalars only,
+    R-42(2)) and re-read through `_retrieval_filter` — the *same* scope `retrieve` built, for
+    the reason R-47(5) records: a second construction of the FR-ORC-06 scope is how the
+    R-46(2) hole reopens one node later.
+
+    **The `[S<k>]` → `reranked_chunk_ids[k-1]` invariant is established here** (R-48(5)). The
+    sources are composed in the order state lists them, so a marker resolves from checkpointed
+    state alone — which is what makes R-44(7)'s binding on T-308 implementable across a node
+    boundary, where a `ComposedPrompt` cannot travel. When a chunk has vanished since `rerank`
+    ran, the id list is **narrowed** and the scores realigned in step, rather than leaving
+    state describing a context the model was never given.
     """
-    if not state.get("reranked_chunk_ids"):
-        return {
-            "answer": ABSTAIN_EMPTY_SCOPE,
-            "outcome": "abstained",
-            "citation_ids": [],
-            "gate_verdict": "pass",
-        }
-    raise NotImplementedError("generation is T-307")
+    from app.db.repositories.retrieval import fetch_chunks
+    from app.rag.generation import generate_answer
+    from app.rag.history import load_history, to_messages
+    from app.rag.rerank import prompt_sources
+
+    reranked = [str(chunk_id) for chunk_id in state.get("reranked_chunk_ids") or []]
+    if not reranked:
+        return _abstain_empty_scope()
+
+    ctx = runtime.context
+    filters = _retrieval_filter(state, ctx)
+    if filters is None:  # pragma: no cover - `retrieve` already returned [] on this branch
+        return _abstain_empty_scope()
+
+    async with ctx.sessionmaker() as session:
+        hits = await fetch_chunks(session, _parse_chunk_ids(reranked), filters=filters)
+        if not hits:
+            log.warning(
+                "graph.generate_candidates_vanished",
+                conversation_id=str(ctx.conversation_id),
+                grounding=len(reranked),
+            )
+            return _abstain_empty_scope()
+        # R-30 sends the **whole** transcript — FR-STA-04's warn-and-block is what keeps it in
+        # range, so there is no windowing to do — but stops short of the turn being answered
+        # (R-48(7)): that row is already in `messages`, and `compose_messages` appends the
+        # query itself.
+        history = to_messages(
+            await load_history(
+                session,
+                ctx.conversation_id,
+                until_message_id=_message_uuid(state.get("user_message_id")),
+            )
+        )
+
+    update: RAGState = {}
+    surviving = [str(hit.chunk_id) for hit in hits]
+    if surviving != reranked:
+        log.warning(
+            "graph.grounding_narrowed",
+            conversation_id=str(ctx.conversation_id),
+            before=len(reranked),
+            after=len(surviving),
+        )
+        update["reranked_chunk_ids"] = surviving
+        update["rerank_scores"] = _realign_scores(
+            reranked, surviving, state.get("rerank_scores") or []
+        )
+
+    chat = ctx.chat
+    if chat is None:
+        from app.services.llm import get_chat_client
+
+        chat = get_chat_client()
+
+    generated = await generate_answer(
+        query=state.get("query", ""),
+        # The same mapping the reranker used, deliberately shared (R-47(1) note): two
+        # independent chunk→source mappings is how the filename in a citation stops matching
+        # the filename the model was told.
+        sources=prompt_sources(hits),
+        history=history,
+        chat=chat,
+    )
+    if generated.source_ids != tuple(surviving):  # pragma: no cover - invariant guard
+        # Unreachable while the sources are composed from `hits` in order. It is checked
+        # anyway because the downstream failure is silent: T-308 would validate citations
+        # against a differently-ordered set and **pass** (R-44(7)).
+        raise RuntimeError("prompt source order does not match the grounding set")
+
+    update["answer"] = generated.text
+    update["model_name"] = generated.model
+    update["prompt_tokens"] = generated.prompt_tokens
+    update["completion_tokens"] = generated.completion_tokens
+    return update
 
 
 async def gate(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
-    """FR-ORC-07 / FR-RET-05 / FR-CIT-06 — groundedness + citation verification. T-308.
+    """FR-ORC-07 / FR-RET-05 / FR-CIT-06 — groundedness + citation verification (T-308, R-49).
 
     NFR-PRF-02 is why this is a node and not a filter on the stream: the client sees
-    nothing until this passes.
+    nothing until this passes. **The (D) that offered incremental verification as the escape
+    is declined** — with R-49 the gate costs sub-millisecond, so the ≈5–6 s wait is entirely
+    upstream and trading FR-CIT-06's "before an answer is served" away would not recover it.
+
+    **Four of the five checks are already discharged** (R-48, T-308 board line (b)):
+    `generate`'s fail-closed `fetch_chunks` read-back went through the *same* `RetrievalFilter`
+    `retrieve` built, so (1) exists, (2) was in the context passed, (3) authorized and (5)
+    still ACTIVE hold for the whole grounding set, and an out-of-range marker was already
+    dropped. Re-running them here would be a second construction of the FR-ORC-06 scope, which
+    is the R-46(2) hole one node later (R-47(5)) — so **this node does no database work at
+    all**, which `tests/test_graph.py` asserts rather than merely documents.
+
+    **Fails closed**, the fourth node to do so with `screen`, `retrieve` and `generate`, and
+    the inverse of `route` (R-45(2)) and `rerank` (R-47(2)). Those two degrade to a real
+    fallback; this one's degraded output would be "serve an answer whose grounding was not
+    checked", which is not a degradation of FR-CIT-06 but its absence. There is no `try` and
+    no `GATE_ENABLED`. It costs nothing in availability, because with no I/O and no model call
+    the only way this node can raise is a bug.
     """
+    from app.rag.generation import split_answer_segments
+    from app.rag.groundedness import (
+        GATE_ABSTAINED,
+        GATE_COMPLETED,
+        GATE_RETRY,
+        assess,
+        hypothetical_probe,
+    )
+
     if state.get("outcome") == "abstained":
+        # The R-23 empty-scope branch already decided, and it is not a groundedness failure:
+        # writing a score here would put a 0.0 on a turn that never generated anything.
         return {"gate_verdict": "pass"}
-    raise NotImplementedError("the groundedness gate is T-308")
+
+    settings = get_settings()
+    # **From state, not from `rerank`'s update** (board line (c)): `generate` narrows this list
+    # when a chunk vanished between supersteps, and the marker map follows the narrowed list.
+    source_ids = [str(chunk_id) for chunk_id in state.get("reranked_chunk_ids") or []]
+    answer = state.get("answer")
+    if not answer:  # pragma: no cover - `generate` fails closed on an empty answer
+        # Abstaining *is* the closed direction here. Raising would file an impossible state as
+        # `SYSTEM_FAILURE`, which teaches an operator nothing they can act on.
+        return {"gate_verdict": "abstain", "gate_reason": "no_answer", "groundedness": 0.0}
+
+    started = time.perf_counter()
+    # The **one** parser (R-48(4)). Re-deriving the marker map here is what R-44(7) forbids:
+    # a mapping rebuilt from a differently ordered collection validates against the wrong set
+    # and *passes*.
+    segments, dropped = split_answer_segments(answer, source_ids)
+    report = assess(segments, markers_dropped=dropped, settings=settings)
+
+    # FR-CIT-06 (1)/(2)/(3)/(5) in one line, and it is a tautology by construction rather than
+    # a re-check: every id here came out of `source_ids`, which `generate` proved equal to the
+    # sources it composed. It is asserted anyway because the failure it guards is silent.
+    if not set(report.citation_ids) <= set(source_ids):  # pragma: no cover - invariant guard
+        raise RuntimeError("citation resolved outside the grounding set")
+
+    probe = hypothetical_probe(segments, settings=settings)
+    verdict: GateVerdict
+    reason: str | None
+    if report.score >= settings.gate.min_groundedness:
+        verdict, reason = "pass", None
+    elif not report.citations and probe is not None:
+        # The only case worth ~4.6 s: retrieval clearly missed and the model had nothing to
+        # cite, which is also the only case where a HyDE probe has a real chance. A partially
+        # supported answer abstains immediately rather than paying to find the same passages.
+        verdict, reason = "retry", "no_citations"
+    else:
+        verdict, reason = "abstain", report.reason or "low_coverage"
+
+    event = {"pass": GATE_COMPLETED, "retry": GATE_RETRY}.get(verdict, GATE_ABSTAINED)
+    log.info(
+        event,
+        conversation_id=str(runtime.context.conversation_id),
+        turn_index=state.get("turn_index"),
+        verdict=verdict,
+        reason=reason,
+        groundedness=round(report.score, 4),
+        claims=report.claims,
+        supported=report.supported,
+        citations=report.citations,
+        sources=len(source_ids),
+        markers_dropped=report.markers_dropped,
+        retry_count=state.get("retry_count", 0),
+        elapsed_us=int((time.perf_counter() - started) * 1_000_000),
+    )
+    return {
+        "groundedness": report.score,
+        "gate_verdict": verdict,
+        "gate_reason": reason,
+        "citation_ids": list(report.citation_ids),
+    }
 
 
 async def adapt(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
-    """FR-RET-05 — modify the strategy and retry.
+    """FR-RET-05 — modify the strategy and retry (T-308, R-49).
 
     **The only writer of `retry_count` and the only way back into `retrieve`.** Both
     halves matter: a second writer breaks the FR-ORC-07 bound, and a second back-edge
-    would let a cycle run without incrementing it. T-308 chooses the new strategy; the
-    increment is the part that guarantees termination and so belongs here from the start.
+    would let a cycle run without incrementing it.
+
+    **The modification is HyDE from the rejected answer.** FR-RET-05 says "retries with a
+    modified retrieval strategy" and defines nothing further, and the code narrows the options
+    much further than that sentence suggests: `route` does **not** re-run on this back edge,
+    and `retrieve_for_turn` reads only `query` and `sub_queries` — so writing a new `strategy`
+    on its own would be a no-op dressed as a modification. The two obvious levers are also
+    closed: `RETRIEVAL_MERGED_TOP_K`/`RERANK_TOP_K` are settings rather than state, so
+    "widen the search" is not expressible without a `RAGState` field, and clearing
+    `mentioned_document_ids` is the one narrowing R-46(1) exists to protect.
+
+    What is left is free and textbook: the rejected answer **is** a hypothetical document.
+    Embedding an *answer* retrieves different neighbours than embedding a *question*, so the
+    merged set genuinely differs and the retry is not a re-roll of the same dice — and R-45(3)
+    already sanctioned exactly this shape ("HyDE's passage is an ordinary probe"). It costs
+    zero model calls. `strategy` is written for the record even though retrieval does not read
+    it, because `query_class` and `strategy` are what a telemetry reader has to reconstruct
+    the turn from.
+
+    Single-shot by construction, which is why `Settings` refuses `GRAPH_MAX_RETRIES > 1`: a
+    second cycle would compose the *second* rejected answer on top of the first.
     """
-    return {"retry_count": state.get("retry_count", 0) + 1}
+    from app.rag.generation import split_answer_segments
+    from app.rag.groundedness import GATE_ADAPTED, hypothetical_probe
+
+    update: RAGState = {"retry_count": state.get("retry_count", 0) + 1}
+
+    answer = state.get("answer")
+    if not answer:  # pragma: no cover - `gate` only emits `retry` with an answer in hand
+        return update
+    source_ids = [str(chunk_id) for chunk_id in state.get("reranked_chunk_ids") or []]
+    segments, _ = split_answer_segments(answer, source_ids)
+    probe = hypothetical_probe(segments)
+    if probe is None:  # pragma: no cover - `gate` checks the same floor before emitting retry
+        return update
+
+    # Appended, never substituted: R-45(3) makes probes additive and `build_probes` always
+    # searches the original query too, so a useless probe costs recall in the merge and can
+    # never remove the original signal — which is the whole reason this is safe to do without
+    # being able to tell a fabrication from a decline.
+    update["sub_queries"] = [*(state.get("sub_queries") or []), probe]
+    update["strategy"] = "hyde"
+    log.info(
+        GATE_ADAPTED,
+        conversation_id=str(runtime.context.conversation_id),
+        turn_index=state.get("turn_index"),
+        retry_count=update["retry_count"],
+        probes=len(update["sub_queries"]),
+        probe_chars=len(probe),
+    )
+    return update
 
 
 async def abstain(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
@@ -433,10 +881,26 @@ async def abstain(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
     The blocked branch answers `BLOCKED_INJECTION`, not `SYSTEM_FAILURE`. Until T-303 it did the
     latter, which FR-ERR-04 reserves for *unclassified errors* — a blocked prompt is neither
     unclassified nor an error, and R-43(6) had already said injection-`blocked` carries its own
-    copy. No `error_code` is set, matching the abstain branch below (R-44(5)).
+    copy. No `error_code` is set on any branch (R-44(5)).
+
+    **The gate branch replaces the answer rather than passing it through, and that is a defect
+    T-308 had to fix.** This node used to answer `state["answer"] or ABSTAIN_EMPTY_SCOPE` on
+    every non-blocked path, which was harmless while the only abstention was the empty-scope
+    one — where `answer` is already our own copy. Once the gate can reject a *generated*
+    answer, the same line would serve the rejected text back under an `abstained` outcome:
+    strictly worse than serving it as an answer, because the user would read ungrounded prose
+    carrying no citations *and* an honest-looking label. The cost is real and accepted — when
+    the model declined in its own words that phrasing is lost — because telling a decline from
+    a fabrication needs exactly the semantic read R-49 declines to make before serving.
     """
     if state.get("injection_verdict") == "blocked":
         return {"outcome": "blocked", "answer": BLOCKED_INJECTION, "citation_ids": []}
+    if state.get("gate_verdict") in ("retry", "abstain"):
+        return {
+            "outcome": "abstained",
+            "answer": ABSTAIN_LOW_GROUNDEDNESS,
+            "citation_ids": [],
+        }
     return {
         "outcome": "abstained",
         "answer": state.get("answer") or ABSTAIN_EMPTY_SCOPE,

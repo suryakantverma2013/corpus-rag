@@ -23,6 +23,7 @@ the API runs without Redis.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import uuid
 from typing import Annotated, Protocol, runtime_checkable
 
@@ -40,6 +41,14 @@ INGEST_TASK_NAME = "ingest_document"
 #: The FR-ING-05 deletion task (T-208), registered in the same place under the same rule.
 DELETE_TASK_NAME = "delete_document"
 
+#: The FR-EVL-01 post-hoc evaluation task (T-309, R-50), same rule again.
+#:
+#: Unlike the two above this job has no `knowledge_jobs` row behind it — there is nothing for
+#: a user to retry and nothing to show in the FR-KBM-04 list, because a message whose scores
+#: never arrive simply renders without chips (FR-EVL-01: a response *may* carry them). So the
+#: payload is one id, and the broker's own `_job_id` is the whole idempotency story.
+EVALUATE_TASK_NAME = "evaluate_message"
+
 #: Redis key the worker heartbeats into, and the `/health/ready/worker` liveness signal
 #: (R-38(2)). arq writes it with a TTL of `health_check_interval + 1`, so its mere
 #: existence means "a worker was alive within the last interval".
@@ -53,6 +62,23 @@ WORKER_HEALTH_CHECK_KEY = "arq:queue:health-check"
 
 class JobQueueError(Exception):
     """The job could not be handed to the broker."""
+
+
+def evaluation_idempotency_key(message_id: uuid.UUID, content: str) -> str:
+    """Broker-level dedup key for an FR-EVL-01 evaluation job (T-309, R-50).
+
+    The **answer text is part of the key**, and that is the whole point. Keying on the message
+    id alone would be correct for redelivery but wrong for FR-MSG-08 Regenerate, which
+    replaces `messages.content` in place: the second evaluation would carry the same key, arq
+    would recognise it as a duplicate, and the message would keep the scores of an answer that
+    no longer exists — silently, and permanently. Hashing the content makes a regenerated
+    answer a genuinely different job while a redelivery of the same one stays a duplicate.
+
+    **Binds T-402/T-403:** Regenerate must also clear `messages.evaluation`, or the worker's
+    already-evaluated skip will drop the re-run before it starts.
+    """
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
+    return f"eval:{message_id}:{digest}"
 
 
 @runtime_checkable
@@ -69,6 +95,18 @@ class JobQueue(Protocol):
         self, *, job_id: uuid.UUID, document_id: uuid.UUID, idempotency_key: str
     ) -> None:
         """Hand an FR-ING-05 deletion job to the broker. Raises :class:`JobQueueError`."""
+        ...
+
+    async def enqueue_evaluate(self, *, message_id: uuid.UUID, idempotency_key: str) -> None:
+        """Hand an FR-EVL-01 evaluation job to the broker. Raises :class:`JobQueueError`.
+
+        **Binds T-402:** call this *after* the transaction that writes the AI `messages` row
+        commits, never inside it — the T-202 dual-write lesson, where enqueueing inside the
+        transaction lets the worker read a row nobody else can see yet. A failed enqueue must
+        not fail the turn: the answer is already served and its scores are optional.
+
+        See :func:`evaluation_idempotency_key` for why the key includes the answer text.
+        """
         ...
 
     async def aclose(self) -> None:
@@ -92,6 +130,9 @@ class NullJobQueue:
         self, *, job_id: uuid.UUID, document_id: uuid.UUID, idempotency_key: str
     ) -> None:
         self._log(DELETE_TASK_NAME, job_id=job_id, document_id=document_id)
+
+    async def enqueue_evaluate(self, *, message_id: uuid.UUID, idempotency_key: str) -> None:
+        log.info("job_queue.noop", task=EVALUATE_TASK_NAME, message_id=str(message_id))
 
     @staticmethod
     def _log(task: str, *, job_id: uuid.UUID, document_id: uuid.UUID) -> None:
@@ -146,6 +187,14 @@ class ArqJobQueue:
             document_id=document_id,
             idempotency_key=idempotency_key,
         )
+
+    async def enqueue_evaluate(self, *, message_id: uuid.UUID, idempotency_key: str) -> None:
+        try:
+            async with asyncio.timeout(self._timeout):
+                pool = await self._get_pool()
+                await pool.enqueue_job(EVALUATE_TASK_NAME, str(message_id), _job_id=idempotency_key)
+        except Exception as exc:
+            raise JobQueueError(str(exc)) from exc
 
     async def _enqueue(
         self, task: str, *, job_id: uuid.UUID, document_id: uuid.UUID, idempotency_key: str

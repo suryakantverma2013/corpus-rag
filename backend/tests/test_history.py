@@ -23,9 +23,11 @@ from app.rag.history import (
     HistoryTurn,
     load_history,
     load_router_tail,
+    to_messages,
     to_prompt_history,
     truncate_turns,
 )
+from app.rag.prompts import compose_messages
 
 TENANT_ID = uuid.UUID(int=0)
 
@@ -99,6 +101,32 @@ def test_a_short_turn_is_untouched() -> None:
     assert truncate_turns(turns, max_chars=100) == turns
 
 
+# --- the composer hand-off (T-307) --------------------------------------------
+
+
+def test_turns_reach_the_composer_as_mappings_it_keeps() -> None:
+    """`to_messages` closes the last gap where a caller could hand-build the dicts.
+
+    `HistoryTurn` is a dataclass and `compose_messages` reads `Mapping`s, so passing turns
+    straight through would silently drop **every** history entry — the same failure shape as
+    the `MessageRole.AI` trap above, one layer further on. Asserted end to end against the
+    real composer rather than on the dicts alone, because "a mapping" is not the property that
+    matters; "a mapping the composer keeps" is.
+    """
+    turns = to_prompt_history(
+        [_message(MessageRole.USER, "how many tiers?"), _message(MessageRole.AI, "three")]
+    )
+    composed = compose_messages(query="and the third?", history=to_messages(turns))
+
+    assert [message["role"] for message in composed.messages] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert composed.messages[2]["content"] == "three"
+
+
 # --- the import guard ----------------------------------------------------------
 
 
@@ -149,6 +177,48 @@ async def test_the_tail_is_the_last_n_messages_oldest_first(session: AsyncSessio
 
     full = await load_history(session, conversation.id)
     assert [turn.content for turn in full] == [f"turn {index}" for index in range(6)]
+
+
+async def test_the_generation_read_stops_before_the_turn_it_answers(
+    session: AsyncSession,
+) -> None:
+    """R-48(7). T-402 writes the user's message *before* the graph runs, and
+    `compose_messages` appends the query itself — so an unbounded read asks the question
+    twice, once before the fenced context and once after it.
+    """
+    conversation = await _conversation(session)
+    rows = [
+        Message(conversation_id=conversation.id, role=MessageRole.USER, content="how many tiers?"),
+        Message(conversation_id=conversation.id, role=MessageRole.AI, content="three"),
+        Message(conversation_id=conversation.id, role=MessageRole.USER, content="and the third?"),
+    ]
+    for row in rows:
+        session.add(row)
+    await session.flush()
+
+    history = await load_history(session, conversation.id, until_message_id=rows[-1].id)
+    assert [turn.content for turn in history] == ["how many tiers?", "three"]
+    # Unbounded, the current question is in there twice over once the composer runs.
+    assert len(await load_history(session, conversation.id)) == 3
+
+
+async def test_a_message_id_from_another_conversation_yields_no_history(
+    session: AsyncSession,
+) -> None:
+    """The safe direction, and it is worth pinning: the bound is a scalar subquery over *this*
+    conversation, so a foreign id matches nothing and `seq < NULL` is false for every row.
+    An absent history costs answer quality; a mis-scoped one would put another conversation's
+    turns into this prompt.
+    """
+    mine = await _conversation(session)
+    theirs = await _conversation(session)
+    session.add(Message(conversation_id=mine.id, role=MessageRole.USER, content="mine"))
+    stranger = Message(conversation_id=theirs.id, role=MessageRole.USER, content="theirs")
+    session.add(stranger)
+    await session.flush()
+
+    assert await load_history(session, mine.id, until_message_id=stranger.id) == []
+    assert await load_history(session, mine.id, until_message_id=uuid.uuid4()) == []
 
 
 async def test_zero_turns_never_touches_the_database(session: AsyncSession) -> None:

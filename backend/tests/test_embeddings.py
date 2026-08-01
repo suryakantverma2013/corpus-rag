@@ -300,6 +300,50 @@ async def test_embed_query_uses_the_shorter_budget(respx_mock: Any) -> None:
     assert vector[0] == 4.0
 
 
+async def test_embed_queries_sends_one_request_for_every_probe(respx_mock: Any) -> None:
+    """T-305/R-46(7): a fanned-out turn embeds its probes together, on the query budget.
+
+    Four sequential `embed_query` calls would be correct and would put three extra round
+    trips in front of NFR-PRF-02's already-delayed first token.
+    """
+    route = respx_mock.post(_URL).respond(json=_body([_vector(1.0), _vector(2.0), _vector(3.0)]))
+    client = _client(query_timeout_seconds=2.0)
+    try:
+        vectors = await client.embed_queries(["query", "probe one", "probe two"])
+    finally:
+        await client.aclose()
+
+    assert route.call_count == 1
+    assert [row[0] for row in vectors] == [1.0, 2.0, 3.0]
+
+
+async def test_embed_queries_is_aligned_by_the_response_index(respx_mock: Any) -> None:
+    """The `zip` transposition again, on the path where it would mis-ground an answer.
+
+    Here a transposition does not merely embed the wrong chunk — it searches the corpus with
+    another probe's vector, so the turn is grounded in passages nobody asked for.
+    """
+    respx_mock.post(_URL).respond(
+        json=_body([_vector(3.0), _vector(2.0), _vector(1.0)], indices=[2, 1, 0])
+    )
+    client = _client()
+    try:
+        vectors = await client.embed_queries(["first", "second", "third"])
+    finally:
+        await client.aclose()
+    assert [row[0] for row in vectors] == [1.0, 2.0, 3.0]
+
+
+async def test_embed_queries_makes_no_request_for_an_empty_list(respx_mock: Any) -> None:
+    route = respx_mock.post(_URL).respond(json=_body([_vector(1.0)]))
+    client = _client()
+    try:
+        assert await client.embed_queries([]) == []
+    finally:
+        await client.aclose()
+    assert route.call_count == 0
+
+
 # --- fake backend -------------------------------------------------------------
 
 
@@ -328,6 +372,22 @@ async def test_fake_client_of_nothing_costs_nothing() -> None:
     client = FakeEmbeddingClient()
     assert await client.embed_texts([]) == []
     assert client.request_count == 0
+
+
+async def test_fake_client_embeds_probes_as_one_request() -> None:
+    """The double has to model the real client's cost, or `test_search` asserts nothing."""
+    client = FakeEmbeddingClient()
+    vectors = await client.embed_queries(["query", "probe"])
+
+    assert client.request_count == 1
+    assert client.embedded_inputs == 2
+    assert vectors[0] == await FakeEmbeddingClient().embed_query("query")
+
+
+async def test_fake_client_rejects_a_blank_probe() -> None:
+    """Same pre-flight as the corpus path — an empty probe is a 400 from the real endpoint."""
+    with pytest.raises(EmbeddingInputError):
+        await FakeEmbeddingClient().embed_queries(["fine", "  "])
 
 
 # --- factory / DI -------------------------------------------------------------

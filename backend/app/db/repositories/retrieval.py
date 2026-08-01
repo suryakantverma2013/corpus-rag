@@ -37,6 +37,7 @@ from sqlalchemy import (
     cast,
     literal,
     literal_column,
+    or_,
     select,
     text,
 )
@@ -45,8 +46,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import RetrievalSettings, get_settings
 from app.db.base import EMBEDDING_DIM
+from app.db.enums import KBVisibility
 from app.db.models.document import Document
 from app.db.models.document_chunk import DocumentChunk
+from app.db.models.knowledge_base import KnowledgeBase
 from app.rag.fusion import drop_overlapping_neighbours, rrf_fuse
 from app.rag.retrieval import RetrievalFilter, RetrievedChunk
 
@@ -56,6 +59,7 @@ __all__ = [
     "HybridRetriever",
     "PgVectorRetriever",
     "dense_distance",
+    "fetch_chunks",
     "fts_document",
     "fts_query",
     "websearch_input",
@@ -137,6 +141,16 @@ def _access_predicates(filters: RetrievalFilter) -> list[ColumnElement[bool]]:
     must go on answering questions throughout (R-36(3)). Adding a `status == ACTIVE`
     predicate here would take every document offline the moment its replacement was
     requested — silently, and only for the duration of the rebuild.
+
+    **The FR-ORC-06 ambient scope is the subquery** (T-305, R-46(2)): "the active chat's
+    attachments + all GLOBAL documents visible to the user". `Document.owner_id` alone does
+    not express it — under R-25 every one of a user's chats has its own knowledge base, so an
+    owner-only filter searches *every other chat's* attachments too, which FR-KBM-03 forbids
+    in as many words. It is a **subquery rather than a third join** so the `SELECT` shape,
+    the row count and both functional-index tests stay exactly as T-206 left them; the
+    `IN` reads `document_chunks.knowledge_base_id`, which the T-101 composite tenant/KB
+    indexes already lead on. R-42(3)'s "an in-query predicate, never an enumerated id list"
+    is satisfied literally: nothing is resolved in Python and nothing is unbounded.
     """
     predicates: list[ColumnElement[bool]] = [
         DocumentChunk.tenant_id == filters.tenant_id,
@@ -148,6 +162,16 @@ def _access_predicates(filters: RetrievalFilter) -> list[ColumnElement[bool]]:
     ]
     if filters.active_only:
         predicates.append(DocumentChunk.is_active.is_(True))
+    if filters.conversation_id is not None:
+        ambient = select(KnowledgeBase.id).where(
+            KnowledgeBase.tenant_id == filters.tenant_id,
+            KnowledgeBase.owner_id == filters.owner_id,
+            or_(
+                KnowledgeBase.visibility == KBVisibility.GLOBAL,
+                KnowledgeBase.conversation_id == filters.conversation_id,
+            ),
+        )
+        predicates.append(DocumentChunk.knowledge_base_id.in_(ambient))
     if filters.knowledge_base_ids:
         predicates.append(DocumentChunk.knowledge_base_id.in_(list(filters.knowledge_base_ids)))
     if filters.document_ids:
@@ -285,6 +309,59 @@ async def _sparse_arm(
     )
     rows = (await session.execute(stmt)).all()
     return [_row_to_candidate(row, float(row[-1])) for row in rows]
+
+
+# --- read-back by id ----------------------------------------------------------
+
+
+async def fetch_chunks(
+    session: AsyncSession,
+    chunk_ids: Sequence[uuid.UUID],
+    *,
+    filters: RetrievalFilter,
+) -> list[RetrievedChunk]:
+    """Re-read chunks by id, through the **same** access filters retrieval applies (T-306).
+
+    `RAGState` holds ids and scalars only (R-42(2)), so the chunk text `retrieve` had in hand
+    is deliberately discarded at the node boundary (FR-PER-03) and the rerank stage has to
+    read it back. Built on :func:`_access_predicates`, not on a fresh `WHERE id IN (…)`: the
+    ids come out of a checkpoint that may have been written before a document was deleted,
+    its owner's roles changed, or a replace made an older version current, and re-reading them
+    under a *different* predicate set is how a checkpoint becomes a way to read rows the live
+    scope no longer contains. R-42(3) is explicit that a resumed run re-authorizes from the
+    live principal; this is that rule at the row level.
+
+    Rows are returned **in the requested order** — SQL `IN` guarantees none, and the caller's
+    order is the R-46(3) merged ranking, which is also the fail-open ordering. Ids that no
+    longer resolve are simply **absent**, which discharges FR-CIT-06(1) and (5) before the
+    passage can be cited rather than after.
+
+    ``score`` is ``0.0`` on every row and means nothing: the RRF score is not recoverable from
+    state, and inventing one here would put a number into the same field FR-CIT-04 reads.
+    """
+    if not chunk_ids:
+        return []
+
+    stmt = (
+        select(*_PROJECTION)
+        .join(Document, Document.id == DocumentChunk.document_id)
+        .where(*_access_predicates(filters), DocumentChunk.id.in_(list(chunk_ids)))
+    )
+    rows = (await session.execute(stmt)).all()
+    found = {
+        row[0]: RetrievedChunk(
+            chunk_id=row[0],
+            document_id=row[1],
+            knowledge_base_id=row[2],
+            filename=row[6],
+            chunk_index=row[3],
+            chunk_text=row[4],
+            score=0.0,
+            meta=row[5] or {},
+        )
+        for row in rows
+    }
+    return [found[chunk_id] for chunk_id in chunk_ids if chunk_id in found]
 
 
 # --- retrievers ---------------------------------------------------------------

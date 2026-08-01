@@ -7,17 +7,16 @@ own tasks. Run: `uv run uvicorn app.main:app`.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-import structlog
 from fastapi import FastAPI
 from slowapi.errors import RateLimitExceeded
 
 from app.api import health
 from app.api.router import api_router
 from app.config import Settings, get_settings
+from app.logging_config import configure_logging
 from app.rag.graph import close_graph
 from app.security.rate_limit import limiter, rate_limit_exceeded_handler
 from app.services.checkpointer import close_checkpointer
@@ -25,32 +24,6 @@ from app.services.embeddings import close_embedding_client
 from app.services.jobs import close_job_queue
 from app.services.llm import close_chat_client
 from app.services.object_storage import close_object_storage
-
-
-def _configure_logging() -> None:
-    """Route stdlib logging through structlog with a JSON-friendly processor chain.
-
-    Logger caching comes from `LOG_CACHE_LOGGERS` rather than being hard-coded, and that is
-    load-bearing rather than fussy. `cache_logger_on_first_use=True` latches every
-    module-level `structlog.get_logger(__name__)` onto whichever processor chain was
-    configured at its first use, and **nothing un-latches it** — not `structlog.configure`,
-    not `structlog.testing.capture_logs`, which is how log assertions are written. This
-    module builds the app at import time (`app = create_app()` below, the uvicorn
-    entrypoint), so the latch closes before any test fixture can run; only a decision made
-    in the environment *before* the import can keep it open. `tests/conftest.py` does that.
-    The processor chain is identical either way, so the suite still exercises production's.
-    """
-    structlog.configure(
-        processors=[
-            structlog.processors.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.StackInfoRenderer(),
-            structlog.processors.format_exc_info,
-            structlog.processors.JSONRenderer(),
-        ],
-        wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
-        cache_logger_on_first_use=get_settings().log_cache_loggers,
-    )
 
 
 @asynccontextmanager
@@ -80,7 +53,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Build and return the FastAPI application."""
-    _configure_logging()
+    configure_logging()
     settings = settings or get_settings()
 
     app = FastAPI(

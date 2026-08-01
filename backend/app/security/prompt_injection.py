@@ -44,6 +44,7 @@ __all__ = [
     "CONTEXT_FENCE_CLOSE",
     "CONTEXT_FENCE_OPEN",
     "INJECTION_RULES",
+    "SOURCE_MARKER_RE",
     "InjectionRule",
     "InjectionScreenResult",
     "neutralize",
@@ -72,14 +73,22 @@ def source_marker(index: int) -> str:
 
     A single definition because three places must agree on the spelling: the fence block
     that hands markers to the model, the FR-CIT-06(2) check that maps a marker back to a
-    chunk id, and :data:`_SOURCE_MARKER_RE`, which defuses a forged one.
+    chunk id, and :data:`SOURCE_MARKER_RE`, which defuses a forged one.
     """
     return f"[S{index}]"
 
 
-#: Any source marker, forged or genuine. Matched inside untrusted text so a poisoned chunk
-#: cannot mint `[S9]` and have a claim attributed to a document it does not own.
-_SOURCE_MARKER_RE = re.compile(r"\[S\d+\]")
+#: Any source marker, forged or genuine, capturing its 1-based index.
+#:
+#: Two readers, pointed in opposite directions, and they must not drift — which is why the
+#: pattern is defined once here rather than recompiled per caller. :func:`neutralize` matches
+#: it inside *untrusted* text so a poisoned chunk cannot mint `[S9]` and have a claim
+#: attributed to a document it does not own; `app.rag.generation.split_answer_segments`
+#: matches it in the model's *own* output to resolve a citation back to a chunk (R-48(4)).
+#: A marker the composer would emit but this pattern missed is a citation silently rendered
+#: as prose; one this matched but the composer spells differently is a citation that never
+#: resolves.
+SOURCE_MARKER_RE = re.compile(r"\[S(\d+)\]")
 
 #: Chat-template control tokens. Not "suspicious": these have no meaning in prose at all,
 #: and their only purpose in a question is to forge a turn boundary.
@@ -115,7 +124,7 @@ def neutralize(text: str) -> str:
     cleaned = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
     cleaned = cleaned.replace(CONTEXT_FENCE_OPEN, _DEFUSED)
     cleaned = cleaned.replace(CONTEXT_FENCE_CLOSE, _DEFUSED)
-    cleaned = _SOURCE_MARKER_RE.sub(_DEFUSED, cleaned)
+    cleaned = SOURCE_MARKER_RE.sub(_DEFUSED, cleaned)
     return _CHAT_CONTROL_RE.sub(_DEFUSED, cleaned)
 
 

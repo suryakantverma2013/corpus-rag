@@ -8,6 +8,7 @@ dependencies = [
     "alembic>=1.18.5",
     "arq>=0.28.0",
     "asyncpg>=0.31.0",
+    "deepeval>=4.1.5",
     "fastapi>=0.139.2",
     "httpx>=0.28.1",
     "langgraph>=1.2.9",
@@ -52,6 +53,21 @@ known-first-party = ["app", "workers"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# `deepeval` (T-309) registers a pytest11 plugin that hooks session finish and prints into
+# every run of our suite — it exists to drive DeepEval's own `assert_test` workflow, which
+# we do not use: the judge is called through `app.rag.evaluation`, never through pytest.
+# Disabled so a dependency of the *worker* cannot alter how our tests report.
+addopts = "-p no:deepeval"
+filterwarnings = [
+    # Two noises from `deepeval` (T-309), both in vendor code we cannot fix: a `return`
+    # inside a `finally` block, raised once at import, and a deprecated
+    # `asyncio.iscoroutinefunction` call in its tracing layer, raised **once per judge
+    # call** — 461 lines in one test file. Both are scoped to `deepeval`'s own modules on
+    # purpose: silencing these categories globally would hide the same warnings when they
+    # are ours, which is how a deprecation reaches us as a break rather than a warning.
+    "ignore:'return' in a 'finally' block:SyntaxWarning:deepeval.*",
+    "ignore:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning:deepeval.*",
+]
 
 [dependency-groups]
 dev = [

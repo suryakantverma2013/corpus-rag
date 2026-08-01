@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import pathlib
 import selectors
 import sys
 import time
@@ -43,6 +44,35 @@ os.environ.setdefault("QUEUE_BACKEND", "none")
 # deterministic backend makes that accident impossible; the OpenAI path is still covered,
 # because `test_llm.py` constructs `OpenAIChatClient` directly.
 os.environ.setdefault("LLM_BACKEND", "fake")
+
+# Fourth instance (T-305), and the one with a bill attached: `retrieve` reaches for the
+# process-wide embedding client whenever `RAGContext.embeddings` is not injected, and unlike
+# `route` it fails **closed** — so a forgotten injection would not merely bill an embedding
+# per test run, it would turn a missing key into a failed turn and a red suite that looks
+# like a retrieval regression. `test_embeddings.py` builds `OpenAIEmbeddingClient` directly,
+# so the real path keeps its coverage.
+os.environ.setdefault("EMBEDDING_BACKEND", "fake")
+
+# The live-test gates read `os.environ`, so `.env` has to reach it explicitly (T-309).
+#
+# `pydantic-settings` reads `.env` into `Settings` and **never** into `os.environ`, so a gate
+# spelled `os.environ.get("KEYCLOAK_LIVE_ADMIN_PASSWORD")` sees nothing from that file. This
+# worked anyway for one release only because **`deepeval`'s pytest plugin was loading `.env`
+# as a side effect** — so disabling that plugin (pyproject `-p no:deepeval`) silently stopped
+# six live auth tests from running, while they still reported as "skipped" rather than as a
+# problem. Whether a live test executes must not depend on which vendor plugins happen to be
+# installed; this makes it depend on the file the developer actually edits.
+#
+# `setdefault`, and placed **after** the backend selections above, so a real environment
+# variable still wins and nothing here can override the fake backends those lines pin.
+_ENV_FILE = pathlib.Path(__file__).resolve().parent.parent / ".env"
+if _ENV_FILE.is_file():
+    for _line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
+        _line = _line.strip()
+        if not _line or _line.startswith("#") or "=" not in _line:
+            continue
+        _key, _, _value = _line.partition("=")
+        os.environ.setdefault(_key.strip(), _value.strip().strip('"').strip("'"))
 
 # Keep every module's logger observable by `structlog.testing.capture_logs` (T-302).
 # `cache_logger_on_first_use=True` latches a module-level `structlog.get_logger(__name__)`

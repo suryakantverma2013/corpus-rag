@@ -84,6 +84,19 @@ class _StubSession:
         return False
 
 
+class _EmptyRetriever:
+    """A retriever that finds nothing (T-305).
+
+    Injected rather than omitted: `retrieve` **fails closed**, so a context without it would
+    reach for `HybridRetriever` and issue real SQL against `_StubSession`, turning every
+    resume test in this file into a `SYSTEM_FAILURE` about a missing `execute`. Finding
+    nothing is fine here — this file tests checkpoint durability, not ranking.
+    """
+
+    async def search(self, query_text, query_embedding, *, filters, top_k=None):  # noqa: ANN001, ANN003, ANN201, ARG002
+        return []
+
+
 def _context(conversation_id: uuid.UUID) -> RAGContext:
     conversation = Conversation(id=conversation_id, owner_id=OWNER_ID, tenant_id=TENANT_ID)
     return RAGContext(
@@ -91,6 +104,7 @@ def _context(conversation_id: uuid.UUID) -> RAGContext:
         tenant_id=TENANT_ID,
         conversation_id=conversation_id,
         sessionmaker=lambda: _StubSession(conversation),
+        retriever_factory=lambda session: _EmptyRetriever(),  # noqa: ARG005
     )
 
 
@@ -371,9 +385,17 @@ import asyncio, selectors, sys, uuid
 
 async def main(thread_id):
     from app.db.models.conversation import Conversation
+    from app.logging_config import configure_logging
     from app.rag.graph import build_graph, thread_config
     from app.rag.state import RAGContext
     from app.services.checkpointer import build_checkpointer
+
+    # This child is an entrypoint of its own: without this it inherits structlog's library
+    # defaults, whose renderer changes with the installed dependency set (a transitive
+    # `rich` emits box-drawing characters that a cp1252 pipe cannot encode, failing the
+    # node that was logging). That made this test fail for a reason unrelated to what it
+    # asserts. See `app.logging_config`.
+    configure_logging()
 
     conversation_id = uuid.UUID(thread_id)
     owner_id = uuid.UUID({owner!r})
@@ -393,6 +415,10 @@ async def main(thread_id):
         async def __aexit__(self, *exc):
             return False
 
+    class R:
+        async def search(self, query_text, query_embedding, *, filters, top_k=None):
+            return []
+
     provider = build_checkpointer()
     graph = build_graph(await provider.get())
     ctx = RAGContext(
@@ -400,6 +426,7 @@ async def main(thread_id):
         tenant_id=uuid.UUID(int=0),
         conversation_id=conversation_id,
         sessionmaker=lambda: S(),
+        retriever_factory=lambda session: R(),
     )
     async for _ in graph.astream(
         {{"query": "written by another process", "turn_index": 0}},

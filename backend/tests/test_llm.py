@@ -284,6 +284,358 @@ async def test_the_cached_client_is_dropped_on_close(monkeypatch: pytest.MonkeyP
     assert llm_module._client is None  # noqa: SLF001 — the point of the test
 
 
+# --- per-call-site model and budget (T-306, R-47) ------------------------------
+
+
+async def test_rerank_json_calls_the_rerank_model_not_the_router_model(
+    respx_mock: Any,
+) -> None:
+    """One seam, two call sites, two model ids — the reason `rerank_json` exists at all."""
+    import json
+
+    route = respx_mock.post(_URL).respond(json=_body())
+    settings = Settings(
+        openai=OpenAISettings(
+            api_key="test-key", router_model="gpt-4o-mini", rerank_model="gpt-4.1-mini"
+        ),
+        llm=LlmSettings(),
+        router=RouterSettings(),
+    )
+    client = OpenAIChatClient(settings)
+    try:
+        await client.rerank_json(
+            [{"role": "user", "content": "hi"}],
+            schema=_SCHEMA,
+            schema_name="passage_relevance",
+            max_output_tokens=64,
+        )
+    finally:
+        await client.aclose()
+
+    assert json.loads(route.calls.last.request.content)["model"] == "gpt-4.1-mini"
+
+
+async def test_each_call_site_applies_its_own_timeout(respx_mock: Any) -> None:
+    """The budgets must not be baked into the constructor, or one client cannot serve both.
+
+    Asserted on the request's own timeout extension rather than by counting seconds: the
+    failure this guards against is the reranker silently inheriting the router's 8-second
+    leash, which no assertion on the response could see.
+    """
+    route = respx_mock.post(_URL).respond(json=_body())
+    client = OpenAIChatClient(_settings(router_timeout_seconds=3.0, rerank_timeout_seconds=17.0))
+    try:
+        await client.complete_json(
+            [{"role": "user", "content": "hi"}],
+            schema=_SCHEMA,
+            schema_name="query_route",
+            max_output_tokens=64,
+        )
+        router_timeout = route.calls.last.request.extensions["timeout"]["read"]
+        await client.rerank_json(
+            [{"role": "user", "content": "hi"}],
+            schema=_SCHEMA,
+            schema_name="passage_relevance",
+            max_output_tokens=64,
+        )
+        rerank_timeout = route.calls.last.request.extensions["timeout"]["read"]
+    finally:
+        await client.aclose()
+
+    assert router_timeout == 3.0
+    assert rerank_timeout == 17.0
+
+
+def test_incoherent_rerank_settings_are_refused() -> None:
+    with pytest.raises(ValueError, match="LLM_"):
+        LlmSettings(rerank_timeout_seconds=0)
+    with pytest.raises(ValueError, match="LLM_"):
+        LlmSettings(rerank_max_retries=-1)
+
+
+def test_incoherent_generation_settings_are_refused() -> None:
+    with pytest.raises(ValueError, match="LLM_MAX_OUTPUT_TOKENS"):
+        LlmSettings(max_output_tokens=0)
+
+
+# --- streaming generation (T-307, R-48) ----------------------------------------
+
+
+def _sse(*chunks: dict[str, Any]) -> str:
+    """A `text/event-stream` body the SDK's own parser accepts."""
+    import json
+
+    lines = [f"data: {json.dumps(chunk)}\n\n" for chunk in chunks]
+    return "".join(lines) + "data: [DONE]\n\n"
+
+
+def _delta_chunk(
+    content: str | None = None,
+    *,
+    finish_reason: str | None = None,
+    refusal: str | None = None,
+) -> dict[str, Any]:
+    delta: dict[str, Any] = {}
+    if content is not None:
+        delta["content"] = content
+    if refusal is not None:
+        delta["refusal"] = refusal
+    return {
+        "id": "chatcmpl-test",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": "gpt-4o",
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+    }
+
+
+def _usage_chunk(prompt: int = 40, completion: int = 9) -> dict[str, Any]:
+    """The trailing usage-only chunk `stream_options={"include_usage": True}` asks for."""
+    return {
+        "id": "chatcmpl-test",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": "gpt-4o",
+        "choices": [],
+        "usage": {
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "total_tokens": prompt + completion,
+        },
+    }
+
+
+def _stream_response(respx_mock: Any, body: str) -> Any:
+    return respx_mock.post(_URL).respond(text=body, headers={"content-type": "text/event-stream"})
+
+
+def _generation_settings(**llm: Any) -> Settings:
+    return Settings(
+        openai=OpenAISettings(api_key="test-key", chat_model="gpt-4o"),
+        llm=LlmSettings(**llm),
+        router=RouterSettings(),
+    )
+
+
+async def test_a_streamed_answer_concatenates_its_deltas(respx_mock: Any) -> None:
+    _stream_response(
+        respx_mock,
+        _sse(
+            _delta_chunk("Refunds "),
+            _delta_chunk("take 30 days "),
+            _delta_chunk("[S1]."),
+            _delta_chunk(finish_reason="stop"),
+            _usage_chunk(),
+        ),
+    )
+    client = OpenAIChatClient(_generation_settings())
+    try:
+        stream = await client.stream_answer(
+            [{"role": "user", "content": "hi"}], max_output_tokens=64
+        )
+        result = await stream.collect()
+    finally:
+        await client.aclose()
+
+    assert result.text == "Refunds take 30 days [S1]."
+    assert result.model == "gpt-4o"
+
+
+async def test_streaming_asks_for_usage_and_gets_the_metering(respx_mock: Any) -> None:
+    """Without `stream_options`, the SDK streams no `usage` at all — and `prompt_tokens` /
+    `completion_tokens` (FR-MSG-06, the FR-ANL cards, OI-16's per-chat accounting) would be
+    silently `None` on every real answer while every mocked test that supplied them stayed
+    green. That is why both halves are asserted here."""
+    import json
+
+    route = _stream_response(
+        respx_mock, _sse(_delta_chunk("ok"), _delta_chunk(finish_reason="stop"), _usage_chunk())
+    )
+    client = OpenAIChatClient(_generation_settings())
+    try:
+        stream = await client.stream_answer(
+            [{"role": "user", "content": "hi"}], max_output_tokens=64
+        )
+        result = await stream.collect()
+    finally:
+        await client.aclose()
+
+    payload = json.loads(route.calls.last.request.content)
+    assert payload["stream"] is True
+    assert payload["stream_options"] == {"include_usage": True}
+    assert payload["model"] == "gpt-4o"
+    assert payload["max_completion_tokens"] == 64
+    # No `temperature`, and it matters more here than at the other two call sites: this one
+    # fails *closed*, so a model family rejecting the parameter would fail the turn outright.
+    assert "temperature" not in payload
+    assert (result.prompt_tokens, result.completion_tokens) == (40, 9)
+
+
+async def test_generation_uses_its_own_budget_and_never_the_router_leash(
+    respx_mock: Any,
+) -> None:
+    """R-48(1): an 8-second cap tuned for a classification that fails open would cut off a
+    long grounded answer that fails closed."""
+    route = _stream_response(
+        respx_mock, _sse(_delta_chunk("ok"), _delta_chunk(finish_reason="stop"))
+    )
+    client = OpenAIChatClient(
+        _generation_settings(timeout_seconds=75.0, router_timeout_seconds=3.0)
+    )
+    try:
+        stream = await client.stream_answer(
+            [{"role": "user", "content": "hi"}], max_output_tokens=8
+        )
+        await stream.collect()
+    finally:
+        await client.aclose()
+
+    assert route.calls.last.request.extensions["timeout"]["read"] == 75.0
+
+
+async def test_a_streamed_refusal_is_its_own_error(respx_mock: Any) -> None:
+    """ "The model declined" and "the model answered and we could not read it" call for
+    different handling, and only the first is worth showing a user as anything but a system
+    failure — R-45's reason for the class, at the streaming call site."""
+    _stream_response(
+        respx_mock,
+        _sse(
+            _delta_chunk(refusal="I can't help with that"),
+            _delta_chunk(finish_reason="stop"),
+        ),
+    )
+    client = OpenAIChatClient(_generation_settings())
+    try:
+        stream = await client.stream_answer(
+            [{"role": "user", "content": "hi"}], max_output_tokens=64
+        )
+        with pytest.raises(ChatRefusedError, match="can't help"):
+            await stream.collect()
+    finally:
+        await client.aclose()
+
+
+async def test_a_truncated_answer_is_a_failure_not_a_short_answer(respx_mock: Any) -> None:
+    """A truncated *grounded* answer is worse than none: it can drop the citation for a claim
+    it already made, which FR-CIT-06 would reject anyway. The operator's fix is a number."""
+    _stream_response(
+        respx_mock,
+        _sse(_delta_chunk("Refunds take"), _delta_chunk(finish_reason="length"), _usage_chunk()),
+    )
+    client = OpenAIChatClient(_generation_settings())
+    try:
+        stream = await client.stream_answer(
+            [{"role": "user", "content": "hi"}], max_output_tokens=4
+        )
+        with pytest.raises(ChatResponseError, match="truncated"):
+            await stream.collect()
+    finally:
+        await client.aclose()
+
+
+async def test_an_empty_stream_raises_rather_than_returning_nothing(respx_mock: Any) -> None:
+    _stream_response(respx_mock, _sse(_delta_chunk(finish_reason="stop")))
+    client = OpenAIChatClient(_generation_settings())
+    try:
+        stream = await client.stream_answer(
+            [{"role": "user", "content": "hi"}], max_output_tokens=64
+        )
+        with pytest.raises(ChatResponseError, match="empty"):
+            await stream.collect()
+    finally:
+        await client.aclose()
+
+
+async def test_a_failure_mid_stream_is_translated_like_one_at_call_time(
+    respx_mock: Any,
+) -> None:
+    """The `try` wraps the **iteration**, not just the request.
+
+    A stream that dies after the first token raises from `__anext__`, and an untranslated
+    error there would miss the taxonomy `app.rag.errors.classify` maps by `code` — a mid-stream
+    rate limit would lose `RATE_LIMITED`'s "wait a moment" copy entirely.
+    """
+    import httpx
+
+    from app.rag.errors import FailureClass, classify
+
+    # A body that ends without `[DONE]` and with a broken line is what a dropped connection
+    # looks like to the SDK's parser.
+    respx_mock.post(_URL).mock(
+        side_effect=httpx.ReadError("connection reset while streaming"),
+    )
+    client = OpenAIChatClient(_generation_settings(max_retries=0))
+    try:
+        with pytest.raises(ChatError) as caught:
+            stream = await client.stream_answer(
+                [{"role": "user", "content": "hi"}], max_output_tokens=64
+            )
+            await stream.collect()
+    finally:
+        await client.aclose()
+
+    assert classify(caught.value) is not FailureClass.SYSTEM_FAILURE
+
+
+async def test_the_stream_is_single_pass(respx_mock: Any) -> None:
+    """`collect()` after a partial iteration returns what was actually received, rather than
+    silently restarting a stream the provider has already closed."""
+    _stream_response(
+        respx_mock,
+        _sse(_delta_chunk("one "), _delta_chunk("two"), _delta_chunk(finish_reason="stop")),
+    )
+    client = OpenAIChatClient(_generation_settings())
+    try:
+        stream = await client.stream_answer(
+            [{"role": "user", "content": "hi"}], max_output_tokens=64
+        )
+        seen = [delta async for delta in stream]
+        result = await stream.collect()
+    finally:
+        await client.aclose()
+
+    assert seen == ["one ", "two"]
+    assert result.text == "one two"
+
+
+async def test_the_fake_streams_an_answer_citing_only_supplied_markers() -> None:
+    """`LLM_BACKEND=fake` must exercise the T-307 path — a double that answered in plain prose
+    would let a broken segment parser pass CI, and one that invented `[S9]` would make
+    R-48(6)'s drop rule look like the normal path."""
+    client = FakeChatClient()
+    messages = [
+        {"role": "system", "content": "instructions"},
+        {
+            "role": "user",
+            "content": "<<<CORPUS_UNTRUSTED_DOCUMENT_CONTEXT>>>\n[S1] filename=a.pdf\nthirty days"
+            "\n\n[S2] filename=b.pdf\nholiday hours\n<<<END_CORPUS_UNTRUSTED_DOCUMENT_CONTEXT>>>",
+        },
+        {"role": "user", "content": "what is the refund window?"},
+    ]
+    stream = await client.stream_answer(messages, max_output_tokens=64)
+    seen = [delta async for delta in stream]
+    result = await stream.collect()
+
+    assert "[S1]" in result.text and "[S2]" in result.text
+    assert "[S3]" not in result.text
+    # Several deltas, so a marker crosses a boundary — the arrangement that breaks a parser
+    # written against whole chunks.
+    assert len(seen) > 1
+    assert result.prompt_tokens and result.completion_tokens
+
+
+async def test_the_fake_streams_a_fixed_answer_when_given_one() -> None:
+    client = FakeChatClient(answer="exactly this [S1]")
+    stream = await client.stream_answer([{"role": "user", "content": "hi"}], max_output_tokens=64)
+    assert (await stream.collect()).text == "exactly this [S1]"
+
+
+async def test_the_fake_raises_on_the_streaming_path_too() -> None:
+    client = FakeChatClient(error=ChatUnavailableError("down"))
+    with pytest.raises(ChatUnavailableError):
+        await client.stream_answer([{"role": "user", "content": "hi"}], max_output_tokens=64)
+
+
 # --- the deterministic double -------------------------------------------------
 
 
@@ -303,8 +655,33 @@ async def test_the_fake_is_deterministic_and_records_its_calls() -> None:
     assert len(client.calls) == 2
 
 
+async def test_the_fake_scores_passages_for_the_rerank_schema() -> None:
+    """`LLM_BACKEND=fake` must exercise the T-306 path, not fall through to `{}`.
+
+    And it must **discriminate** — a double that scored everything alike would let a broken
+    ordering pass every test that uses it.
+    """
+    client = FakeChatClient(score_scale=10)
+    messages = [
+        {"role": "system", "content": "rubric"},
+        {
+            "role": "user",
+            "content": "[S1] filename=a.pdf\nthe refund window is 30 days\n\n"
+            "[S2] filename=b.pdf\nholiday opening hours",
+        },
+        {"role": "user", "content": "what is the refund window?"},
+    ]
+    result = await client.rerank_json(
+        messages, schema=_SCHEMA, schema_name="passage_relevance", max_output_tokens=64
+    )
+
+    scores = {entry["id"]: entry["score"] for entry in result.data["scores"]}
+    assert set(scores) == {1, 2}
+    assert scores[1] > scores[2]
+
+
 async def test_the_fake_answers_an_unknown_schema_with_an_empty_object() -> None:
-    """It knows one schema. Anything else must degrade to something the caller's own validation
+    """It knows two schemas. Anything else must degrade to something the caller's own validation
     rejects, rather than to a plausible-looking answer for a schema it never saw."""
     client = FakeChatClient()
     result = await client.complete_json(

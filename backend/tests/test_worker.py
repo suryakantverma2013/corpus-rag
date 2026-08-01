@@ -26,6 +26,7 @@ from app.db.repositories.knowledge_bases import KnowledgeBaseRepository
 from app.db.repositories.users import UserRepository
 from app.services.jobs import (
     DELETE_TASK_NAME,
+    EVALUATE_TASK_NAME,
     INGEST_TASK_NAME,
     WORKER_HEALTH_CHECK_KEY,
     JobQueueError,
@@ -45,7 +46,7 @@ def test_the_registered_task_names_match_the_enqueue_contract() -> None:
     than a comment.
     """
     names = [function.name for function in ArqWorkerSettings.functions]
-    assert names == [INGEST_TASK_NAME, DELETE_TASK_NAME]
+    assert names == [INGEST_TASK_NAME, DELETE_TASK_NAME, EVALUATE_TASK_NAME]
 
 
 def test_the_heartbeat_is_not_arqs_hour_long_default() -> None:

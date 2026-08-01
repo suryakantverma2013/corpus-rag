@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from app.rag.fusion import drop_overlapping_neighbours, rrf_fuse
+from app.rag.fusion import drop_overlapping_neighbours, rrf_fuse, rrf_merge
 
 K = 60
 
@@ -140,3 +140,67 @@ def test_a_run_of_three_adjacent_chunks_keeps_the_first_and_the_last() -> None:
     """Dropping 4 unblocks 5: it neighbours only the chunk that was already discarded."""
     hits = [_Hit(DOC, 0, 3, "a"), _Hit(DOC, 0, 4, "b"), _Hit(DOC, 0, 5, "c")]
     assert [hit.label for hit in drop_overlapping_neighbours(hits)] == ["a", "c"]
+
+
+# --- cross-probe merge (T-305, R-46(3)) ---------------------------------------
+
+
+def test_merging_one_list_preserves_its_order() -> None:
+    """The single-probe identity: a turn the router did not fan out ranks exactly as before.
+
+    This is what makes R-46(4)'s "per probe, plus a larger merged cap" a no-op for the
+    common case — 18 of 20 ordinary questions classify `simple` with zero probes (T-304's
+    live corpus), and those must come out of the merge in the order fusion produced.
+    """
+    a, b, c = _ids(3)
+    merged = rrf_merge([[a, b, c]], k=K)
+
+    ordered = sorted(merged, key=lambda chunk_id: -merged[chunk_id].score)
+    assert ordered == [a, b, c]
+    assert [merged[chunk_id].probe_count for chunk_id in ordered] == [1, 1, 1]
+
+
+def test_agreement_across_probes_beats_one_probes_top_hit() -> None:
+    """The cross-probe form of the property `rrf_fuse` rests on (R-46(3))."""
+    agreed, single = _ids(2)
+    merged = rrf_merge([[single, agreed], [agreed], [agreed]], k=K)
+
+    assert merged[agreed].score > merged[single].score
+    assert merged[agreed].probe_count == 3
+    assert merged[agreed].best_rank == 1
+    assert merged[single].probe_count == 1
+
+
+def test_a_chunk_only_one_probe_found_still_survives() -> None:
+    """Probes are *additive* (R-45(3)) — a lone find is ranked lower, never discarded."""
+    everywhere, lonely = _ids(2)
+    merged = rrf_merge([[everywhere], [everywhere], [lonely]], k=K)
+
+    assert set(merged) == {everywhere, lonely}
+
+
+def test_the_merged_score_is_the_sum_of_reciprocal_probe_ranks() -> None:
+    a, b = _ids(2)
+    merged = rrf_merge([[a, b], [b, a]], k=K)
+
+    assert merged[a].score == pytest.approx(1 / 61 + 1 / 62)
+    assert merged[b].score == pytest.approx(1 / 62 + 1 / 61)
+
+
+def test_a_duplicate_within_one_probe_counts_once_at_its_best_rank() -> None:
+    """Two probes agreeing is signal; one probe repeating itself is not."""
+    a = _ids(1)[0]
+    merged = rrf_merge([[a, a, a]], k=K)
+
+    assert merged[a].probe_count == 1
+    assert merged[a].score == pytest.approx(1 / 61)
+
+
+def test_merging_no_lists_or_empty_lists_yields_nothing() -> None:
+    assert rrf_merge([], k=K) == {}
+    assert rrf_merge([[], []], k=K) == {}
+
+
+def test_merge_rejects_a_k_below_one() -> None:
+    with pytest.raises(ValueError, match="RRF k"):
+        rrf_merge([_ids(1)], k=0)

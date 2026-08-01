@@ -10,7 +10,9 @@ it and they must not each roll their own:
   the second one?" without paying for a full-history call on a classification.
 * T-307's generator sees the **whole** history, untruncated, per R-30 — the 10.4K budget
   counts history + query and FR-STA-04's warn-and-block is what keeps it in range, so there
-  is no windowing to do.
+  is no windowing to do. It does stop **short of the turn it is answering** (R-48(7)): that
+  row is already in `messages` before the graph starts, and the composer appends the query
+  itself, so an unbounded read would ask the question twice.
 * T-402 lists the same rows for the API.
 
 **The role mapping is the load-bearing part.** `MessageRole.AI` is stored as ``"ai"``, and
@@ -42,6 +44,7 @@ __all__ = [
     "HistoryTurn",
     "load_history",
     "load_router_tail",
+    "to_messages",
     "to_prompt_history",
     "truncate_turns",
 ]
@@ -89,9 +92,39 @@ def to_prompt_history(messages: Iterable[Message]) -> list[HistoryTurn]:
     return turns
 
 
-async def load_history(session: AsyncSession, conversation_id: uuid.UUID) -> list[HistoryTurn]:
-    """The full transcript, oldest first (R-30, R-42(1)) — T-307's input."""
-    rows = await MessageRepository(session).list_by_conversation(conversation_id)
+def to_messages(turns: Iterable[HistoryTurn]) -> list[dict[str, str]]:
+    """Prompt turns → the mapping shape :func:`app.rag.prompts.compose_messages` reads.
+
+    :class:`HistoryTurn` is a dataclass and the composer reads ``Mapping``s, so without this
+    every caller would hand-build the dicts — which is exactly the step this module exists to
+    own. Kept here rather than as a method so the conversion sits beside the role mapping it
+    depends on.
+    """
+    return [{"role": turn.role, "content": turn.content} for turn in turns]
+
+
+async def load_history(
+    session: AsyncSession,
+    conversation_id: uuid.UUID,
+    *,
+    until_message_id: uuid.UUID | None = None,
+) -> list[HistoryTurn]:
+    """The full transcript, oldest first (R-30, R-42(1)) — T-307's input.
+
+    Untruncated by design: R-30 counts history + query against the 10.4K budget and FR-STA-04
+    warns and blocks before it is exceeded, so there is no windowing to do here.
+
+    ``until_message_id`` bounds the read *below* that row (R-48(7)). T-307 passes
+    `RAGState.user_message_id`, because the row this turn answers is already in the table by
+    the time the graph runs and `compose_messages` appends the query itself — see
+    :meth:`app.db.repositories.messages.MessageRepository.list_before`.
+    """
+    repository = MessageRepository(session)
+    rows = (
+        await repository.list_before(conversation_id, message_id=until_message_id)
+        if until_message_id is not None
+        else await repository.list_by_conversation(conversation_id)
+    )
     return to_prompt_history(rows)
 
 

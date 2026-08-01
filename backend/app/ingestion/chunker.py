@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import math
 import re
 import uuid
 from dataclasses import dataclass
@@ -43,6 +42,7 @@ from app.config import EMBEDDING_MAX_INPUT_CHARS, ChunkerSettings, get_settings
 from app.db.base import DEFAULT_TENANT_ID
 from app.db.models.document_chunk import DocumentChunk
 from app.ingestion.parsers.base import Locator, LocatorKind, ParsedBlock, ParsedDocument
+from app.tokens import CHARS_PER_TOKEN, estimate_tokens
 
 __all__ = [
     "CHUNKING_VERSION",
@@ -64,13 +64,12 @@ __all__ = [
 #: :func:`effective_chunking_version`, so this constant tracks code, not configuration.
 CHUNKING_VERSION = "1"
 
-#: Characters per token, for the `token_count` estimate only. Deliberately not a real
-#: tokenizer: `tiktoken` fetches its BPE vocabulary over the network on first use, which
-#: is a startup dependency (and an air-gapped failure) inside an ingestion worker, on a
-#: lock kept at 106 packages. `token_count` is not a fingerprint input and has no
-#: normative consumer — R-30 excludes retrieved chunk text from the NFR-CAP-01 budget —
-#: so swapping this for an exact count later re-embeds nothing. # TBD(§8.4)
-_CHARS_PER_TOKEN = 4.0
+#: The characters-per-token rule now lives in `app.tokens` (T-310), because the NFR-CAP-01
+#: budget applies the same one and two definitions would let the number a user is shown
+#: drift from the number that blocked them. Re-exported here so this module's existing
+#: callers and tests are unaffected; the reasoning for it being an estimate — unchanged, and
+#: still R-35(7)'s — is in that module's docstring.
+_CHARS_PER_TOKEN = CHARS_PER_TOKEN
 
 # Separator hierarchy, coarsest first. The boundary is always ``match.end()``, so the
 # separator stays with the chunk that precedes it and no character is orphaned between
@@ -137,12 +136,12 @@ def compute_embedding_fingerprint(
 
 
 def estimate_token_count(text: str) -> int:
-    """Approximate token count (see :data:`_CHARS_PER_TOKEN` for why it is an estimate).
+    """Approximate token count for `document_chunks.token_count`.
 
-    T-205 must **not** size embedding batches from this — an underestimate becomes a 400
-    from the API. Batch by characters or by request count and let the API be the authority.
+    Thin alias over :func:`app.tokens.estimate_tokens`, kept so this module's public surface
+    and its tests are unchanged by T-310's promotion of the rule.
     """
-    return math.ceil(len(text) / _CHARS_PER_TOKEN)
+    return estimate_tokens(text)
 
 
 # --- splitting ----------------------------------------------------------------

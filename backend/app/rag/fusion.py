@@ -21,7 +21,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-__all__ = ["FusedRank", "drop_overlapping_neighbours", "rrf_fuse"]
+__all__ = ["FusedRank", "ProbeRank", "drop_overlapping_neighbours", "rrf_fuse", "rrf_merge"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +78,70 @@ def rrf_fuse(
             score += 1.0 / (k + sparse_rank)
         fused[chunk_id] = FusedRank(score=score, dense_rank=dense_rank, sparse_rank=sparse_rank)
     return fused
+
+
+@dataclass(frozen=True, slots=True)
+class ProbeRank:
+    """Where one chunk placed across the probes of a single turn (T-305, R-46(3)).
+
+    ``best_rank`` and ``probe_count`` are carried for the reason `FusedRank` carries its
+    per-arm ranks: "how many of the reformulations found this, and how highly" is the first
+    question asked of a surprising merged ordering, and T-306 may want either as a feature.
+    """
+
+    score: float
+    best_rank: int
+    probe_count: int
+
+
+def rrf_merge(
+    lists: Sequence[Sequence[uuid.UUID]],
+    *,
+    k: int,
+) -> dict[uuid.UUID, ProbeRank]:
+    """Reciprocal Rank Fusion **across probes** — the same formula, one level up (R-46(3)).
+
+    R-45(3) has retrieval search ``[query] + sub_queries``, so a turn produces up to four
+    independently ranked lists where :func:`rrf_fuse` produces one. Merging them is a
+    separate decision, and it is answered the same way for the same reason: the per-probe
+    scores that come back are RRF sums, and adding *those* would reward whichever probe
+    happened to match a lot of chunks. Positions are the only thing the lists agree on the
+    meaning of, so positions are what is fused. Agreement across reformulations then earns
+    exactly what agreement between the dense and sparse arms earns — a chunk three probes
+    place near the top outranks a chunk one probe placed first.
+
+    **Every probe carries the same weight, including the original query.** Weighting the
+    user's own words above the router's rewrites is defensible and is deliberately not done
+    here: the weight would be a §8.4 knob nobody can settle without a retrieval-quality
+    corpus, and R-45(3) already guarantees the original query is *always* one of the lists,
+    which is the protection a weight would be buying. Revisit with that corpus, not before.
+
+    Ordering is left to the caller — the returned mapping is keyed by chunk id because a
+    representative object per id is the caller's to pick (`rrf_fuse` returns the same shape
+    for the same reason). A duplicate id within one probe's list counts once, at its best
+    position.
+    """
+    if k < 1:
+        raise ValueError("RRF k must be >= 1")
+
+    merged: dict[uuid.UUID, ProbeRank] = {}
+    for probe in lists:
+        seen: set[uuid.UUID] = set()
+        for position, chunk_id in enumerate(probe, start=1):
+            if chunk_id in seen:
+                continue
+            seen.add(chunk_id)
+            previous = merged.get(chunk_id)
+            contribution = 1.0 / (k + position)
+            if previous is None:
+                merged[chunk_id] = ProbeRank(score=contribution, best_rank=position, probe_count=1)
+            else:
+                merged[chunk_id] = ProbeRank(
+                    score=previous.score + contribution,
+                    best_rank=min(previous.best_rank, position),
+                    probe_count=previous.probe_count + 1,
+                )
+    return merged
 
 
 class _Neighbourly(Protocol):

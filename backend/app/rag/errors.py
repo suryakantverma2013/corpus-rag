@@ -20,9 +20,12 @@ from __future__ import annotations
 import enum
 
 __all__ = [
+    "ABSTAIN_LOW_GROUNDEDNESS",
     "ACCESS_DENIED",
     "ACCESS_DENIED_CODE",
     "BLOCKED_INJECTION",
+    "CONTEXT_WINDOW_EXCEEDED",
+    "CONTEXT_WINDOW_EXCEEDED_CODE",
     "FAILURE_COPY",
     "SYSTEM_FAILURE",
     "FailureClass",
@@ -63,6 +66,48 @@ SYSTEM_FAILURE = "System Failure: Please try again."
 BLOCKED_INJECTION = (  # TBD(§8.4)
     "I can't answer that as written — it reads as an attempt to change how I work rather "
     "than as a question about your documents. Try rephrasing it as a question."
+)
+
+#: FR-STA-04 / NFR-CAP-01 — what a refused submission answers when the conversation is full.
+#:
+#: **This is a refusal, not an FR-ORC-05 failure**, so it takes no `FailureClass`: R-43(6)
+#: fixed that set at five and admits a member only where the class changes what the user
+#: should *do*, and nothing here failed — the request was never attempted. It is the same
+#: shape as the R-24 processing lock's `409`: a state the caller resolves by acting.
+#:
+#: The code is separate from the copy because the two have different owners. **`OI-26 (c)`
+#: is open** — the escape path and the blocked-chat wording are GUI questions belonging to
+#: T-505 — so this string is provisional and deliberately minimal, while the code is stable
+#: and is what T-402's response and the GUI branch on. Copy may be rewritten without
+#: touching a client; the code may not.
+#:
+#: Names no number: the limit is a `# TBD(§8.4)` knob, and a user cannot act on "10,400"
+#: any more than on the groundedness score `ABSTAIN_LOW_GROUNDEDNESS` withholds.
+CONTEXT_WINDOW_EXCEEDED_CODE = "CONTEXT_WINDOW_EXCEEDED"
+CONTEXT_WINDOW_EXCEEDED = (  # TBD(§8.4) — copy owned by T-505 via OI-26(c)
+    "This conversation has reached its length limit. Start a new chat to keep going — your "
+    "documents and their answers stay where they are."
+)
+
+#: FR-RET-05 / R-49 — what a turn answers when the FR-CIT-06(4) groundedness gate rejects it.
+#:
+#: It lives beside `BLOCKED_INJECTION` for that constant's reason, and sets **no `error_code`**
+#: for the same one: an abstention is a decision, not a failure, and `groundedness`/
+#: `gate_reason` are already the discriminators an operator reads.
+#:
+#: **This copy replaces the rejected answer rather than accompanying it**, which is the whole
+#: point. Serving the model's own text under an `abstained` outcome would be strictly worse
+#: than serving it as an answer: the user would read ungrounded prose carrying no citations
+#: *and* an honest-looking label. The cost is real and accepted — when the model declined in
+#: its own words we lose that phrasing — because telling a decline from a fabrication needs
+#: exactly the semantic read R-49 declines to make before serving.
+#:
+#: Deliberately does not name a threshold or a score: the number is diagnostic, it moves with
+#: a §8.4 knob, and it would invite the user to argue with it rather than rephrase.
+ABSTAIN_LOW_GROUNDEDNESS = (  # TBD(§8.4)
+    "I couldn't ground an answer to that in your documents — what I found doesn't support a "
+    "reliable response, and I'd rather say so than guess. Try rephrasing the question, or "
+    "check that the document you have in mind has finished processing."
 )
 
 

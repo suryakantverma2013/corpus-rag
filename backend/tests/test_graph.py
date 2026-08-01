@@ -27,6 +27,7 @@ import pytest
 import structlog
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import get_settings
 from app.db.enums import MessageRole
@@ -36,6 +37,7 @@ from app.db.models.message import Message
 from app.rag import graph as graph_module
 from app.rag import telemetry
 from app.rag.errors import FAILURE_COPY, FailureClass, classify, copy_for
+from app.rag.generation import cited_chunk_ids, split_answer_segments
 from app.rag.graph import (
     ABSTAIN_EMPTY_SCOPE,
     ACCESS_DENIED,
@@ -47,8 +49,11 @@ from app.rag.graph import (
     decide_after_gate,
     thread_config,
 )
+from app.rag.prompts import SYSTEM_PROMPT
+from app.rag.retrieval import RetrievalFilter, RetrievedChunk
 from app.rag.state import RAGContext, RAGState
-from app.services.llm import ChatResponseError, FakeChatClient
+from app.security.prompt_injection import CONTEXT_FENCE_OPEN
+from app.services.llm import ChatResponseError, ChatUnavailableError, FakeChatClient
 from app.services.processing_lock import MemoryProcessingLockStore
 
 OWNER_ID = uuid.uuid4()
@@ -84,16 +89,27 @@ class _StubSession:
     default empty. It is real rather than absent on purpose: `route` fails open, so a stub
     that raised would silently route every test's turn through the fallback and nothing here
     would exercise the router at all.
+
+    `execute` exists for the T-306 `fetch_chunks` read-back and returns ``chunks`` as rows in
+    `_PROJECTION` order. It answers *every* select the same way, so it proves nothing about
+    the access predicates — those are asserted against a real database in
+    `tests/test_retrieval.py`, which is where SQL belongs. What it buys here is that the
+    rerank node runs at all, so the behaviour around it can be tested without Postgres.
     """
 
     def __init__(
-        self, conversation: Conversation | None, messages: list[object] | None = None
+        self,
+        conversation: Conversation | None,
+        messages: list[object] | None = None,
+        chunks: list[RetrievedChunk] | None = None,
     ) -> None:
         self._conversation = conversation
         self._messages = messages or []
+        self._chunks = chunks or []
         self.added: list[object] = []
         self.commits = 0
         self.scalar_queries = 0
+        self.executes = 0
 
     async def get(self, model: type, id_: uuid.UUID) -> Conversation | None:  # noqa: ARG002
         return self._conversation
@@ -101,6 +117,23 @@ class _StubSession:
     async def scalars(self, statement: object) -> _StubScalars:  # noqa: ARG002
         self.scalar_queries += 1
         return _StubScalars(self._messages)
+
+    async def execute(self, statement: object) -> _StubScalars:  # noqa: ARG002
+        self.executes += 1
+        return _StubScalars(
+            [
+                (
+                    chunk.chunk_id,
+                    chunk.document_id,
+                    chunk.knowledge_base_id,
+                    chunk.chunk_index,
+                    chunk.chunk_text,
+                    dict(chunk.meta),
+                    chunk.filename,
+                )
+                for chunk in self._chunks
+            ]
+        )
 
     def add(self, instance: object) -> None:
         self.added.append(instance)
@@ -118,6 +151,59 @@ class _StubSession:
         return False
 
 
+def _chunk(text: str = "a passage", **overrides: object) -> RetrievedChunk:
+    """One retrieval hit, with only the fields this file asserts on filled in."""
+    fields: dict[str, object] = {
+        "chunk_id": uuid.uuid4(),
+        "document_id": uuid.uuid4(),
+        "knowledge_base_id": uuid.uuid4(),
+        "filename": "handbook.pdf",
+        "chunk_index": 0,
+        "chunk_text": text,
+        "score": 1.0,
+    }
+    fields.update(overrides)
+    return RetrievedChunk(**fields)  # type: ignore[arg-type]
+
+
+class _StubRetriever:
+    """Returns a fixed hit list, or raises. Records the filter it was handed.
+
+    Injected into every context in this file, never omitted: `retrieve` **fails closed**, so
+    a context without it reaches for the real `HybridRetriever` and issues SQL against
+    `_StubSession`. That is loud rather than silent (the T-304 `scalars` lesson has the
+    opposite polarity here), but it would still turn every unrelated test in this file into
+    a `SYSTEM_FAILURE` about a missing `execute`.
+
+    `filters` is captured because the FR-ORC-06 scope is the *point* of the node — asserting
+    that the run reached retrieval proves nothing about which documents it was allowed to see.
+    """
+
+    def __init__(
+        self, hits: list[RetrievedChunk] | None = None, error: Exception | None = None
+    ) -> None:
+        self.hits = hits if hits is not None else []
+        self.error = error
+        self.calls = 0
+        self.filters: list[object] = []
+        self.queries: list[str] = []
+
+    async def search(
+        self,
+        query_text: str,
+        query_embedding: object,  # noqa: ARG002
+        *,
+        filters: object,
+        top_k: int | None = None,  # noqa: ARG002
+    ) -> list[RetrievedChunk]:
+        self.calls += 1
+        self.filters.append(filters)
+        self.queries.append(query_text)
+        if self.error is not None:
+            raise self.error
+        return list(self.hits)
+
+
 def _context(
     *,
     owner_id: uuid.UUID = OWNER_ID,
@@ -126,6 +212,7 @@ def _context(
     lock: MemoryProcessingLockStore | None = None,
     chat: object | None = None,
     messages: list[object] | None = None,
+    retriever: _StubRetriever | None = None,
 ):
     """A `RAGContext` whose stub conversation is owned by `conversation_owner`.
 
@@ -139,7 +226,10 @@ def _context(
     conversation_id = uuid.uuid4()
     owner = conversation_owner if conversation_owner is not None else owner_id
     conversation = Conversation(id=conversation_id, owner_id=owner, tenant_id=TENANT_ID)
-    stub = session or _StubSession(conversation, messages)
+    hits = retriever or _StubRetriever()
+    # The session hands back the same chunks the retriever returned, because that is what a
+    # real one does: T-306 re-reads by id what T-305 just found (`RAGState` carries ids only).
+    stub = session or _StubSession(conversation, messages, chunks=hits.hits)
     return RAGContext(
         owner_id=owner_id,
         tenant_id=TENANT_ID,
@@ -147,6 +237,7 @@ def _context(
         sessionmaker=lambda: stub,
         processing_lock=lock or MemoryProcessingLockStore(),
         chat=chat or FakeChatClient(),  # type: ignore[arg-type]
+        retriever_factory=lambda session: hits,  # type: ignore[arg-type,misc]  # noqa: ARG005
     )
 
 
@@ -163,6 +254,42 @@ async def _run(context: RAGContext, saver: InMemorySaver | None = None, **state:
         executed.extend(chunk)
     snapshot = await compiled.aget_state(config)
     return executed, snapshot.values
+
+
+async def _updates(context: RAGContext, **state: object) -> dict[str, dict]:
+    """Run one turn and return each node's own state update, keyed by node name.
+
+    What a node *writes* and what the turn *settles on* are different questions, and the
+    generation tests want the first: `gate` may narrow the answer's fate and `finalize` clears
+    `answer` once it is persisted, so reading the settled state would conflate three nodes'
+    decisions into one assertion — the same distinction T-306's tests drew between a node
+    appearing in `executed` and the turn succeeding. (Before T-308 this was also the *only*
+    option, because `gate` raised.)
+    """
+    compiled = build_graph(InMemorySaver())
+    payload: dict = {"query": "what do my documents say?", "turn_index": 0}
+    payload.update(state)
+    updates: dict[str, dict] = {}
+    async for chunk in compiled.astream(
+        payload,
+        thread_config(context.conversation_id),
+        context=context,
+        stream_mode="updates",
+        durability="sync",
+    ):
+        updates.update(chunk)
+    return updates
+
+
+def _rerank_calls(chat: FakeChatClient) -> int:
+    """How many of the fake's recorded calls were the FR-RET-02 scoring call.
+
+    One turn now reaches the same client three times — router, reranker, generator — so a
+    bare `len(chat.calls)` measures "did T-307 ship" rather than "was the reranker skipped".
+    Discriminated on the rubric's own opening words, which is the one part of each payload
+    that identifies its call site without reaching into the module under test.
+    """
+    return sum(1 for call in chat.calls if call[0]["content"].startswith("You rank passages"))
 
 
 # --- topology (FR-ORC-01, FR-ORC-07) ------------------------------------------
@@ -366,6 +493,7 @@ async def test_an_admin_may_run_another_users_conversation() -> None:
         tenant_id=TENANT_ID,
         conversation_id=conversation_id,
         sessionmaker=lambda: _StubSession(conversation),
+        retriever_factory=lambda session: _StubRetriever(),  # type: ignore[arg-type,misc]  # noqa: ARG005
         is_admin=True,
     )
     _, values = await _run(context)
@@ -814,6 +942,623 @@ async def test_finalize_clears_the_answer_once_it_is_persisted() -> None:
     _, cleared = await _run(_context(), answer_message_id=str(uuid.uuid4()))
     assert cleared["answer"] is None
     assert cleared["answer_message_id"] is not None
+
+
+# --- the FR-ORC-06 retrieval node (T-305, R-46) -------------------------------
+
+
+async def test_the_node_writes_the_retrieved_chunk_ids() -> None:
+    hits = [_chunk("one"), _chunk("two")]
+    retriever = _StubRetriever(hits)
+    _, values = await _run(_context(retriever=retriever))
+
+    assert values["retrieved_chunk_ids"] == [str(hit.chunk_id) for hit in hits]
+    assert retriever.calls == 1
+
+
+async def test_the_node_scopes_retrieval_to_the_caller_and_the_conversation() -> None:
+    """FR-ORC-06's ambient half, assembled from `RAGContext` — which is not checkpointed.
+
+    Asserting on the *filter* rather than on the results is the point: a resumed run must
+    scope to the caller's current identity (R-42(3)), and a test that only checked which
+    chunks came back would pass against a filter scoped to nobody at all.
+    """
+    context = _context()
+    retriever = _StubRetriever()
+    context = dataclasses.replace(
+        context,
+        retriever_factory=lambda session: retriever,  # type: ignore[arg-type,misc]  # noqa: ARG005
+    )
+    await _run(context)
+
+    filters = retriever.filters[0]
+    assert isinstance(filters, RetrievalFilter)
+    assert filters.owner_id == context.owner_id
+    assert filters.conversation_id == context.conversation_id
+    assert filters.tenant_id == context.tenant_id
+    assert filters.document_ids == []
+
+
+async def test_mentions_narrow_the_scope_to_the_mentioned_documents() -> None:
+    """R-46(1): an `@`-mention is an instruction to look *there*, so it filters."""
+    mentioned = uuid.uuid4()
+    retriever = _StubRetriever()
+    await _run(_context(retriever=retriever), mentioned_document_ids=[str(mentioned)])
+
+    assert retriever.filters[0].document_ids == [mentioned]  # type: ignore[union-attr]
+
+
+async def test_an_unparseable_mention_is_dropped_but_its_siblings_survive() -> None:
+    good = uuid.uuid4()
+    retriever = _StubRetriever()
+    await _run(_context(retriever=retriever), mentioned_document_ids=["not-a-uuid", str(good)])
+
+    assert retriever.filters[0].document_ids == [good]  # type: ignore[union-attr]
+
+
+async def test_a_turn_whose_mentions_all_fail_to_parse_retrieves_nothing() -> None:
+    """The one case where dropping bad ids would *widen* the scope instead of narrowing it.
+
+    With mentions the scope is those documents; with none it is the whole ambient set. So
+    "every mention was malformed" must not collapse into "no mentions were made" — that
+    would answer from documents the user did not ask about, which is the failure R-46(1)'s
+    narrowing exists to prevent.
+    """
+    retriever = _StubRetriever([_chunk("should not be reached")])
+    _, values = await _run(_context(retriever=retriever), mentioned_document_ids=["nope"])
+
+    assert retriever.calls == 0
+    assert values["retrieved_chunk_ids"] == []
+    assert values["outcome"] == "abstained"
+
+
+async def test_the_probes_the_router_derived_are_all_searched() -> None:
+    """The T-304 → T-305 seam: R-45(3)'s `[query] + sub_queries`, in one run.
+
+    Driven through the router rather than by seeding `sub_queries` directly, because `route`
+    *writes* that field on every turn — a test that seeded it would assert nothing about
+    whether the two nodes actually agree on the channel.
+    """
+    retriever = _StubRetriever()
+    decomposed = FakeChatClient(
+        handler=lambda _: {
+            "query_class": "multi_part",
+            "probes": ["what is tier 1?", "what is tier 2?"],
+        }
+    )
+    await _run(_context(retriever=retriever, chat=decomposed))
+
+    assert retriever.queries == [
+        "what do my documents say?",
+        "what is tier 1?",
+        "what is tier 2?",
+    ]
+
+
+async def test_a_retrieval_failure_fails_the_turn_closed() -> None:
+    """R-46(6), and the deliberate opposite of the router's fail-open guard.
+
+    FR-RET-05 names this case in as many words: an unavailable vector store returns a
+    graceful error and does not fabricate. The class is `RETRIEVAL_UNAVAILABLE` rather than
+    `SYSTEM_FAILURE` because that is what changes what the user should do — and it arrives
+    through `classify`'s `SQLAlchemyError` branch, which is how the real failure presents.
+    """
+    retriever = _StubRetriever(error=SQLAlchemyError("the vector store is unreachable"))
+    executed, values = await _run(_context(retriever=retriever))
+
+    assert values["outcome"] == "error"
+    assert values["error_code"] == FailureClass.RETRIEVAL_UNAVAILABLE.value
+    assert values["answer"] == copy_for(FailureClass.RETRIEVAL_UNAVAILABLE.value)
+    assert "generate" not in executed
+    assert executed[-1] == "finalize"
+
+
+async def test_an_empty_scope_still_abstains() -> None:
+    """R-23 / FR-SYS-02 unchanged by T-305: no documents is a legitimate state of the world."""
+    _, values = await _run(_context(retriever=_StubRetriever([])))
+
+    assert values["outcome"] == "abstained"
+    assert values["answer"] == ABSTAIN_EMPTY_SCOPE
+    assert values.get("error_code") is None
+
+
+# --- the FR-RET-02 rerank node (T-306, R-47) ----------------------------------
+
+
+async def test_the_node_writes_an_aligned_top_k_and_its_scores() -> None:
+    """`rerank_scores` is positionally aligned with `reranked_chunk_ids` — the state contract."""
+    hits = [_chunk("alpha beta"), _chunk("beta gamma"), _chunk("nothing relevant")]
+    _, values = await _run(_context(retriever=_StubRetriever(hits)), query="beta")
+
+    ranked = values["reranked_chunk_ids"]
+    scores = values["rerank_scores"]
+    assert set(ranked) <= {str(hit.chunk_id) for hit in hits}
+    assert len(scores) == len(ranked)
+    assert all(0.0 <= score <= 1.0 for score in scores)
+
+
+async def test_the_top_k_bounds_the_grounding_context() -> None:
+    hits = [_chunk(f"passage {index}") for index in range(12)]
+    settings = get_settings()
+    _, values = await _run(_context(retriever=_StubRetriever(hits)))
+
+    assert len(values["reranked_chunk_ids"]) == settings.rerank.top_k
+
+
+async def test_the_rerank_reads_back_through_the_same_scope_as_retrieval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-47: the re-read must not rebuild the FR-ORC-06 scope, or it can widen it.
+
+    `RAGState` carries ids only, so the reranker re-reads the rows — and the one way that
+    read could reintroduce the hole R-46(2) closed is by assembling a *different* filter. So
+    this asserts the two filters are equal rather than that each is individually plausible.
+    """
+    import app.db.repositories.retrieval as retrieval_repo
+
+    seen: list[object] = []
+    original = retrieval_repo.fetch_chunks
+
+    async def recording(session, chunk_ids, *, filters):  # noqa: ANN001, ANN202
+        seen.append(filters)
+        return await original(session, chunk_ids, filters=filters)
+
+    monkeypatch.setattr(retrieval_repo, "fetch_chunks", recording)
+
+    mentioned = uuid.uuid4()
+    retriever = _StubRetriever([_chunk("one")])
+    await _run(_context(retriever=retriever), mentioned_document_ids=[str(mentioned)])
+
+    assert seen, "the rerank node never read the chunks back"
+    assert seen[0] == retriever.filters[0]
+    assert seen[0].document_ids == [mentioned]  # type: ignore[union-attr]
+
+
+async def test_a_model_failure_keeps_the_retrieval_order_and_publishes_no_score() -> None:
+    """R-47(2), the deliberate opposite of `retrieve`'s fail-closed.
+
+    The candidates arrive already ordered by the R-46(3) cross-probe merge, so a reranker
+    outage costs a refinement, not the turn. The RRF score is **not** substituted — it
+    accumulates with probe count, so it means nothing in an FR-CIT-04 hover card.
+    """
+    hits = [_chunk("one"), _chunk("two"), _chunk("three")]
+    broken = FakeChatClient(error=ChatUnavailableError("the provider is down"))
+    executed, values = await _run(_context(retriever=_StubRetriever(hits), chat=broken))
+
+    assert values["reranked_chunk_ids"] == [str(hit.chunk_id) for hit in hits]
+    assert values["rerank_scores"] == []
+    # The node completed and handed generation a full grounding set, which is the whole claim.
+    # (A node that raises never appears in `executed`; `rerank` does — exactly the distinction.)
+    assert "rerank" in executed
+    # And then the *same* outage takes the turn down at `generate`, which is R-48(2) beside
+    # R-47(2) in one run: one provider failure, two opposite responses. The class is
+    # `LLM_ERROR` rather than `SYSTEM_FAILURE` because `app.services.llm` translates the SDK
+    # error and `errors._CODE_TO_CLASS` maps its `code` — the thing T-304 added for this node.
+    assert values["error_code"] == FailureClass.LLM_ERROR.value
+    assert "generate" not in executed
+
+
+async def test_a_vanished_chunk_set_abstains_rather_than_grounding_in_nothing() -> None:
+    """Everything retrieved was deleted between the two reads — FR-CIT-06(1)/(5), early."""
+    context = _context(retriever=_StubRetriever([_chunk("one")]))
+    # The session returns no rows for the read-back, which is what a deleted document looks
+    # like to `fetch_chunks`: the ids resolve to nothing inside the live scope.
+    context.sessionmaker()._chunks = []  # type: ignore[attr-defined]
+
+    _, values = await _run(context)
+
+    assert values["reranked_chunk_ids"] == []
+    assert values["outcome"] == "abstained"
+    assert values["answer"] == ABSTAIN_EMPTY_SCOPE
+
+
+async def test_a_read_back_failure_fails_the_turn_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of R-47's split: no chunk text is no grounding, so this is `retrieve`'s rule.
+
+    A reranker that cannot score falls back to an order it already has; a node that cannot
+    read the passages has nothing to fall back to, and FR-RET-05 says the system returns a
+    graceful error rather than fabricating.
+    """
+    import app.db.repositories.retrieval as retrieval_repo
+
+    async def unreachable(*args: object, **kwargs: object) -> list[RetrievedChunk]:
+        raise SQLAlchemyError("the store is unreachable")
+
+    monkeypatch.setattr(retrieval_repo, "fetch_chunks", unreachable)
+
+    executed, values = await _run(_context(retriever=_StubRetriever([_chunk("one")])))
+
+    assert values["outcome"] == "error"
+    assert values["error_code"] == FailureClass.RETRIEVAL_UNAVAILABLE.value
+    assert "generate" not in executed
+    assert executed[-1] == "finalize"
+
+
+async def test_the_reranker_can_be_disabled_and_then_costs_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cost switch on the `GRAPH_ROUTER_ENABLED` precedent — off is still a valid ordering."""
+    monkeypatch.setattr(get_settings().graph, "rerank_enabled", False)
+
+    hits = [_chunk(f"passage {index}") for index in range(3)]
+    chat = FakeChatClient()
+    _, values = await _run(_context(retriever=_StubRetriever(hits), chat=chat))
+
+    assert values["reranked_chunk_ids"] == [str(hit.chunk_id) for hit in hits]
+    assert values["rerank_scores"] == []
+    assert _rerank_calls(chat) == 0
+
+
+async def test_an_empty_retrieval_never_calls_the_reranker() -> None:
+    chat = FakeChatClient()
+    _, values = await _run(_context(retriever=_StubRetriever([]), chat=chat))
+
+    assert values["reranked_chunk_ids"] == []
+    assert values["rerank_scores"] == []
+    assert _rerank_calls(chat) == 0
+
+
+# --- generation (T-307, FR-SYS-02, R-48) --------------------------------------
+
+
+def _generation_call(chat: FakeChatClient) -> list[dict[str, str]]:
+    """The payload `generate` sent, discriminated by the answering system prompt."""
+    calls = [call for call in chat.calls if call[0]["content"] == SYSTEM_PROMPT]
+    assert len(calls) == 1, "expected exactly one generation call"
+    return calls[0]
+
+
+async def test_a_grounded_turn_produces_an_answer_and_its_metering() -> None:
+    """FR-SYS-02 end to end on the deterministic backend, and the FR-MSG-06 metric columns
+    with it — `model`/`promptTokens`/`completionTokens` are message fields, so a node that
+    dropped them would still look like it worked."""
+    hits = [_chunk("refunds take 30 days"), _chunk("damaged goods take 20")]
+    chat = FakeChatClient()
+    generated = (await _updates(_context(retriever=_StubRetriever(hits), chat=chat)))["generate"]
+
+    assert generated["answer"]
+    assert generated["answer"] != ABSTAIN_EMPTY_SCOPE
+    assert generated["model_name"] == "fake-chat"
+    assert generated["prompt_tokens"] and generated["completion_tokens"]
+    # Not this node's to set — `gate` decides the verdict and `finalize` the outcome, and a
+    # `generate` that pre-empted either would make the FR-ORC-07 gate unreachable.
+    assert "outcome" not in generated and "gate_verdict" not in generated
+
+
+async def test_the_marker_scheme_resolves_against_the_checkpointed_grounding_set() -> None:
+    """The R-48(5) invariant, asserted from **state** rather than from the composer.
+
+    This is what makes R-44(7)'s binding on T-308 implementable across a node boundary: a
+    `ComposedPrompt` does not survive its node, so `[S<k>]` has to resolve to
+    `reranked_chunk_ids[k-1]` or the citation check has nothing to validate against.
+    """
+    hits = [_chunk(f"passage {index}") for index in range(3)]
+    chat = FakeChatClient()
+    updates = await _updates(_context(retriever=_StubRetriever(hits), chat=chat))
+
+    answer = updates["generate"]["answer"]
+    grounding = updates["rerank"]["reranked_chunk_ids"]
+    segments, dropped = split_answer_segments(answer, grounding)
+
+    assert dropped == 0
+    assert cited_chunk_ids(segments)
+    assert set(cited_chunk_ids(segments)) <= set(grounding)
+    # And the markers really do index that list, rather than merely overlapping it.
+    for position, chunk_id in enumerate(grounding, start=1):
+        marker = f"[S{position}]"
+        if marker in answer:
+            assert [s for s in segments if s.text == marker][0].chunk_id == chunk_id
+
+
+async def test_prior_assistant_turns_reach_the_model(caplog: pytest.LogCaptureFixture) -> None:  # noqa: ARG001
+    """The R-45(6) `MessageRole.AI` trap, asserted end to end through the graph.
+
+    `MessageRole.AI` is stored as ``"ai"`` and `compose_messages` keeps only
+    `user`/`assistant` — silently. A node that passed ORM rows through would lose **every**
+    assistant turn with no error anywhere, and the model would answer the wrong question.
+    """
+    history = [
+        Message(conversation_id=uuid.uuid4(), role=MessageRole.USER, content="how many tiers?"),
+        Message(conversation_id=uuid.uuid4(), role=MessageRole.AI, content="there are three"),
+    ]
+    chat = FakeChatClient()
+    await _run(
+        _context(
+            retriever=_StubRetriever([_chunk("tiers: bronze, silver, gold")]),
+            chat=chat,
+            messages=history,
+        )
+    )
+
+    sent = _generation_call(chat)
+    assert {"role": "assistant", "content": "there are three"} in sent
+    assert {"role": "user", "content": "how many tiers?"} in sent
+
+
+async def test_the_generation_prompt_is_the_composer_s_shape() -> None:
+    """R-44(3) at the third call site that puts retrieved text before a model: exactly one
+    `system` message, the context fenced in a non-system role, the query last."""
+    chat = FakeChatClient()
+    await _run(_context(retriever=_StubRetriever([_chunk("a passage")]), chat=chat))
+
+    sent = _generation_call(chat)
+    assert [message["role"] for message in sent].count("system") == 1
+    assert sent[0]["content"] == SYSTEM_PROMPT
+    assert sent[-1]["content"] == "what do my documents say?"
+    assert sent[-2]["content"].startswith(CONTEXT_FENCE_OPEN)
+
+
+async def test_a_generation_failure_fails_the_turn_closed_and_still_unlocks() -> None:
+    """R-48(2). `route` and `rerank` fail open because each has a defensible degraded output;
+    an ungrounded answer is not one, so this node fails like `screen` and `retrieve` — and
+    still lands on `finalize`, which is R-42(5) as reachability."""
+    lock = MemoryProcessingLockStore()
+    context = _context(
+        retriever=_StubRetriever([_chunk("a passage")]),
+        chat=FakeChatClient(error=ChatResponseError("the model returned nothing")),
+        lock=lock,
+    )
+    executed, values = await _run(context)
+
+    assert values["outcome"] == "error"
+    assert values["error_code"] == FailureClass.LLM_ERROR.value
+    assert values["answer"] == FAILURE_COPY[FailureClass.LLM_ERROR]
+    assert executed[-1] == "finalize"
+    assert values["lock_token"] is None
+
+
+async def test_a_chunk_that_vanishes_before_generation_narrows_the_grounding_set() -> None:
+    """R-48(5). `rerank` read the rows a superstep ago and a resumed run may be hours later,
+    so the id list has to be **narrowed** rather than left describing a context the model was
+    never given — otherwise `[S<k>]` addresses the wrong passage from the next node on.
+    """
+    hits = [_chunk(f"passage {index}") for index in range(3)]
+    context = _context(retriever=_StubRetriever(hits))
+    stub = context.sessionmaker()
+
+    original_execute = stub.execute
+
+    async def vanishing(statement: object):  # noqa: ANN202
+        # The first read-back is the reranker's; by the generator's, the middle chunk is gone.
+        if stub.executes >= 1:
+            stub._chunks = [hits[0], hits[2]]  # noqa: SLF001
+        return await original_execute(statement)
+
+    stub.execute = vanishing  # type: ignore[method-assign]
+
+    generated = (await _updates(context))["generate"]
+
+    assert generated["reranked_chunk_ids"] == [str(hits[0].chunk_id), str(hits[2].chunk_id)]
+    # `rerank_scores` is empty or exactly as long as the ids (R-47(2)) — never a stale
+    # third score sitting against the surviving second chunk.
+    assert len(generated["rerank_scores"]) in (0, 2)
+    assert generated["answer"] != ABSTAIN_EMPTY_SCOPE
+
+
+def test_narrowing_carries_the_scores_by_id_or_publishes_none() -> None:
+    """The R-47(2) invariant under the R-48(5) narrowing, as a unit.
+
+    FR-CIT-04 shows these numbers to a user, so a score may never slide onto a different
+    passage; and anything that does not add up publishes nothing rather than guessing.
+    """
+    realign = graph_module._realign_scores  # noqa: SLF001
+    assert realign(["a", "b", "c"], ["a", "c"], [0.9, 0.5, 0.1]) == [0.9, 0.1]
+    # The fail-open reranker published no scores at all — nothing to carry.
+    assert realign(["a", "b", "c"], ["a", "c"], []) == []
+    # A length that never matched is not repaired by guessing which score belongs where.
+    assert realign(["a", "b", "c"], ["a", "c"], [0.9]) == []
+
+
+# --- the groundedness gate (T-308, FR-CIT-06 / FR-RET-05 / FR-ORC-07, R-49) ----
+
+#: Long enough to clear `GATE_MIN_PROBE_CHARS`, and deliberately citing nothing — which is the
+#: whole point. `FakeChatClient`'s default answer *always* emits markers (it must, or a broken
+#: parser would pass every test), so every gate test here would pass vacuously unless one
+#: supplies an uncited answer explicitly. The T-304 `_StubSession.scalars` lesson at a fourth
+#: site: a double that never produces the failing input tests nothing about the failure path.
+UNCITED_ANSWER = (
+    "The approval process requires two independent sign-offs before any release. "
+    "Requests that go unanswered expire after thirty days. "
+    "Escalation is handled manually and is not documented anywhere."
+)
+
+
+async def test_a_cited_answer_passes_the_gate_and_publishes_its_citations() -> None:
+    """FR-CIT-06 end to end. The four checks R-48 discharged are settled by construction, so
+    what is asserted here is that the fifth produced a verdict and a citation set."""
+    hits = [_chunk("refunds take 30 days"), _chunk("damaged goods take 20")]
+    executed, values = await _run(_context(retriever=_StubRetriever(hits)))
+
+    assert values["gate_verdict"] == "pass"
+    assert values["groundedness"] == 1.0
+    assert values["citation_ids"]
+    assert set(values["citation_ids"]) <= set(values["reranked_chunk_ids"])
+    assert values["outcome"] == "answered"
+    assert "adapt" not in executed and "abstain" not in executed
+    assert executed[-1] == "finalize"
+
+
+async def test_an_uncited_answer_retries_with_a_hyde_probe_from_the_rejected_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-49's retry lever, and the assertion that makes it more than a re-roll.
+
+    `route` does not re-run on the back edge and `retrieve_for_turn` reads only `query` and
+    `sub_queries`, so a retry that merely reset `strategy` would search **identically** and
+    burn ~4.6 s to produce the same answer. Asserting the second pass actually issues a second
+    probe is what proves the modification is real.
+
+    `GRAPH_MAX_RETRIES` ships at **0** on a live measurement (the decline-shaped probe the
+    trigger yields embeds *worse* than the query), so the mechanism is exercised here under an
+    explicit budget — which is the point of keeping it wired and tested rather than deleting
+    it: raising the knob is an environment change, not a code change.
+    """
+    monkeypatch.setattr(get_settings().graph, "max_retries", 1)
+    hits = [_chunk("an unrelated passage")]
+    retriever = _StubRetriever(hits)
+    chat = FakeChatClient(answer=UNCITED_ANSWER)
+    executed, values = await _run(_context(retriever=retriever, chat=chat))
+
+    assert "adapt" in executed
+    assert values["retry_count"] == 1
+    assert values["strategy"] == "hyde"
+    # First pass: the query alone. Second pass: the query *and* the probe.
+    assert retriever.queries == [
+        "what do my documents say?",
+        "what do my documents say?",
+        UNCITED_ANSWER,
+    ]
+    assert values["sub_queries"] == [UNCITED_ANSWER]
+
+
+async def test_an_exhausted_retry_abstains_and_never_serves_the_rejected_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The defect T-308 had to fix, as a test.
+
+    `abstain` used to answer ``state["answer"] or ABSTAIN_EMPTY_SCOPE``, which was harmless
+    while the only abstention was the empty-scope one. On the gate path that same line would
+    serve the ungrounded text back under an `abstained` outcome — no citations *and* an
+    honest-looking label, which is strictly worse than serving it as an answer.
+    """
+    monkeypatch.setattr(get_settings().graph, "max_retries", 1)
+    hits = [_chunk("an unrelated passage")]
+    lock = MemoryProcessingLockStore()
+    context = _context(
+        retriever=_StubRetriever(hits), chat=FakeChatClient(answer=UNCITED_ANSWER), lock=lock
+    )
+    executed, values = await _run(context)
+
+    assert values["outcome"] == "abstained"
+    assert values["answer"] == graph_module.ABSTAIN_LOW_GROUNDEDNESS
+    assert UNCITED_ANSWER not in (values["answer"] or "")
+    assert values["citation_ids"] == []
+    # An abstention is a response, not a failure (R-23) — no FR-ERR-04 class, and it still
+    # unlocks through the one node R-42(5) makes unskippable.
+    assert values.get("error_code") is None
+    assert values["lock_token"] is None
+    assert executed[-1] == "finalize"
+    assert executed.count("adapt") == 1  # bounded, exactly as FR-ORC-07 requires
+
+
+async def test_a_retry_budget_of_zero_abstains_without_ever_adapting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`GRAPH_MAX_RETRIES = 0` is the **shipped default** (T-308 live: the decline-shaped probe
+    the trigger yields embeds 0.492 against the answering passage where the query scores
+    0.598). `decide_after_gate` degrades `retry` to `abstain` with no special casing, which is
+    what makes the budget a knob rather than a branch. Set explicitly here so the test states
+    its own precondition rather than inheriting it."""
+    settings = get_settings()
+    monkeypatch.setattr(settings.graph, "max_retries", 0)
+    hits = [_chunk("an unrelated passage")]
+    executed, values = await _run(
+        _context(retriever=_StubRetriever(hits), chat=FakeChatClient(answer=UNCITED_ANSWER))
+    )
+
+    assert "adapt" not in executed
+    assert values["outcome"] == "abstained"
+    assert values["answer"] == graph_module.ABSTAIN_LOW_GROUNDEDNESS
+    assert values.get("retry_count", 0) == 0
+
+
+async def test_a_partially_supported_answer_abstains_rather_than_retrying() -> None:
+    """R-49's narrow retry band. Only "retrieval missed and the model had nothing to cite" is
+    worth ~4.6 s — a partly cited answer would pay it to find largely the same passages."""
+    hits = [_chunk("refunds take 30 days")]
+    partial = f"Refunds are processed within thirty days of the request. [S1] {UNCITED_ANSWER}"
+    executed, values = await _run(
+        _context(retriever=_StubRetriever(hits), chat=FakeChatClient(answer=partial))
+    )
+
+    assert 0.0 < values["groundedness"] < get_settings().gate.min_groundedness
+    assert values["gate_reason"] == "partial_coverage"
+    assert "adapt" not in executed
+    assert values["outcome"] == "abstained"
+
+
+async def test_the_empty_scope_abstention_short_circuits_the_gate() -> None:
+    """R-23's branch already decided, and it is not a groundedness failure: writing a 0.0 here
+    would put a fabrication score on a turn that never generated anything."""
+    _, values = await _run(_context(retriever=_StubRetriever([])))
+
+    assert values["gate_verdict"] == "pass"
+    assert values.get("groundedness") is None
+    assert values["answer"] == ABSTAIN_EMPTY_SCOPE
+    assert values["outcome"] == "abstained"
+
+
+async def test_the_gate_does_no_database_work() -> None:
+    """R-49(2) as a structural property rather than a convention.
+
+    Re-reading the chunks here would be a second construction of the FR-ORC-06 scope, which is
+    the R-46(2) hole one node later (R-47(5)) — and it would buy nothing, since T-402's
+    persist-time read is a superstep later and drops a vanished chunk by absence. A session
+    that raises on every call is the only way to assert "no I/O" that a later refactor cannot
+    quietly undo.
+    """
+
+    class _ExplodingSession(_StubSession):
+        async def execute(self, statement: object) -> _StubScalars:
+            raise AssertionError("the gate must not query the database")
+
+        async def scalars(self, statement: object) -> _StubScalars:
+            raise AssertionError("the gate must not query the database")
+
+    context = _context(session=_ExplodingSession(None))
+    update = await graph_module.gate(
+        {
+            "answer": "Refunds are processed within thirty days of the request. [S1]",
+            "reranked_chunk_ids": ["chunk-1"],
+            "turn_index": 0,
+        },
+        types.SimpleNamespace(context=context),  # type: ignore[arg-type]
+    )
+
+    assert update["gate_verdict"] == "pass"
+    assert update["citation_ids"] == ["chunk-1"]
+
+
+def test_the_gate_never_emits_review() -> None:
+    """R-49(5): the verdict is reserved, never produced, on the R-45(7) `strategy = "graph"`
+    precedent — and for a harder reason than "no reviewer UI exists". `review` parks on
+    `interrupt()` and nothing in the shipped or planned surface resumes a thread, so an emitted
+    `review` would never reach `finalize`: no `messages` row, no `graph.turn.end` (R-43(5) span
+    pairing), and the R-24 lock held until its TTL silently expires — the exact failure R-43(1)
+    cited when it refused to build the lock on langgraph's own pending-task state.
+
+    The literal stays in `GateVerdict` and `decide_after_gate` still routes it, so shipping a
+    reviewer later is a routing change rather than a contract change.
+    """
+    source = inspect.getsource(graph_module.gate)
+    assert '"review"' not in source and "'review'" not in source
+    # And the reserved path is still wired, so this is a decision rather than an omission.
+    assert decide_after_gate({"gate_verdict": "review"}, 1) == "review"
+
+
+def test_the_gate_writes_no_retry_count() -> None:
+    """`adapt` is the only writer (FR-ORC-07's termination bound). Asserted here as well as by
+    the module-wide source scan, because the gate is the node most tempted to touch it."""
+    assert "retry_count" not in inspect.getsource(graph_module.gate).split("state.get")[0]
+    assert '"retry_count":' not in inspect.getsource(graph_module.gate)
+
+
+async def test_the_gate_logs_no_payload_text(caplog: pytest.LogCaptureFixture) -> None:  # noqa: ARG001
+    """`rag.gate.*` carries counts, codes and the score — never the query, the answer, a
+    passage or a filename (R-43(5)'s rule at a fifth site)."""
+    hits = [_chunk("refunds take 30 days")]
+    with structlog.testing.capture_logs() as logs:
+        await _run(_context(retriever=_StubRetriever(hits)))
+
+    gate_events = [entry for entry in logs if entry["event"].startswith("rag.gate.")]
+    assert gate_events, "the gate must record its verdict"
+    for entry in gate_events:
+        rendered = " ".join(str(value) for value in entry.values())
+        assert "what do my documents say?" not in rendered
+        assert "refunds take 30 days" not in rendered
+        assert "handbook.pdf" not in rendered
 
 
 # --- the FR-PER-03 lightweight-state contract ---------------------------------

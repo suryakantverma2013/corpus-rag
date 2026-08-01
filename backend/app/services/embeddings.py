@@ -265,6 +265,16 @@ class EmbeddingClient(Protocol):
         """Embed one search query (T-206). Never batched, never deduped."""
         ...
 
+    async def embed_queries(self, texts: Sequence[str]) -> list[list[float]]:
+        """Embed a turn's probes in one round trip (T-305). Order-preserving.
+
+        Distinct from :meth:`embed_texts` in **budget, not in shape**: R-45(3) makes a chat
+        turn embed up to four probes at once, and they belong on the query timeout and
+        retry count (`EMBEDDING_QUERY_*`) — the corpus path can afford to ride out a
+        rate-limit blip before a user is waiting, and this one cannot.
+        """
+        ...
+
     async def aclose(self) -> None:
         """Release any pooled connections."""
         ...
@@ -425,6 +435,20 @@ class OpenAIEmbeddingClient:
         vectors = await self._request(query_client, [text])
         return vectors[0]
 
+    async def embed_queries(self, texts: Sequence[str]) -> list[list[float]]:
+        texts = list(texts)
+        if not texts:
+            return []
+        _validate_inputs(texts)
+        _, query_client = await self._get_clients()
+        # One request, not one per probe. `_request` already unpacks by the response's own
+        # `index` rather than by position (T-205), so alignment survives a reordered reply.
+        # Unbatched on purpose: the caller's probe count is bounded by
+        # `ROUTER_MAX_SUB_QUERIES + 1` and each probe by `ROUTER_MAX_PROBE_CHARS`, which is
+        # three orders of magnitude inside the array and token ceilings `embed_texts` batches
+        # against — a batching loop here would be dead code guarding an unreachable input.
+        return await self._request(query_client, texts)
+
 
 # --- fake backend -------------------------------------------------------------
 
@@ -480,6 +504,15 @@ class FakeEmbeddingClient:
         self.embedded_inputs += 1
         self.request_count += 1
         return _deterministic_vector(text, self._dimensions)
+
+    async def embed_queries(self, texts: Sequence[str]) -> list[list[float]]:
+        texts = list(texts)
+        if not texts:
+            return []
+        _validate_inputs(texts)
+        self.embedded_inputs += len(texts)
+        self.request_count += 1
+        return [_deterministic_vector(text, self._dimensions) for text in texts]
 
     async def aclose(self) -> None:
         return None

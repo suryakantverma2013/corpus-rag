@@ -2,8 +2,13 @@
 
 Message model per FR-MSG-06. `content` is the answer text; `citations` holds the
 interleaved citation segments `{isCite, doc, page, quote, chunkId, score}`;
-`evaluation` holds the post-hoc DeepEval scores `{relevancy, faithfulness,
-precision, recall}` (nullable until the eval job runs, FR-EVL-01). `feedback` is the
+`evaluation` holds the post-hoc DeepEval scores (nullable until the eval job runs,
+FR-EVL-01). **Two keys, not four** (T-309, R-50): `{relevancy, faithfulness}`. FR-EVL-01's
+other two metrics — Contextual Precision and Contextual Recall — are reference-based, and a
+live chat turn has no reference answer to score against, so they moved to the offline
+golden-set harness. It also never holds the T-308 gate's `groundedness`, which is a
+structural proxy for the same property Faithfulness measures semantically (R-49(1), OI-34):
+this column is DeepEval's alone. `feedback` is the
 spec-added thumbs column (FR-MSG-06/08). Per-message token/latency columns roll up
 per chat for OI-16 accounting.
 """

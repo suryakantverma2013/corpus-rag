@@ -36,17 +36,21 @@ from arq.worker import func
 from app.config import get_settings
 from app.db.session import get_engine, get_sessionmaker
 from app.ingestion.scanner import build_scanner
+from app.logging_config import configure_logging
 from app.services.clamav import close_clamav_client, get_clamav_client
 from app.services.embeddings import close_embedding_client, get_embedding_client
 from app.services.jobs import (
     DELETE_TASK_NAME,
+    EVALUATE_TASK_NAME,
     INGEST_TASK_NAME,
     WORKER_HEALTH_CHECK_KEY,
     close_job_queue,
     get_job_queue,
 )
+from app.services.llm import close_chat_client, get_chat_client
 from app.services.object_storage import close_object_storage, get_object_storage
 from workers.delete import delete_document
+from workers.evaluate import evaluate_message
 from workers.ingest import ingest_document
 from workers.sweeper import sweep_undispatched_jobs
 
@@ -57,6 +61,13 @@ _settings = get_settings()
 
 async def on_startup(ctx: dict[str, Any]) -> None:
     """Build every dependency once, on arq's loop, and hand them to the tasks via `ctx`."""
+    # Before the first log call. The worker previously inherited structlog's library
+    # defaults, which means its output format was decided by whatever happened to be
+    # installed — and a transitive `rich` turns exception logs into box-drawing characters
+    # that raise `UnicodeEncodeError` on a non-UTF-8 stream, *inside* the logging call. See
+    # `app.logging_config`.
+    configure_logging()
+
     settings = get_settings()
     ctx["settings"] = settings
     ctx["sessionmaker"] = get_sessionmaker()
@@ -64,6 +75,7 @@ async def on_startup(ctx: dict[str, Any]) -> None:
     ctx["embedder"] = get_embedding_client()
     ctx["scanner"] = build_scanner(settings)
     ctx["queue"] = get_job_queue()
+    ctx["chat"] = get_chat_client()
 
     if settings.scanner.backend == "clamav":
         # Surface a dead `clamd` at startup rather than one document at a time. This does
@@ -92,6 +104,7 @@ async def on_shutdown(ctx: dict[str, Any]) -> None:
     await close_embedding_client()
     await close_clamav_client()
     await close_job_queue()
+    await close_chat_client()
     await get_engine().dispose()
     log.info("worker.stopped")
 
@@ -117,6 +130,14 @@ class WorkerSettings:
         # Deletion shares the timeout, though it needs far less of it: it holds no parse and
         # no embedding call, only a prefix delete and two short transactions.
         func(delete_document, name=DELETE_TASK_NAME, timeout=_settings.worker.job_timeout_seconds),
+        # Evaluation gets the same ceiling, and needs a real share of it: five judge calls per
+        # message on the `LLM_EVAL_*` budget. It is the one task here whose timeout expiring
+        # costs nothing a user sees — the answer was served long before this ran (R-50).
+        func(
+            evaluate_message,
+            name=EVALUATE_TASK_NAME,
+            timeout=_settings.worker.job_timeout_seconds,
+        ),
     ]
 
     cron_jobs = [

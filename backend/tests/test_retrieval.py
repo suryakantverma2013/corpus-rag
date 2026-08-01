@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import RetrievalSettings
 from app.db.base import DEFAULT_TENANT_ID, EMBEDDING_DIM
 from app.db.enums import DocumentStatus
+from app.db.models.conversation import Conversation
 from app.db.models.document import Document
 from app.db.models.document_chunk import DocumentChunk
 from app.db.repositories.documents import DocumentRepository
@@ -29,6 +30,7 @@ from app.db.repositories.retrieval import (
     HybridRetriever,
     PgVectorRetriever,
     dense_distance,
+    fetch_chunks,
     fts_document,
     fts_query,
     websearch_input,
@@ -349,6 +351,132 @@ async def test_document_id_scope_narrows_to_the_mentioned_documents(
     assert {hit.document_id for hit in hits} == {other.id}
 
 
+# --- the FR-ORC-06 ambient scope (T-305, R-46(1)/(2)) -------------------------
+#
+# "The active chat's attachments + all GLOBAL documents visible to the user + any explicitly
+# @-mentioned documents." The half that needs a database is the knowledge-base predicate:
+# every test below passes with an owner-only filter, which is exactly why the bug it guards
+# against — one chat answering from another chat's attachments — would have shipped silently.
+
+
+async def _make_conversation(session: AsyncSession, owner):  # noqa: ANN001, ANN202
+    conversation = Conversation(owner_id=owner.id, tenant_id=DEFAULT_TENANT_ID, title="chat")
+    session.add(conversation)
+    await session.flush()
+    return conversation
+
+
+async def _attach(session: AsyncSession, owner, conversation, text_: str):  # noqa: ANN001, ANN202
+    """A document attached to one conversation, in that conversation's implicit KB (R-25)."""
+    kb = await KnowledgeBaseRepository(session).get_or_create_for_conversation(
+        conversation.id, owner_id=owner.id
+    )
+    doc = await _make_document(session, owner, kb)
+    await _make_chunk(session, doc, kb, index=0, text_=text_, embedding=_onehot(1))
+    return doc
+
+
+async def _search_in(session: AsyncSession, owner, conversation, **overrides):  # noqa: ANN001, ANN003, ANN202
+    hits = await HybridRetriever(session).search(
+        RARE_TOKEN,
+        _onehot(1),
+        filters=RetrievalFilter(owner_id=owner.id, conversation_id=conversation.id, **overrides),
+    )
+    return {hit.document_id for hit in hits}
+
+
+async def test_a_global_document_is_visible_from_every_conversation(
+    session: AsyncSession,
+) -> None:
+    """FR-KBM-03's first half: GLOBAL documents are included in retrieval for every chat."""
+    user, kb, _ = await _corpus(session)
+    doc = await _make_document(session, user, kb)
+    await _make_chunk(session, doc, kb, index=0, text_=f"global {RARE_TOKEN}", embedding=_onehot(1))
+
+    first = await _make_conversation(session, user)
+    second = await _make_conversation(session, user)
+    assert doc.id in await _search_in(session, user, first)
+    assert doc.id in await _search_in(session, user, second)
+
+
+async def test_this_conversations_attachment_is_visible(session: AsyncSession) -> None:
+    user = await _make_user(session)
+    conversation = await _make_conversation(session, user)
+    doc = await _attach(session, user, conversation, f"attached {RARE_TOKEN}")
+
+    assert await _search_in(session, user, conversation) == {doc.id}
+
+
+async def test_another_conversations_attachment_is_invisible(session: AsyncSession) -> None:
+    """FR-KBM-03's second half, and the whole reason `conversation_id` exists on the filter.
+
+    Both attachments belong to the same user, so `Document.owner_id` — the only scope this
+    filter had before T-305 — admits both. Under R-25 every chat has its own knowledge base,
+    so without the ambient predicate a user with fifty chats grounds every answer in all
+    fifty, and the FR-CMP-06 footer count would be a lie about what was searched.
+    """
+    user = await _make_user(session)
+    here = await _make_conversation(session, user)
+    elsewhere = await _make_conversation(session, user)
+    mine = await _attach(session, user, here, f"mine {RARE_TOKEN}")
+    theirs = await _attach(session, user, elsewhere, f"theirs {RARE_TOKEN}")
+
+    assert await _search_in(session, user, here) == {mine.id}
+    assert await _search_in(session, user, elsewhere) == {theirs.id}
+
+
+async def test_a_mention_narrows_within_the_ambient_scope(session: AsyncSession) -> None:
+    """R-46(1): the mention filter is AND-ed with the scope, so it cannot widen it.
+
+    A mention naming a document outside the caller's ambient scope retrieves **nothing**
+    rather than reaching it — which is what makes "mentions narrow" safe to state without
+    a second authorization check.
+    """
+    user = await _make_user(session)
+    here = await _make_conversation(session, user)
+    elsewhere = await _make_conversation(session, user)
+    global_kb = await _make_kb(session, user)
+    global_doc = await _make_document(session, user, global_kb)
+    await _make_chunk(
+        session, global_doc, global_kb, index=0, text_=f"global {RARE_TOKEN}", embedding=_onehot(1)
+    )
+    mine = await _attach(session, user, here, f"mine {RARE_TOKEN}")
+    theirs = await _attach(session, user, elsewhere, f"theirs {RARE_TOKEN}")
+
+    # In scope and mentioned: exactly that document, not the ambient set around it.
+    assert await _search_in(session, user, here, document_ids=[mine.id]) == {mine.id}
+    assert await _search_in(session, user, here, document_ids=[global_doc.id]) == {global_doc.id}
+    # Out of scope and mentioned: nothing.
+    assert await _search_in(session, user, here, document_ids=[theirs.id]) == set()
+
+
+async def test_the_ambient_scope_never_reaches_another_users_documents(
+    session: AsyncSession,
+) -> None:
+    """The knowledge-base predicate is owner-scoped too — belt and braces with `Document`.
+
+    It matters because the two are separable: a future feature that shares a conversation
+    would otherwise make the KB half admit rows the document half still refuses, and the
+    order in which those two facts change is not something to leave to chance.
+    """
+    user = await _make_user(session)
+    intruder = await _make_user(session)
+    conversation = await _make_conversation(session, intruder)
+    await _attach(session, intruder, conversation, f"not yours {RARE_TOKEN}")
+
+    assert await _search_in(session, user, conversation) == set()
+
+
+async def test_a_conversation_with_no_attachments_still_sees_the_global_kb(
+    session: AsyncSession,
+) -> None:
+    """The per-chat KB is materialised on first upload (R-25), so usually it does not exist."""
+    user, kb, doc = await _corpus(session)
+    conversation = await _make_conversation(session, user)
+
+    assert await _search_in(session, user, conversation) == {doc.id}
+
+
 # --- overlap dedupe end to end (R-35(5) / R-37(6)) ----------------------------
 
 
@@ -440,3 +568,81 @@ def test_websearch_input_ors_terms_and_strips_meaning_changing_operators(
     query: str, expected: str
 ) -> None:
     assert websearch_input(query) == expected
+
+
+# --- read-back by id (T-306) --------------------------------------------------
+
+
+async def test_fetch_chunks_returns_rows_in_the_requested_order(session: AsyncSession) -> None:
+    """The requested order is the R-46(3) merged ranking, and `IN` guarantees no order at all."""
+    user, kb, doc = await _corpus(session)
+    stmt = select(DocumentChunk).order_by(DocumentChunk.chunk_index)
+    ids = [chunk.id for chunk in (await session.execute(stmt)).scalars().all()]
+    requested = [ids[2], ids[0], ids[1]]
+
+    hits = await fetch_chunks(session, requested, filters=RetrievalFilter(owner_id=user.id))
+
+    assert [hit.chunk_id for hit in hits] == requested
+    assert [hit.chunk_index for hit in hits] == [2, 0, 1]
+
+
+async def test_fetch_chunks_carries_the_text_and_the_citation_payload(
+    session: AsyncSession,
+) -> None:
+    """What the reranker and T-307's composer need — `RAGState` carries none of it."""
+    user, kb, doc = await _corpus(session)
+    chunk = await _make_chunk(
+        session,
+        doc,
+        kb,
+        index=9,
+        text_="the refund window is 30 days",
+        embedding=_onehot(9),
+        block_order=1,
+        block_chunk_index=0,
+    )
+
+    (hit,) = await fetch_chunks(session, [chunk.id], filters=RetrievalFilter(owner_id=user.id))
+
+    assert hit.chunk_text == "the refund window is 30 days"
+    assert hit.filename == "handbook.pdf"
+    assert hit.document_id == doc.id
+    assert hit.block_order == 1
+
+
+async def test_fetch_chunks_applies_the_same_access_filters(session: AsyncSession) -> None:
+    """The point of building it on `_access_predicates`: a checkpointed id is not a capability.
+
+    The ids reach this function out of a checkpoint that may predate a deletion, a role change
+    or a replace. Reading them back under a weaker predicate set would make the checkpoint a
+    way to read rows the live scope no longer contains (R-42(3) at the row level).
+    """
+    user = await _make_user(session)
+    kb = await _make_kb(session, user)
+    doc = await _make_document(session, user, kb)
+    chunk = await _make_chunk(session, doc, kb, index=0, text_="secret", embedding=_onehot(0))
+    intruder = await _make_user(session)
+
+    assert await fetch_chunks(session, [chunk.id], filters=RetrievalFilter(owner_id=user.id))
+    assert (
+        await fetch_chunks(session, [chunk.id], filters=RetrievalFilter(owner_id=intruder.id)) == []
+    )
+
+
+async def test_fetch_chunks_omits_a_document_soft_deleted_since_retrieval(
+    session: AsyncSession,
+) -> None:
+    """FR-CIT-06(1)/(5) discharged one stage before the citation exists."""
+    user = await _make_user(session)
+    kb = await _make_kb(session, user)
+    doc = await _make_document(session, user, kb)
+    chunk = await _make_chunk(session, doc, kb, index=0, text_="gone", embedding=_onehot(0))
+
+    doc.deleted_at = datetime.now(UTC)
+    await session.flush()
+
+    assert await fetch_chunks(session, [chunk.id], filters=RetrievalFilter(owner_id=user.id)) == []
+
+
+async def test_fetch_chunks_short_circuits_on_an_empty_id_list(session: AsyncSession) -> None:
+    assert await fetch_chunks(session, [], filters=RetrievalFilter(owner_id=uuid.uuid4())) == []

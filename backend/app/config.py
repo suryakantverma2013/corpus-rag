@@ -441,6 +441,20 @@ class OpenAISettings(BaseSettings):
     # answer quality. One knob per job also means tuning either cannot silently move the
     # other's cost. # TBD(§8.4)
     router_model: str = Field(default="gpt-4o-mini")
+    # The FR-RET-02 reranker (T-306, R-47(1)). A third model id, and a third job: scoring a
+    # passage against a query is a judgement, not a composition, so it wants the same cheap
+    # schema-follower the router uses rather than `chat_model`. Separate from `router_model`
+    # even though both default to the same id — they are tuned against different evidence
+    # (classification accuracy vs ranking quality), and one knob per job is what stops
+    # tuning either silently moving the other's cost. # TBD(§8.4)
+    rerank_model: str = Field(default="gpt-4o-mini")
+    # The FR-EVL-01 DeepEval judge (T-309, R-50). A fifth model id, and the first one whose
+    # call site is *off* the request path entirely — it runs post-hoc in the worker. That
+    # buys patience, not licence: each evaluated message costs five judge calls (three for
+    # Faithfulness, two for Answer Relevancy), so the cheap schema-follower is the right
+    # default and a stronger judge is a deliberate, measurable trade. Separate from
+    # `rerank_model` for the reason given there. # TBD(§8.4)
+    judge_model: str = Field(default="gpt-4o-mini")
     # text-embedding-3-large (3072-dim) matches the `document_chunks.embedding`
     # VECTOR(3072) column (app.db.base.EMBEDDING_DIM). # TBD(§8.4)
     embedding_model: str = Field(default="text-embedding-3-large")
@@ -528,6 +542,13 @@ class LlmSettings(BaseSettings):
     connect_timeout_seconds: float = Field(default=5.0)  # TBD(§8.4)
     max_retries: int = Field(default=2)  # TBD(§8.4)
 
+    # The answer ceiling (T-307, R-48). Here rather than in a `GenerationSettings` group of
+    # its own — unlike the router and the reranker, generation has exactly one knob, and
+    # this group already owns generation's timeout and retry budget. It is a *ceiling*, not
+    # a target: a truncated answer raises `ChatResponseError` and the turn fails closed
+    # (R-48(2)), so this must sit well above a normal answer rather than trim one.
+    max_output_tokens: int = Field(default=1_500)  # TBD(§8.4)
+
     # The FR-RET-03 router. Short and nearly retry-free on purpose: the call sits *before*
     # retrieval on a path NFR-PRF-02 already makes the user wait through, and R-45(2) makes
     # the router fail open — so waiting 90s for a classification is strictly worse than
@@ -536,14 +557,42 @@ class LlmSettings(BaseSettings):
     router_timeout_seconds: float = Field(default=8.0)  # TBD(§8.4)
     router_max_retries: int = Field(default=1)  # TBD(§8.4)
 
+    # The FR-RET-02 reranker (T-306, R-47). Longer than the router's leash and shorter than
+    # generation's: this call carries whole passages rather than one query, so it is a bigger
+    # request, but it sits on the same pre-first-token path — and R-47(2) makes it fail open,
+    # so waiting is strictly worse than giving up and grounding in the RRF order.
+    rerank_timeout_seconds: float = Field(default=20.0)  # TBD(§8.4)
+    rerank_max_retries: int = Field(default=1)  # TBD(§8.4)
+
+    # The FR-EVL-01 judge (T-309, R-50). The most patient budget of the four, and the only
+    # one whose patience is free: this call site is post-hoc in the worker, so nothing is
+    # waiting on it — a slow judge delays a chip, never an answer. Retries are worth more
+    # here than anywhere else for the same reason, but stay bounded because arq's own
+    # backoff sits underneath and a message not worth a third attempt simply keeps its
+    # `evaluation` NULL (R-50: evaluation fails open).
+    eval_timeout_seconds: float = Field(default=60.0)  # TBD(§8.4)
+    eval_max_retries: int = Field(default=2)  # TBD(§8.4)
+
     @model_validator(mode="after")
     def _coherent(self) -> LlmSettings:
-        if self.timeout_seconds <= 0 or self.router_timeout_seconds <= 0:
+        if (
+            self.timeout_seconds <= 0
+            or self.router_timeout_seconds <= 0
+            or self.rerank_timeout_seconds <= 0
+            or self.eval_timeout_seconds <= 0
+        ):
             raise ValueError("LLM_*_TIMEOUT_SECONDS values must be > 0")
         if self.connect_timeout_seconds <= 0:
             raise ValueError("LLM_CONNECT_TIMEOUT_SECONDS must be > 0")
-        if self.max_retries < 0 or self.router_max_retries < 0:
+        if (
+            self.max_retries < 0
+            or self.router_max_retries < 0
+            or self.rerank_max_retries < 0
+            or self.eval_max_retries < 0
+        ):
             raise ValueError("LLM_*_MAX_RETRIES values must be >= 0")
+        if self.max_output_tokens < 1:
+            raise ValueError("LLM_MAX_OUTPUT_TOKENS must be >= 1")
         return self
 
 
@@ -621,10 +670,18 @@ class RetrievalSettings(BaseSettings):
     # itself outrank a chunk both arms returned.
     rrf_k: int = Field(default=60)  # TBD(§8.4)
 
-    # How many fused candidates hybrid search returns. This is the reranker's input, NOT
-    # the FR-RET-02 top-K — that one is the count of *reranked* passages that become the
-    # grounding context, it belongs to T-306, and it is still an open §8.4 TBD.
+    # How many fused candidates hybrid search returns, *per probe*. This is the reranker's
+    # input, NOT the FR-RET-02 top-K — that one counts the *reranked* passages that become
+    # the grounding context and lives in `RerankSettings.top_k` (T-306, R-47(3)).
     fusion_top_k: int = Field(default=30)  # TBD(§8.4)
+
+    # How many candidates survive the R-46(3) cross-probe merge — the reranker's input when
+    # the T-304 router fanned a turn out over several probes. Deliberately larger than
+    # `fusion_top_k` rather than equal to it (R-46(4)): capping the merged set at one probe's
+    # worth would discard most of the diversity the fan-out just paid for, and since a
+    # single-probe turn produces at most `fusion_top_k` candidates anyway, a larger ceiling
+    # cannot change its result. Settle together with the FR-RET-02 top-K (§8.4).
+    merged_top_k: int = Field(default=50)  # TBD(§8.4)
 
     # HNSW search-list size. pgvector's default is 40, so any deeper candidate fetch
     # silently loses recall without raising this — the index simply cannot produce that
@@ -645,6 +702,8 @@ class RetrievalSettings(BaseSettings):
             raise ValueError("RETRIEVAL_RRF_K must be >= 1")
         if self.fusion_top_k < 1:
             raise ValueError("RETRIEVAL_FUSION_TOP_K must be >= 1")
+        if self.merged_top_k < 1:
+            raise ValueError("RETRIEVAL_MERGED_TOP_K must be >= 1")
         if self.hnsw_ef_search < self.dense_candidates:
             # Not a preference: HNSW cannot return more rows than its search list holds, so
             # this configuration asks for candidates the index will never produce.
@@ -658,6 +717,211 @@ class RetrievalSettings(BaseSettings):
                 "ix_document_chunks_chunk_text_fts index expression; changing it requires "
                 "a migration that rebuilds that index"
             )
+        return self
+
+
+class RerankSettings(BaseSettings):
+    """FR-RET-02 reranking — the second stage that picks the grounding context (T-306, R-47).
+
+    Quality and cost knobs, not limits: R-47(2) makes every failure here fall back to the
+    incoming RRF order, so nothing in this group can fail a turn.
+
+    ``top_k`` is the **FR-RET-02 top-K** — the §8.4 TBD that §8.4 itself says must be settled
+    together with `RETRIEVAL_MERGED_TOP_K` and `ROUTER_MAX_SUB_QUERIES`, because the three
+    bound one budget between them: the router decides how many probes run, the merge ceiling
+    decides how many candidates survive them, and this decides how many of those the model
+    actually reads. It also carries R-30's constraint — retrieved chunk text is excluded from
+    the 10.4K conversation budget and bounded *only* here, so this number is what keeps
+    history + chunks + system prompt inside the real model window.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="RERANK_", env_file=".env", extra="ignore")
+
+    #: The FR-RET-02 top-K. 8 × R-35's ~2,000-character chunks ≈ 4K tokens of grounding.
+    top_k: int = Field(default=8)  # TBD(§8.4)
+
+    #: Candidates per model call. The whole merged set in one call would be a single ~15K-token
+    #: request whose *output* — one score per candidate — is what dominates latency; batching
+    #: turns that into concurrent calls whose wall-clock is one batch, not fifty scores.
+    #:
+    #: **Measured, not guessed** (T-306 live, `gpt-4o-mini`, 50 candidates, 5 runs each):
+    #: 5/10 → median **1,520 ms**; 10/5 → 2,090 ms; 25/2 → 3,579 ms. Smaller batches cost
+    #: ~14% more prompt tokens, because the rubric is repeated per call, and buy a third of
+    #: the wall-clock in front of NFR-PRF-02's already-delayed first token.
+    batch_size: int = Field(default=5)  # TBD(§8.4)
+
+    #: Concurrent batches. 50 candidates ÷ 5 = 10, so the defaults score a full merged set in
+    #: one wave. Raising `RETRIEVAL_MERGED_TOP_K` without raising this adds a second wave and
+    #: roughly doubles the stage's latency — the coupling to watch when tuning either.
+    max_concurrency: int = Field(default=10)  # TBD(§8.4)
+
+    #: Per-passage ceiling **for scoring only** — the full text still reaches generation.
+    #: Relevance is decidable from the opening of a chunk far more cheaply than from all of
+    #: it, and this is the single biggest lever on the call's cost.
+    max_passage_chars: int = Field(default=1_200)  # TBD(§8.4)
+
+    #: Generous, on `ROUTER_MAX_OUTPUT_TOKENS`' reasoning: a cap that truncates the JSON
+    #: mid-object produces exactly the malformed payload R-47(2) then has to throw away.
+    max_output_tokens: int = Field(default=400)  # TBD(§8.4)
+
+    #: The integer scale the model scores on; the FR-CIT-04 number is `score / scale`. Ten
+    #: keeps the output one token per passage, at the cost of a hover card that can only ever
+    #: show tenths where the prototype shows `0.91`. Raising it to 100 is a one-value change —
+    #: settle it when the card is built (T-506).
+    score_scale: int = Field(default=10)  # TBD(§8.4)
+
+    @model_validator(mode="after")
+    def _coherent(self) -> RerankSettings:
+        if self.top_k < 1:
+            raise ValueError("RERANK_TOP_K must be >= 1")
+        if self.batch_size < 1:
+            raise ValueError("RERANK_BATCH_SIZE must be >= 1")
+        if self.max_concurrency < 1:
+            raise ValueError("RERANK_MAX_CONCURRENCY must be >= 1")
+        if self.max_passage_chars < 1:
+            raise ValueError("RERANK_MAX_PASSAGE_CHARS must be >= 1")
+        if self.max_output_tokens < 1:
+            raise ValueError("RERANK_MAX_OUTPUT_TOKENS must be >= 1")
+        if self.score_scale < 1:
+            raise ValueError("RERANK_SCORE_SCALE must be >= 1")
+        return self
+
+
+class GateSettings(BaseSettings):
+    """FR-RET-05 / FR-CIT-06 groundedness gate — the pre-serve check (T-308, R-49).
+
+    One group per stage, as `RouterSettings` and `RerankSettings` are. Everything here is a
+    **policy** knob rather than a budget: R-49 makes the gate a pure function of checkpointed
+    state — no chunk read, no model call — so there is no timeout, no retry count and no model
+    id to configure, and the whole stage costs sub-millisecond.
+
+    **There is deliberately no `GATE_ENABLED`.** R-48(3)'s argument verbatim: `screen`, `route`
+    and `rerank` each carry a switch whose off state is a sanctioned degradation, and this
+    one's would be "serve unverified answers". A flag that can only ever remove a requirement
+    is a liability, not a diagnosis path.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="GATE_", env_file=".env", extra="ignore")
+
+    #: The FR-RET-05 groundedness threshold, closing a **(D)** open since Rev 0.5.
+    #:
+    #: The decision-relevant boundary in this design is **0 vs non-zero**, not this value:
+    #: zero citations is the fabrication signature and is unambiguous at any threshold, so
+    #: this only decides pass-vs-abstain for *partially* cited answers and a wrong value has
+    #: bounded blast radius. Demanding 1.0 would fail healthy answers on their connective
+    #: tissue ("In summary…"), which the substantive-claim filter narrows but cannot remove.
+    #:
+    #: The disposition on ties is **permissive**, on R-44's rule that a control which refuses
+    #: real questions is worse than no control. If a live corpus shows healthy answers
+    #: clustering below this, the *metric* is wrong and that is the finding — not a knob to
+    #: nudge until the symptom goes away.
+    min_groundedness: float = Field(default=0.5)  # TBD(§8.4)
+
+    #: Words below which a sentence is connective tissue rather than a claim needing a
+    #: citation. This filter is what keeps the score sane: counting "In summary:" and bare
+    #: headings as unsupported claims would fail answers that are perfectly grounded.
+    min_claim_words: int = Field(default=4)  # TBD(§8.4)
+
+    #: Floor on the FR-RET-05 retry probe. Below this the rejected answer carries too little
+    #: text to retrieve differently from the query, and R-45(3)'s additive probes mean the
+    #: cost of a junk one is wasted recall rather than a wrong answer — so the floor is about
+    #: not paying for a retry that cannot help, not about safety.
+    min_probe_chars: int = Field(default=40)  # TBD(§8.4)
+
+    @model_validator(mode="after")
+    def _coherent(self) -> GateSettings:
+        if not 0.0 <= self.min_groundedness <= 1.0:
+            raise ValueError("GATE_MIN_GROUNDEDNESS must be between 0.0 and 1.0")
+        if self.min_claim_words < 1:
+            raise ValueError("GATE_MIN_CLAIM_WORDS must be >= 1")
+        if self.min_probe_chars < 1:
+            raise ValueError("GATE_MIN_PROBE_CHARS must be >= 1")
+        return self
+
+
+class EvalSettings(BaseSettings):
+    """FR-EVL-01 post-hoc DeepEval scoring — the worker job (T-309, R-50).
+
+    Stage policy, in the `ROUTER_`/`RERANK_`/`GATE_` shape. The judge's model id is an
+    `OPENAI_` setting and its patience an `LLM_EVAL_*` one, per the split this codebase
+    keeps between *which model*, *how the caller drives the endpoint*, and *stage policy*.
+
+    Note the contrast with :class:`GateSettings`, which deliberately has no `GATE_ENABLED`:
+    ``enabled`` is legitimate here because FR-EVL-01 says a response **may** carry scores, so
+    "no chips" is a state the requirement itself sanctions and FR-ANL-04 already ships copy
+    for ("Scores appear once a response is evaluated."). Turning the gate off would remove a
+    requirement; turning this off costs a quality signal and some money. It is the
+    `GRAPH_ROUTER_ENABLED` precedent — a *cost* switch, not a failure path.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="EVAL_", env_file=".env", extra="ignore")
+
+    #: Cost switch (see the class docstring). Off means messages keep `evaluation` NULL.
+    enabled: bool = Field(default=True)
+
+    #: Per-passage ceiling on the context handed to the judge. Five judge calls per message
+    #: each carry the full cited context, so this is the main lever on evaluation cost.
+    max_context_chars: int = Field(default=4_000)  # TBD(§8.4)
+
+    # There is deliberately **no concurrency knob here**. Two levels could take one and
+    # neither should: across messages it is already `WORKER_MAX_JOBS` (a second duty on that
+    # knob, as `WORKER_JOB_TIMEOUT_SECONDS` carries a third), and a second setting governing
+    # the same thing is how the two drift apart; within a message the fan-out is a fixed two
+    # metrics, which is not a pool. The two run **sequentially on purpose** — this job is
+    # post-hoc, so its latency is nearly free, and spending that freedom on lower
+    # instantaneous pressure against the key that also serves live turns is the better trade.
+
+    #: DeepEval reports usage to its vendor by default. Opting out is the default here
+    #: because the payloads are answers and retrieved passages from a private corpus.
+    telemetry_opt_out: bool = Field(default=True)
+
+    @model_validator(mode="after")
+    def _coherent(self) -> EvalSettings:
+        if self.max_context_chars < 1:
+            raise ValueError("EVAL_MAX_CONTEXT_CHARS must be >= 1")
+        return self
+
+
+class ContextSettings(BaseSettings):
+    """The NFR-CAP-01 conversation budget FR-STA-04 enforces and FR-ANL-03 shows (T-310).
+
+    Stage policy, in the `ROUTER_`/`RERANK_`/`GATE_`/`EVAL_` shape. **Not** an LLM budget:
+    R-30(2) makes 10.4K a deliberate *product* limit on conversation length rather than a
+    model window — the OpenAI models carry far larger ones — so nothing here bounds a request
+    and no value here can cause a provider error. What it bounds is how long a chat may run
+    before the user must start a new one.
+
+    There is deliberately **no `CONTEXT_ENABLED`**: its off state is "let a conversation grow
+    without limit", which removes FR-STA-04 rather than degrading it — the `GATE_ENABLED`
+    test, not the `EVAL_ENABLED` one.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="CONTEXT_", env_file=".env", extra="ignore")
+
+    #: NFR-CAP-01's limit, and the denominator of FR-ANL-03's `{used}K / {max}K`. The §9
+    #: quick-reference literal `3.8K / 10.4K` is an illustrative *numerator* against this.
+    window_tokens: int = Field(default=10_400)  # TBD(§8.4)
+
+    #: Headroom held back for the answer that has not been written yet.
+    #:
+    #: FR-STA-04 blocks when "a query's projected token total would exceed" the limit, and
+    #: the reply is part of that total the moment it lands — a chat at 10.3K that accepts a
+    #: short query is over budget as soon as the model answers, with the block firing a turn
+    #: too late. Reserving the answer's own ceiling is what makes "the transcript stays under
+    #: 10.4K" true rather than approximately true. Mirrors `LLM_MAX_OUTPUT_TOKENS`, and
+    #: `Settings._coherent` refuses a reserve below it: an answer may legitimately run to
+    #: that ceiling, so a smaller reserve cannot deliver the guarantee. # TBD(§8.4)
+    answer_reserve_tokens: int = Field(default=1_500)
+
+    @model_validator(mode="after")
+    def _coherent(self) -> ContextSettings:
+        if self.window_tokens < 1:
+            raise ValueError("CONTEXT_WINDOW_TOKENS must be >= 1")
+        if self.answer_reserve_tokens < 0:
+            raise ValueError("CONTEXT_ANSWER_RESERVE_TOKENS must be >= 0")
+        if self.answer_reserve_tokens >= self.window_tokens:
+            # Every submission would be refused, including the first message of a new chat.
+            raise ValueError("CONTEXT_ANSWER_RESERVE_TOKENS must be < CONTEXT_WINDOW_TOKENS")
         return self
 
 
@@ -714,14 +978,27 @@ class GraphSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="GRAPH_", env_file=".env", extra="ignore")
 
-    # FR-ORC-07 requires `retry_count` to be bounded "to guarantee termination" and never
-    # says by what. 1 means at most two full retrieve→rerank→generate→gate cycles: each
-    # retry costs a second rerank *and* a second generation, and NFR-PRF-02 already makes
-    # the user wait for the whole gate before a single token appears, so a second cycle
-    # roughly doubles time-to-first-token for a query that has already failed groundedness.
-    # Abstaining (FR-RET-05) is cheaper and more honest. Settle together with the FR-RET-05
-    # groundedness threshold — they trade off directly (see §8.4).
-    max_retries: int = Field(default=1)  # TBD(§8.4)
+    # FR-ORC-07 requires `retry_count` to be bounded "to guarantee termination" and never says
+    # by what. A retry costs a second rerank *and* a second generation (~4.6 s) on a turn the
+    # user has already waited ~5.3 s through, because NFR-PRF-02 holds the stream until the
+    # gate passes.
+    #
+    # **Ships at 0, and that is a measurement rather than a preference** (T-308 live,
+    # 2026-07-31). `adapt`'s modification is HyDE from the rejected answer (R-49), and the
+    # trigger is an answer that cited nothing — which in practice is a *decline*, since R-48
+    # measured that `gpt-4o` declines rather than fabricating. Embedded with the real
+    # `text-embedding-3-large`, a decline-shaped probe scores **0.492** against the answering
+    # passage where the query itself scores **0.598**: the probe the trigger actually produces
+    # is *worse* than the query it accompanies. (A probe built from a fabricated answer scores
+    # 0.736 — HyDE works; it is the input this trigger yields that does not.) R-45's router
+    # already routes `semantic_gap` queries to HyDE up front, so the retry is a second bite at
+    # a case handled at classification time.
+    #
+    # The whole mechanism still ships and is tested — `adapt`, the single back edge, the bound
+    # and the probe — so raising this to 1 is one environment variable, not a code change.
+    # Revisit if a corpus ever shows the model fabricating instead of declining. Values above
+    # 1 are refused at boot (see `Settings._coherent`): the probe is single-shot.
+    max_retries: int = Field(default=0)  # TBD(§8.4)
 
     # NOT langgraph's default, which is "async": there a checkpoint is persisted *while*
     # the next step runs, so a process killed mid-turn can lose the last superstep — which
@@ -767,6 +1044,13 @@ class GraphSettings(BaseSettings):
     # is *not* the failure path: R-45(2) makes the node fail open on its own, so this flag is
     # for a deliberate "stop paying for the extra call", not for coping with a broken one.
     router_enabled: bool = Field(default=True)
+
+    # The T-306 FR-RET-02 reranker (R-47). A **cost** switch, exactly like `router_enabled`
+    # and for the same reason: R-47(2) already makes the node fail open on its own, so this
+    # is for a deliberate "stop paying for the extra call", never for coping with a broken
+    # one. Off, the grounding context is the top-K of the R-46(3) merged order — which is a
+    # defensible ordering, but publishes no FR-CIT-04 score.
+    rerank_enabled: bool = Field(default=True)
 
     @model_validator(mode="after")
     def _coherent(self) -> GraphSettings:
@@ -863,6 +1147,10 @@ class Settings(BaseSettings):
     llm: LlmSettings = Field(default_factory=LlmSettings)
     router: RouterSettings = Field(default_factory=RouterSettings)
     retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
+    rerank: RerankSettings = Field(default_factory=RerankSettings)
+    gate: GateSettings = Field(default_factory=GateSettings)
+    eval: EvalSettings = Field(default_factory=EvalSettings)
+    context: ContextSettings = Field(default_factory=ContextSettings)
     checkpointer: CheckpointerSettings = Field(default_factory=CheckpointerSettings)
     graph: GraphSettings = Field(default_factory=GraphSettings)
     keycloak: KeycloakSettings = Field(default_factory=KeycloakSettings)
@@ -889,6 +1177,43 @@ class Settings(BaseSettings):
                 "CHECKPOINTER_BACKEND=memory is forbidden when ENVIRONMENT=production "
                 "(FR-PER-01): conversation durability comes from the checkpointer "
                 "(NFR-REL-03). Set CHECKPOINTER_BACKEND=postgres."
+            )
+        # R-47(3): the FR-RET-02 top-K and the R-46(4) merge ceiling span two groups, and
+        # §8.4 requires them to be settled together. A top-K above the merge ceiling is not
+        # an error the runtime would ever report — retrieval simply never produces that many
+        # candidates, so the reranker silently returns everything it was given and the
+        # operator concludes the knob works.
+        if self.rerank.top_k > self.retrieval.merged_top_k:
+            raise ValueError(
+                f"RERANK_TOP_K ({self.rerank.top_k}) must be <= RETRIEVAL_MERGED_TOP_K "
+                f"({self.retrieval.merged_top_k}) — retrieval never hands the reranker more "
+                "candidates than the merge ceiling, so a larger top-K is a silent no-op "
+                "(R-46(4)/R-47(3), §8.4)."
+            )
+        # T-310: the FR-STA-04 reserve and the answer ceiling span two groups, and the whole
+        # point of the reserve is that the transcript cannot end up over budget. An answer may
+        # legitimately run to `LLM_MAX_OUTPUT_TOKENS`, so a reserve below it buys a guarantee
+        # that does not hold — and it would fail silently, one long answer at a time.
+        if self.context.answer_reserve_tokens < self.llm.max_output_tokens:
+            raise ValueError(
+                f"CONTEXT_ANSWER_RESERVE_TOKENS ({self.context.answer_reserve_tokens}) must be "
+                f">= LLM_MAX_OUTPUT_TOKENS ({self.llm.max_output_tokens}) — an answer may run "
+                "to that ceiling, so a smaller reserve cannot keep the conversation inside "
+                "NFR-CAP-01's budget (R-30, FR-STA-04)."
+            )
+        # R-49: `GRAPH_MAX_RETRIES` and the FR-RET-05 retry lever span two groups, and §8.4
+        # already required the retry bound and the groundedness threshold to be settled
+        # together. `adapt`'s only modification is HyDE from the rejected answer, which is
+        # **single-shot by construction**: a second cycle would compose the *second* rejected
+        # answer as a probe on top of the first, drift compounding, for another ~4.6 s on a
+        # turn the user has already waited ~10 s through. Same silent-no-op class as the
+        # invariant above — the extra cycles would run and change nothing structurally.
+        if self.graph.max_retries > 1:
+            raise ValueError(
+                f"GRAPH_MAX_RETRIES ({self.graph.max_retries}) must be <= 1 — the FR-RET-05 "
+                "retry composes the rejected answer as a HyDE probe, which is single-shot: a "
+                "second cycle repeats the first's inputs at full latency cost (R-49, §8.4). "
+                "Set 0 to abstain on the first gate failure."
             )
         return self
 
