@@ -451,10 +451,30 @@ class OpenAISettings(BaseSettings):
     # The FR-EVL-01 DeepEval judge (T-309, R-50). A fifth model id, and the first one whose
     # call site is *off* the request path entirely — it runs post-hoc in the worker. That
     # buys patience, not licence: each evaluated message costs five judge calls (three for
-    # Faithfulness, two for Answer Relevancy), so the cheap schema-follower is the right
-    # default and a stronger judge is a deliberate, measurable trade. Separate from
-    # `rerank_model` for the reason given there. # TBD(§8.4)
-    judge_model: str = Field(default="gpt-4o-mini")
+    # Faithfulness, two for Answer Relevancy). Separate from `rerank_model` for the reason
+    # given there.
+    #
+    # **Was `gpt-4o-mini`; raised to `gpt-4o` on 2026-08-02 (Rev 0.20.1), and the §8.4 TBD is
+    # closed by measurement rather than preference.** On T-312's golden set the cheap judge
+    # scored a *verbatim restatement* of the passage it cited at 0.33–0.67 (once 0.00) against
+    # a realistic 8-passage grounding set, where this model scores it 1.00 — and FR-EVL-02
+    # renders that number to a user. Across the band the swap corrects six chips and regresses
+    # two, so it is better on balance and **not an oracle**: this model also scored two
+    # verbatim-grounded answers 0.50. That residual imprecision is OI-35, not a model choice.
+    judge_model: str = Field(default="gpt-4o")
+    # The T-314 escalation judge: a second, stronger model re-scores the minority of chips
+    # that come back below `EVAL_ESCALATE_BELOW`. Sized by measurement, not preference — on
+    # T-312's golden set `gpt-4o-mini` returned faithfulness 0.00 on an answer that was a
+    # verbatim restatement of the passage it cited, and relevancy 0.00 on a correct direct
+    # answer; `gpt-4o` scores both 1.00. Because the errors cluster in the tail (15 of 18
+    # items score exactly 1.00 on both metrics), escalating only the low scores buys the
+    # stronger judge on ~28% of messages rather than all of them. # TBD(§8.4)
+    #
+    # **Currently equal to `judge_model`, which means escalation is dormant** — `_scored`
+    # skips a second tier that would ask the same model twice. That is the intended resting
+    # state while volume is low and accuracy matters more than cost: setting `judge_model`
+    # back to `gpt-4o-mini` re-arms escalation with one variable and no code change.
+    judge_escalation_model: str = Field(default="gpt-4o")
     # text-embedding-3-large (3072-dim) matches the `document_chunks.embedding`
     # VECTOR(3072) column (app.db.base.EMBEDDING_DIM). # TBD(§8.4)
     embedding_model: str = Field(default="text-embedding-3-large")
@@ -886,10 +906,24 @@ class EvalSettings(BaseSettings):
     #: because the payloads are answers and retrieved passages from a private corpus.
     telemetry_opt_out: bool = Field(default=True)
 
+    #: T-314: a chip scoring below this is re-judged by `OPENAI_JUDGE_ESCALATION_MODEL` and
+    #: the second score **replaces** the first. `0.0` disables escalation entirely, which is
+    #: why there is no separate `EVAL_ESCALATE_ENABLED` — a bool beside a threshold is two
+    #: knobs for one decision, and the one that reads "off" is already expressible.
+    #:
+    #: 0.9, from T-312's measured distribution: the false zeros sat at 0.00, 0.50 and 0.67
+    #: while 15 of 18 healthy items scored exactly 1.00, so this cut catches every observed
+    #: judge error and fires on roughly a quarter of messages. # TBD(§8.4)
+    escalate_below: float = Field(default=0.9)
+
     @model_validator(mode="after")
     def _coherent(self) -> EvalSettings:
         if self.max_context_chars < 1:
             raise ValueError("EVAL_MAX_CONTEXT_CHARS must be >= 1")
+        if not 0.0 <= self.escalate_below <= 1.0:
+            # Above 1.0 would escalate *every* score, which is `OPENAI_JUDGE_MODEL` set to the
+            # stronger model with extra steps and twice the bill.
+            raise ValueError("EVAL_ESCALATE_BELOW must be between 0.0 and 1.0")
         return self
 
 

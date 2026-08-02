@@ -41,7 +41,7 @@ packages = ["app", "workers"]
 
 [tool.ruff]
 line-length = 100
-src = ["app", "workers", "tests"]
+src = ["app", "workers", "tests", "evals"]
 
 [tool.ruff.lint]
 # Errors, pyflakes, import-sorting, pyupgrade, bugbear, async-correctness.

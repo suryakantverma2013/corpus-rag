@@ -23,6 +23,7 @@ import pytest
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.db.base import DEFAULT_TENANT_ID
 from app.db.enums import DocumentStatus, MessageRole
 from app.db.models.conversation import Conversation
@@ -36,7 +37,10 @@ from app.db.repositories.messages import MessageRepository
 from app.db.repositories.users import UserRepository
 from app.rag.evaluation import (
     EVAL_COMPLETED,
+    EVAL_ESCALATED,
+    EVAL_ESCALATION_FAILED,
     EVAL_SKIPPED,
+    DeepEvalEvaluator,
     EvaluationScores,
     build_evaluator,
     structural_coverage,
@@ -553,3 +557,144 @@ async def test_live_the_gate_and_the_judge_can_disagree() -> None:
     assert coverage.score == 1.0, "the structural gate passes a fully cited answer"
     assert scores.faithfulness is not None and scores.faithfulness <= 0.4
     assert coverage.score - scores.faithfulness >= 0.5
+
+
+# --- two-tier judging (T-314, R-53) -------------------------------------------
+#
+# These drive `_scored` through a scripted `_measure`, which is the seam that matters: the
+# decision under test is *when to ask a second judge and whose answer to keep*, not whether
+# DeepEval can compute a metric. Patching one level lower would test the vendor.
+
+
+def _scripted(evaluator, scores: list[float | None]) -> list[str | None]:
+    """Replace `_measure` with a queue of results; return the list of models it was asked for."""
+    asked: list[str | None] = []
+    queue = list(scores)
+
+    async def fake_measure(metric_cls, case, name, *, model=None):  # noqa: ANN001, ANN202, ARG001
+        asked.append(model)
+        return queue.pop(0)
+
+    evaluator._measure = fake_measure  # type: ignore[method-assign]  # noqa: SLF001
+    return asked
+
+
+async def test_a_low_score_is_re_judged_by_the_stronger_model() -> None:
+    """T-312 measured the cheap judge returning 0.00 on a verbatim-grounded answer.
+
+    FR-EVL-02 renders that as a chip, so the low tail — and only the low tail — gets a second
+    opinion.
+    """
+    settings = get_settings()
+    chat = FakeChatClient()
+    evaluator = DeepEvalEvaluator(chat, settings)
+    asked = _scripted(evaluator, [0.0, 1.0, 1.0])
+
+    scores = await evaluator.score(question=QUESTION, answer=ANSWER, context=[PASSAGE])
+
+    assert scores.relevancy == 1.0, "the escalated score must replace the low one"
+    # The base tier is whatever the *client* calls its judge — the fake names itself, a real
+    # `OpenAIChatClient` names `OPENAI_JUDGE_MODEL` — and only the second tier is a settings
+    # lookup. Asserting the pair is what shows the two calls went to different models.
+    assert asked[:2] == [chat.judge_model, settings.openai.judge_escalation_model]
+
+
+async def test_a_healthy_score_is_never_re_judged() -> None:
+    """The whole economy of the design: 15 of 18 healthy items score exactly 1.00."""
+    evaluator = DeepEvalEvaluator(FakeChatClient(), get_settings())
+    asked = _scripted(evaluator, [1.0, 1.0])
+
+    await evaluator.score(question=QUESTION, answer=ANSWER, context=[PASSAGE])
+
+    assert len(asked) == 2, "one call per metric, no escalation"
+
+
+async def test_the_escalated_score_replaces_rather_than_wins() -> None:
+    """**Not `max()`.** A 0.00 the stronger judge confirms stays 0.00.
+
+    Taking the better of two would stop being a measurement and become a search for the
+    answer we prefer — the "launder a proxy as a score" failure R-49(1) refused, one level up.
+    """
+    evaluator = DeepEvalEvaluator(FakeChatClient(), get_settings())
+    _scripted(evaluator, [0.5, 0.0, 1.0])
+
+    scores = await evaluator.score(question=QUESTION, answer=ANSWER, context=[PASSAGE])
+
+    assert scores.relevancy == 0.0
+
+
+async def test_a_failed_escalation_keeps_the_first_score() -> None:
+    """R-50(3)'s fail-open direction applied to the second tier: a harsh chip beats no chip."""
+    evaluator = DeepEvalEvaluator(FakeChatClient(), get_settings())
+    _scripted(evaluator, [0.2, None, 1.0])
+
+    with structlog.testing.capture_logs() as logs:
+        scores = await evaluator.score(question=QUESTION, answer=ANSWER, context=[PASSAGE])
+
+    assert scores.relevancy == 0.2
+    assert [entry for entry in logs if entry["event"] == EVAL_ESCALATION_FAILED]
+
+
+async def test_the_escalation_is_recorded_in_telemetry_not_in_the_payload() -> None:
+    """Which model produced a chip is an operator question (R-49(1)/R-50(6)).
+
+    `EvaluationScores` still has exactly two fields, so provenance has nowhere to leak into
+    `messages.evaluation` — it goes to the log stream instead.
+    """
+    evaluator = DeepEvalEvaluator(FakeChatClient(), get_settings())
+    _scripted(evaluator, [0.0, 1.0, 1.0])
+
+    with structlog.testing.capture_logs() as logs:
+        scores = await evaluator.score(question=QUESTION, answer=ANSWER, context=[PASSAGE])
+
+    escalated = [entry for entry in logs if entry["event"] == EVAL_ESCALATED]
+    assert len(escalated) == 1
+    assert escalated[0]["metric"] == "relevancy"
+    assert escalated[0]["base_score"] == 0.0
+    assert escalated[0]["escalated_score"] == 1.0
+    assert escalated[0]["changed"] is True
+    assert set(scores.as_payload()) <= {"relevancy", "faithfulness"}
+
+
+async def test_escalation_can_be_switched_off_by_the_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`EVAL_ESCALATE_BELOW=0` is the off switch, which is why there is no separate bool."""
+    settings = get_settings()
+    monkeypatch.setattr(settings.eval, "escalate_below", 0.0)
+    evaluator = DeepEvalEvaluator(FakeChatClient(), settings)
+    asked = _scripted(evaluator, [0.0, 0.0])
+
+    scores = await evaluator.score(question=QUESTION, answer=ANSWER, context=[PASSAGE])
+
+    assert len(asked) == 2
+    assert scores.relevancy == 0.0
+
+
+async def test_escalation_is_skipped_when_both_tiers_name_one_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Otherwise a shop running one model everywhere would pay twice for the same answer."""
+    settings = get_settings()
+    monkeypatch.setattr(settings.openai, "judge_escalation_model", FakeChatClient().judge_model)
+    evaluator = DeepEvalEvaluator(FakeChatClient(), settings)
+    asked = _scripted(evaluator, [0.0, 0.0])
+
+    await evaluator.score(question=QUESTION, answer=ANSWER, context=[PASSAGE])
+
+    assert len(asked) == 2
+
+
+async def test_the_offline_harness_never_escalates() -> None:
+    """R-53: re-judging only the low scores is a biased estimator.
+
+    Acceptable for a per-message chip, disqualifying for the instrument T-312 uses to compare
+    one release against the next — nothing ever re-rolls a 1.00, so the aggregate drifts up.
+    """
+    evaluator = build_evaluator(FakeChatClient(), get_settings(), escalate=False)
+    asked = _scripted(evaluator, [0.0, 0.0])
+
+    scores = await evaluator.score(question=QUESTION, answer=ANSWER, context=[PASSAGE])
+
+    assert len(asked) == 2
+    assert scores.relevancy == 0.0

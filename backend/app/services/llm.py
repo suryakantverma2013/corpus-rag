@@ -378,8 +378,15 @@ class ChatClient(Protocol):
         schema: Mapping[str, Any],
         schema_name: str,
         max_output_tokens: int,
+        model: str | None = None,
     ) -> ChatJson:
         """One schema-constrained completion on `OPENAI_JUDGE_MODEL`, on the eval budget.
+
+        ``model`` overrides the judge for this call only, which is what T-314's escalation
+        needs: a second, stronger judge for the minority of scores that come back low. A
+        per-call override rather than a second client, on the same reasoning R-47 applied to
+        the timeout budgets — a second client means a second pool and a second lifespan hook
+        for what is one parameter.
 
         ``LLM_EVAL_TIMEOUT_SECONDS`` / ``LLM_EVAL_MAX_RETRIES`` (T-309, R-50). A fourth
         method rather than a parameter, for the reason given above — and the budget is the
@@ -551,10 +558,11 @@ class OpenAIChatClient:
         schema: Mapping[str, Any],
         schema_name: str,
         max_output_tokens: int,
+        model: str | None = None,
     ) -> ChatJson:
         return await self._complete_json(
             messages,
-            model=self._judge_model,
+            model=model or self._judge_model,
             schema=schema,
             schema_name=schema_name,
             max_output_tokens=max_output_tokens,
@@ -908,6 +916,10 @@ class FakeChatClient:
         self._answer = answer
         self._score_scale = score_scale
         self.calls: list[list[dict[str, str]]] = []
+        #: Which judge model each `evaluate_json` call named (T-314). The escalation path is
+        #: asserted on this, because the fake's *answers* are fixed by schema and so cannot
+        #: show which model was asked.
+        self.judge_models: list[str] = []
 
     @property
     def model(self) -> str:
@@ -952,7 +964,11 @@ class FakeChatClient:
         schema: Mapping[str, Any],
         schema_name: str,
         max_output_tokens: int,
+        model: str | None = None,
     ) -> ChatJson:
+        # `model` is recorded rather than honoured: the fake has one deterministic answer per
+        # schema, and T-314's escalation is asserted on `judge_models` instead of on output.
+        self.judge_models.append(model or self._model)
         return self._answer_json(messages, schema_name, schema=schema)
 
     async def stream_answer(

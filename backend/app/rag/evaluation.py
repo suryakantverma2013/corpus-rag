@@ -37,10 +37,13 @@ from app.services.llm import ChatClient
 
 __all__ = [
     "EVAL_COMPLETED",
+    "EVAL_ESCALATED",
+    "EVAL_ESCALATION_FAILED",
     "EVAL_FAILED",
     "EVAL_SKIPPED",
     "EvaluationScores",
     "Evaluator",
+    "ReferenceScores",
     "build_evaluator",
     "structural_coverage",
 ]
@@ -52,6 +55,11 @@ log = structlog.get_logger(__name__)
 EVAL_COMPLETED = "rag.eval.completed"
 EVAL_SKIPPED = "rag.eval.skipped"
 EVAL_FAILED = "rag.eval.failed"
+#: T-314 two-tier judging. Provenance lives in telemetry rather than in the payload:
+#: `EvaluationScores` has exactly two fields by design (R-49(1)/R-50(6)), and which model
+#: produced a chip is an operator question, not a user-facing one.
+EVAL_ESCALATED = "rag.eval.escalated"
+EVAL_ESCALATION_FAILED = "rag.eval.escalation_failed"
 
 #: Judge prompts are short JSON payloads; this bounds a runaway response, not the input.
 _JUDGE_MAX_OUTPUT_TOKENS = 2_000  # TBD(§8.4)
@@ -91,6 +99,29 @@ class EvaluationScores:
         return payload
 
 
+@dataclass(frozen=True, slots=True)
+class ReferenceScores:
+    """FR-EVL-01's two **reference-based** metrics (T-312).
+
+    Deliberately a separate type from :class:`EvaluationScores` rather than two more optional
+    fields on it. `EvaluationScores` is what `messages.evaluation` may hold, and R-50(1) sent
+    these two metrics to an offline harness precisely because a live turn has no
+    `expected_output` to compute them from — so a type whose only writer is the harness cannot
+    be talked into a per-message column by a later edit, exactly as `EvaluationScores`' own
+    two-field list guards against writing the gate's `groundedness` (R-49(1)).
+
+    Never persisted and never rendered per message: FR-ANL-04's Ctx Precision and Ctx Recall
+    cells are chat-level and these numbers are corpus-level (R-52).
+    """
+
+    ctx_precision: float | None = None
+    ctx_recall: float | None = None
+
+    @property
+    def empty(self) -> bool:
+        return self.ctx_precision is None and self.ctx_recall is None
+
+
 @runtime_checkable
 class Evaluator(Protocol):
     """The seam that makes the judge implementation a swap (R-50).
@@ -105,6 +136,19 @@ class Evaluator(Protocol):
         self, *, question: str, answer: str, context: Sequence[str]
     ) -> EvaluationScores:
         """Score one served answer. **Never raises** — a failed metric comes back `None`."""
+        ...
+
+    async def score_reference_based(
+        self, *, question: str, answer: str, expected: str, context: Sequence[str]
+    ) -> ReferenceScores:
+        """Score the two metrics that need a reference answer (T-312). **Never raises.**
+
+        On the seam rather than in `evals/` on purpose: `_ChatClientJudge` is what keeps every
+        judge call on our own `ChatClient` (R-50(2)), and a second caller reaching for
+        `deepeval.metrics` directly would quietly reacquire the vendor's own OpenAI client,
+        its telemetry defaults and an error taxonomy we cannot classify. The harness is a
+        second *caller* of this module, never a second *user* of that library.
+        """
         ...
 
 
@@ -241,12 +285,36 @@ def _judge_class() -> type:
 
 
 class DeepEvalEvaluator:
-    """FR-EVL-01's two reference-free metrics, judged by `OPENAI_JUDGE_MODEL` (§10.1)."""
+    """FR-EVL-01's two reference-free metrics, judged by `OPENAI_JUDGE_MODEL` (§10.1).
 
-    def __init__(self, chat: ChatClient, settings: Settings | None = None) -> None:
+    **Two-tier judging (T-314, R-53).** T-312 measured the cheap default returning *false
+    zeros on correct answers* — faithfulness 0.00 on an answer that was a verbatim
+    restatement of the passage it cited — and FR-EVL-02 renders these numbers as chips a
+    user reads. Because the errors cluster in the tail (15 of 18 healthy items scored exactly
+    1.00), a score below `EVAL_ESCALATE_BELOW` is re-judged by a stronger model and the
+    second score **replaces** the first.
+
+    Two properties keep that honest, and both are asserted in `tests/test_evaluation.py`:
+
+    * **Replace, never `max()`.** A 0.00 the stronger judge confirms stays 0.00. Taking the
+      better of two would not be a measurement, it would be a search for the answer we like.
+    * **Escalation is off in the T-312 harness** (`escalate=False`). Re-judging only the low
+      scores is a *biased estimator* — the aggregate drifts upward because nothing re-rolls a
+      1.00 — which is acceptable for a per-message chip and disqualifying for the instrument
+      that measures release-over-release quality.
+    """
+
+    def __init__(
+        self,
+        chat: ChatClient,
+        settings: Settings | None = None,
+        *,
+        escalate: bool = True,
+    ) -> None:
         self._settings = settings or get_settings()
         self._chat = chat
-        self._judge: Any | None = None
+        self._escalate = escalate
+        self._judges: dict[str, Any] = {}
 
     async def score(
         self, *, question: str, answer: str, context: Sequence[str]
@@ -267,15 +335,89 @@ class DeepEvalEvaluator:
             retrieval_context=[passage[:cap] for passage in context],
         )
         return EvaluationScores(
-            relevancy=await self._measure(AnswerRelevancyMetric, case, "relevancy"),
-            faithfulness=await self._measure(FaithfulnessMetric, case, "faithfulness"),
+            relevancy=await self._scored(AnswerRelevancyMetric, case, "relevancy"),
+            faithfulness=await self._scored(FaithfulnessMetric, case, "faithfulness"),
         )
 
-    async def _measure(self, metric_cls: type, case: Any, name: str) -> float | None:
-        if self._judge is None:
-            self._judge = _judge_class()(self._chat, model_name=self._chat_model_name())
+    async def _scored(self, metric_cls: type, case: Any, name: str) -> float | None:
+        """One metric on the cheap judge, escalated to the stronger one when it comes back low.
+
+        The escalation is skipped entirely when it would be a no-op — disabled, threshold at
+        zero, or both tiers naming the same model — so the common configuration pays exactly
+        what it did before T-314.
+        """
+        base_model = self._chat_model_name()
+        score = await self._measure(metric_cls, case, name, model=base_model)
+
+        cut = self._settings.eval.escalate_below
+        stronger = self._settings.openai.judge_escalation_model
+        if (
+            not self._escalate
+            or score is None
+            or score >= cut
+            or cut <= 0.0
+            or stronger == base_model
+        ):
+            return score
+
+        escalated = await self._measure(metric_cls, case, name, model=stronger)
+        if escalated is None:
+            # The stronger judge failed. Keep the first score rather than dropping the chip —
+            # R-50(3)'s fail-open direction, applied to the second tier: a possibly-harsh
+            # number is a better outcome than a metric that vanishes.
+            log.warning(EVAL_ESCALATION_FAILED, metric=name, score=round(score, 2))
+            return score
+
+        log.info(
+            EVAL_ESCALATED,
+            metric=name,
+            base_score=round(score, 2),
+            escalated_score=round(escalated, 2),
+            base_model=base_model,
+            escalation_model=stronger,
+            # Whether the second opinion actually moved the chip. This is the number that
+            # says, months from now, whether the second tier is still paying for itself.
+            changed=abs(escalated - score) >= 0.005,
+        )
+        return escalated
+
+    async def score_reference_based(
+        self, *, question: str, answer: str, expected: str, context: Sequence[str]
+    ) -> ReferenceScores:
+        """FR-EVL-01's Contextual Precision and Contextual Recall (T-312, R-52).
+
+        The *only* difference from :meth:`score` is `expected_output`, and that difference is
+        the whole reason these two metrics could not ship with T-309: both judge the retrieved
+        context against an **ideal** answer, so without one they cannot be computed at all —
+        not computed badly, not computed. Contextual Precision asks whether the relevant nodes
+        rank above the irrelevant ones; Contextual Recall asks whether the context contains
+        what the ideal answer needed.
+
+        Both are measured over the context in the order it was given, so the caller must pass
+        the ordered grounding set (the reranked top-K the model actually saw) rather than a
+        set — a precision metric fed an arbitrary order measures nothing.
+        """
+        from deepeval.metrics import ContextualPrecisionMetric, ContextualRecallMetric
+        from deepeval.test_case import LLMTestCase
+
+        cap = self._settings.eval.max_context_chars
+        case = LLMTestCase(
+            input=question,
+            actual_output=answer,
+            expected_output=expected,
+            retrieval_context=[passage[:cap] for passage in context],
+        )
+        return ReferenceScores(
+            ctx_precision=await self._measure(ContextualPrecisionMetric, case, "ctx_precision"),
+            ctx_recall=await self._measure(ContextualRecallMetric, case, "ctx_recall"),
+        )
+
+    async def _measure(
+        self, metric_cls: type, case: Any, name: str, *, model: str | None = None
+    ) -> float | None:
+        judge = self._judge_for(model or self._chat_model_name())
         try:
-            metric = metric_cls(model=self._judge, async_mode=True, include_reason=False)
+            metric = metric_cls(model=judge, async_mode=True, include_reason=False)
             # `_log_metric_to_confident=False` is not the same switch as
             # `DEEPEVAL_TELEMETRY_OPT_OUT`: that one governs anonymous usage pings, this one
             # governs shipping the *test case* — question, answer and retrieved passages — to
@@ -287,11 +429,26 @@ class DeepEvalEvaluator:
             log.warning(EVAL_FAILED, metric=name, error=str(exc), error_type=type(exc).__name__)
             return None
 
+    def _judge_for(self, model: str) -> Any:
+        """One `DeepEvalBaseLLM` per model, built on first use (the ~13 s import).
+
+        Cached per model rather than singly, so a turn that escalates does not rebuild the
+        cheap judge afterwards — and so the two tiers cannot accidentally share one adapter
+        and send both calls to the same endpoint.
+        """
+        judge = self._judges.get(model)
+        if judge is None:
+            judge = _judge_class()(self._chat, model_name=model)
+            self._judges[model] = judge
+        return judge
+
     def _chat_model_name(self) -> str:
         return getattr(self._chat, "judge_model", self._settings.openai.judge_model)
 
 
-def build_evaluator(chat: ChatClient, settings: Settings | None = None) -> Evaluator:
+def build_evaluator(
+    chat: ChatClient, settings: Settings | None = None, *, escalate: bool = True
+) -> Evaluator:
     """Build the judge. Returns the :class:`Evaluator` Protocol, never the concrete class.
 
     There is no `EVAL_BACKEND` knob. The spike that adopted `deepeval` (R-50) confirmed it
@@ -306,4 +463,4 @@ def build_evaluator(chat: ChatClient, settings: Settings | None = None) -> Evalu
         import os
 
         os.environ.setdefault("DEEPEVAL_TELEMETRY_OPT_OUT", "true")
-    return DeepEvalEvaluator(chat, settings)
+    return DeepEvalEvaluator(chat, settings, escalate=escalate)
