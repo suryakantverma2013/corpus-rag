@@ -15,6 +15,7 @@ and slow resumes. Making it a test failure is the only way that stays true.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import inspect
 import types
@@ -51,6 +52,7 @@ from app.rag.graph import (
 )
 from app.rag.prompts import SYSTEM_PROMPT
 from app.rag.retrieval import RetrievalFilter, RetrievedChunk
+from app.rag.search import RETRIEVAL_COMPLETED
 from app.rag.state import RAGContext, RAGState
 from app.security.prompt_injection import CONTEXT_FENCE_OPEN
 from app.services.llm import ChatResponseError, ChatUnavailableError, FakeChatClient
@@ -1060,6 +1062,177 @@ async def test_an_empty_scope_still_abstains() -> None:
     assert values["outcome"] == "abstained"
     assert values["answer"] == ABSTAIN_EMPTY_SCOPE
     assert values.get("error_code") is None
+
+
+# --- the T-311 router/retrieval overlap ---------------------------------------
+#
+# The optimisation is invisible in results by design, so these tests assert on *where* the
+# query's arm ran. `rag.retrieval.completed.prefetched` is the discriminator: without it,
+# "the retriever was called once" is true whether the arm ran in `route` or in `retrieve`,
+# and every test below would pass against code that quietly stopped overlapping.
+
+
+def _prefetched(logs: list[dict]) -> bool:
+    completed = [entry for entry in logs if entry["event"] == RETRIEVAL_COMPLETED]
+    assert len(completed) == 1, "expected exactly one retrieval per turn"
+    return completed[0]["prefetched"]
+
+
+@pytest.fixture
+def prefetch_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin `RETRIEVAL_PREFETCH_QUERY_ARM` on for the tests that assert the overlap itself.
+
+    The flag's off state is the pre-T-311 sequential path with identical results, and that
+    claim is only worth anything if it is testable: a deployment that sets it must not turn
+    this file red. So the tests that assert the *switch* set the switch, and the rest of the
+    suite passes either way — which was verified by running it both ways.
+    """
+    monkeypatch.setattr(get_settings().retrieval, "prefetch_query_arm", True)
+
+
+async def test_the_router_call_and_the_query_arm_run_at_the_same_time(prefetch_on: None) -> None:
+    """The whole point of T-311, proved without a clock.
+
+    Both the model call and the retriever wait on a two-party barrier, so *sequential* code
+    cannot pass: `route` would sit in `complete_json` waiting for a search that has not been
+    started yet, hit the timeout, and fail the turn. There is no threshold to tune and no way
+    for a loaded machine to make it flaky — the same argument as
+    `test_probes_are_searched_concurrently`, one node up.
+    """
+    barrier = asyncio.Barrier(2)
+
+    class _BarrierChat(FakeChatClient):
+        async def complete_json(self, messages, *, schema, schema_name, max_output_tokens):  # noqa: ANN001, ANN003, ANN201
+            async with asyncio.timeout(5):
+                await barrier.wait()
+            return await super().complete_json(
+                messages,
+                schema=schema,
+                schema_name=schema_name,
+                max_output_tokens=max_output_tokens,
+            )
+
+    class _BarrierRetriever(_StubRetriever):
+        async def search(self, query_text, query_embedding, *, filters, top_k=None):  # noqa: ANN001, ANN201
+            async with asyncio.timeout(5):
+                await barrier.wait()
+            return await super().search(query_text, query_embedding, filters=filters, top_k=top_k)
+
+    retriever = _BarrierRetriever([_chunk("the answering passage")])
+    with structlog.testing.capture_logs() as logs:
+        _, values = await _run(_context(retriever=retriever, chat=_BarrierChat()))
+
+    assert values["outcome"] != "error"
+    assert values["retrieved_chunk_ids"]
+    assert retriever.calls == 1
+    assert _prefetched(logs) is True
+
+
+async def test_a_failing_router_does_not_take_the_query_arm_down_with_it(prefetch_on: None) -> None:
+    """R-45(2) meets T-311: two coroutines under one `gather`, neither able to cancel the other.
+
+    The turn must still be grounded in the arm that succeeded — and it must be grounded in the
+    *prefetched* one, or the node quietly paid for the search twice and saved nothing.
+
+    Only the *router's* call fails, unlike `test_a_failing_router_never_fails_the_turn` where
+    the whole client is dead: that one asserts a fallback over an empty scope, and this one has
+    to run the turn to completion to show the arm's hits survived their producer failing.
+    """
+
+    class _RouterFailsChat(FakeChatClient):
+        async def complete_json(self, messages, *, schema, schema_name, max_output_tokens):  # noqa: ANN001, ANN003, ANN201
+            raise ChatResponseError("the model returned prose")
+
+    retriever = _StubRetriever([_chunk("still retrieved")])
+    chat = _RouterFailsChat()
+    with structlog.testing.capture_logs() as logs:
+        _, values = await _run(_context(retriever=retriever, chat=chat))
+
+    assert values["outcome"] != "error"
+    assert values["retrieved_chunk_ids"]
+    assert retriever.calls == 1
+    assert _prefetched(logs) is True
+
+
+async def test_a_query_arm_that_fails_early_still_fails_the_turn_closed() -> None:
+    """R-46(6) across a node boundary — the property that made this safe to do at all.
+
+    `route` fails open and cannot raise, so the exception rides in the slot and `retrieve`
+    re-raises it. `calls == 1` is the second half: a failure must not be retried by the
+    consumer, or a dead vector store costs two round trips per turn instead of one.
+    """
+    retriever = _StubRetriever(error=SQLAlchemyError("the vector store is unreachable"))
+    executed, values = await _run(_context(retriever=retriever))
+
+    assert values["outcome"] == "error"
+    assert values["error_code"] == FailureClass.RETRIEVAL_UNAVAILABLE.value
+    assert "generate" not in executed
+    assert executed[-1] == "finalize"
+    assert retriever.calls == 1
+
+
+async def test_the_derived_probes_still_run_after_the_router_answers(prefetch_on: None) -> None:
+    """The half that cannot be overlapped, asserted so nobody later assumes it was.
+
+    A probe is *derived from* the classification, so its arm can only start once the router
+    has answered. The saving is the query's arm; the ordering here is unchanged.
+    """
+    retriever = _StubRetriever([_chunk("passage")])
+    decomposed = FakeChatClient(
+        handler=lambda _: {
+            "query_class": "multi_part",
+            "probes": ["what is tier 1?", "what is tier 2?"],
+        }
+    )
+    with structlog.testing.capture_logs() as logs:
+        await _run(_context(retriever=retriever, chat=decomposed))
+
+    assert retriever.queries == [
+        "what do my documents say?",
+        "what is tier 1?",
+        "what is tier 2?",
+    ]
+    assert _prefetched(logs) is True
+
+
+async def test_disabling_the_router_disables_the_prefetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`GRAPH_ROUTER_ENABLED` stays a *pure* cost switch.
+
+    With no model call there is nothing to overlap, so starting the arm one node early would
+    only move identical work between two nodes — and would leave the flag quietly changing
+    something other than what it names.
+    """
+    monkeypatch.setattr(get_settings().graph, "router_enabled", False)
+    retriever = _StubRetriever([_chunk("passage")])
+    with structlog.testing.capture_logs() as logs:
+        _, values = await _run(_context(retriever=retriever))
+
+    assert retriever.calls == 1
+    assert values["retrieved_chunk_ids"]
+    assert _prefetched(logs) is False
+
+
+async def test_the_prefetch_kill_switch_restores_the_sequential_path(
+    prefetch_on: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Off is not a degraded mode — it is last release's timing, with identical results."""
+    retriever = _StubRetriever([_chunk("passage")])
+    with structlog.testing.capture_logs() as logs:
+        _, overlapped = await _run(_context(retriever=retriever))
+    assert _prefetched(logs) is True
+
+    monkeypatch.setattr(get_settings().retrieval, "prefetch_query_arm", False)
+    sequential_retriever = _StubRetriever(retriever.hits)
+    with structlog.testing.capture_logs() as logs:
+        _, sequential = await _run(_context(retriever=sequential_retriever))
+
+    assert _prefetched(logs) is False
+    assert sequential_retriever.calls == 1
+    assert sequential["retrieved_chunk_ids"] == overlapped["retrieved_chunk_ids"]
+    assert sequential["outcome"] == overlapped["outcome"]
 
 
 # --- the FR-RET-02 rerank node (T-306, R-47) ----------------------------------

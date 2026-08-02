@@ -23,12 +23,24 @@ import pytest
 import structlog
 
 from app.config import RerankSettings, RetrievalSettings, RouterSettings, Settings
+from app.rag.prefetch import QueryArmPrefetch
 from app.rag.retrieval import RetrievalFilter, RetrievedChunk
-from app.rag.search import PROBE_FAILED, RETRIEVAL_COMPLETED, build_probes, retrieve_for_turn
+from app.rag.search import (
+    PROBE_FAILED,
+    QUERY_ARM_FAILED,
+    QUERY_ARM_PREFETCHED,
+    RETRIEVAL_COMPLETED,
+    build_probes,
+    prefetch_query_arm,
+    retrieve_for_turn,
+)
 from app.services.embeddings import FakeEmbeddingClient
 
 OWNER_ID = uuid.uuid4()
 FILTERS = RetrievalFilter(owner_id=OWNER_ID, conversation_id=uuid.uuid4())
+#: A second scope, for the T-311 key check. Same owner, different conversation — the shape a
+#: stale slot would actually have.
+OTHER_FILTERS = RetrievalFilter(owner_id=OWNER_ID, conversation_id=uuid.uuid4())
 
 
 def _settings(**overrides: object) -> Settings:
@@ -122,6 +134,7 @@ async def _run(
     embeddings: object = None,
     settings: Settings | None = None,
     filters: RetrievalFilter = FILTERS,
+    prefetch: QueryArmPrefetch | None = None,
 ) -> list[RetrievedChunk]:
     return await retrieve_for_turn(
         query=query,
@@ -130,8 +143,31 @@ async def _run(
         sessionmaker=_StubSession,
         embeddings=embeddings or FakeEmbeddingClient(),  # type: ignore[arg-type]
         retriever_factory=factory or _factory(),
+        prefetch=prefetch,
         settings=settings or _settings(),
     )
+
+
+async def _prefetch(
+    query: str = "what is the escalation policy?",
+    *,
+    factory=None,  # noqa: ANN001
+    embeddings: object = None,
+    settings: Settings | None = None,
+    filters: RetrievalFilter = FILTERS,
+) -> QueryArmPrefetch:
+    """A slot filled the way `route` fills it (T-311)."""
+    slot = QueryArmPrefetch()
+    await prefetch_query_arm(
+        slot,
+        query=query,
+        filters=filters,
+        sessionmaker=_StubSession,
+        embeddings=embeddings or FakeEmbeddingClient(),  # type: ignore[arg-type]
+        retriever_factory=factory or _factory(),
+        settings=settings or _settings(),
+    )
+    return slot
 
 
 # --- the probe list -----------------------------------------------------------
@@ -368,6 +404,165 @@ async def test_the_completion_log_counts_but_never_quotes() -> None:
     assert completed[0]["probes"] == 2
     assert completed[0]["returned"] == 1
     assert "distinctive" not in repr(completed)
+
+
+# --- the T-311 query-arm prefetch ---------------------------------------------
+#
+# The claim under test is narrow and total: a prefetched arm and a searched arm are
+# indistinguishable everywhere except the wall clock. So these tests assert the *sameness* —
+# same probe, same rank-0 position, same failure — and that every way the slot can miss falls
+# back to searching the query here.
+
+
+async def test_a_prefetched_arm_is_not_searched_again() -> None:
+    """The saving itself: the query's arm ran in `route`, so `retrieve` runs only the probes."""
+    slot = await _prefetch("q", factory=_factory(default=[_chunk(1)]))
+    factory = _factory(default=[_chunk(2)])
+
+    hits = await _run("q", ["a"], factory=factory, prefetch=slot)
+
+    assert [probe for probe, _session, _top_k in factory.record] == ["a"]  # type: ignore[attr-defined]
+    assert {hit.chunk_id for hit in hits} == {uuid.UUID(int=1), uuid.UUID(int=2)}
+
+
+async def test_a_prefetched_arm_is_still_probe_zero_in_the_merge() -> None:
+    """R-46(3) is positional, so a prefetched arm has to land back in slot 0, not last.
+
+    Asserted through the representative-hit rule, which is the one observable consequence:
+    first writer wins and the query writes first, so the diagnostics on a chunk both found
+    stay attached to the question the user actually asked.
+    """
+    from_query = _chunk(1, dense_rank=1, sparse_rank=None)
+    from_probe = _chunk(1, dense_rank=9, sparse_rank=9)
+    slot = await _prefetch("q", factory=_factory(results={"q": [from_query]}))
+
+    hits = await _run("q", ["a"], factory=_factory(results={"a": [from_probe]}), prefetch=slot)
+
+    assert hits[0].dense_rank == 1
+    assert hits[0].sparse_rank is None
+
+
+async def test_a_prefetch_for_another_query_is_ignored() -> None:
+    """A key miss must degrade to the pre-T-311 path, never to the wrong passages.
+
+    Reachable in production through the `adapt` back edge and through any resumed run, and
+    the failure it guards is silent: grounding a turn in the arm of a query nobody asked.
+    """
+    slot = await _prefetch("a different question", factory=_factory(default=[_chunk(9)]))
+    factory = _factory(default=[_chunk(1)])
+
+    hits = await _run("q", factory=factory, prefetch=slot)
+
+    assert [probe for probe, _session, _top_k in factory.record] == ["q"]  # type: ignore[attr-defined]
+    assert {hit.chunk_id for hit in hits} == {uuid.UUID(int=1)}
+
+
+async def test_a_prefetch_for_another_scope_is_ignored() -> None:
+    """The FR-RET-04 half of the key. Same text, different scope, so the rows are not ours."""
+    slot = await _prefetch("q", filters=OTHER_FILTERS, factory=_factory(default=[_chunk(9)]))
+    factory = _factory(default=[_chunk(1)])
+
+    hits = await _run("q", factory=factory, filters=FILTERS, prefetch=slot)
+
+    assert [probe for probe, _session, _top_k in factory.record] == ["q"]  # type: ignore[attr-defined]
+    assert {hit.chunk_id for hit in hits} == {uuid.UUID(int=1)}
+
+
+async def test_a_prefetched_failure_still_fails_the_turn() -> None:
+    """R-46(6) survives the move: where the arm ran does not change what its failure means.
+
+    `route` fails open, so the exception cannot be raised there. Carrying it and re-raising
+    here is what keeps a dead vector store an FR-RET-05 error instead of an answer grounded
+    in whatever a rewrite happened to find.
+    """
+    slot = await _prefetch("q", factory=_factory(errors={"q": RuntimeError("the store is down")}))
+
+    with pytest.raises(RuntimeError, match="store is down"):
+        await _run("q", ["a"], factory=_factory(default=[_chunk(2)]), prefetch=slot)
+
+
+async def test_a_prefetched_arm_with_no_probes_costs_no_embedding_call() -> None:
+    """The common case (T-304: 18 of 20 queries classify `simple` with zero probes).
+
+    With nothing left to search, `retrieve` must make *no* request rather than an empty one —
+    a round trip to embed an empty list is a network call that buys nothing.
+    """
+    slot = await _prefetch("q", factory=_factory(default=[_chunk(1)]))
+    embeddings = FakeEmbeddingClient()
+    factory = _factory(default=[_chunk(2)])
+
+    hits = await _run("q", factory=factory, embeddings=embeddings, prefetch=slot)
+
+    assert embeddings.request_count == 0
+    assert factory.record == []  # type: ignore[attr-defined]
+    assert {hit.chunk_id for hit in hits} == {uuid.UUID(int=1)}
+
+
+async def test_the_slot_is_single_use() -> None:
+    """What makes the `adapt` back edge safe (R-49(5)).
+
+    The retry re-enters `retrieve` without re-running `route`, and it must search the query
+    again beside its new HyDE probe. A slot that survived its first read would replay the
+    first pass's arm forever and make the retry a re-roll of the same dice.
+    """
+    slot = await _prefetch("q", factory=_factory(default=[_chunk(1)]))
+    factory = _factory(default=[_chunk(2)])
+
+    await _run("q", factory=factory, prefetch=slot)
+    await _run("q", ["hyde passage"], factory=factory, prefetch=slot)
+
+    assert [probe for probe, _session, _top_k in factory.record] == ["q", "hyde passage"]  # type: ignore[attr-defined]
+
+
+async def test_the_prefetch_never_raises_and_records_the_failure() -> None:
+    """It runs inside `route`, which fails open (R-45(2)) — so it may not raise, ever."""
+    slot = await _prefetch("q", factory=_factory(errors={"q": RuntimeError("boom")}))
+
+    assert slot.result is not None
+    assert isinstance(slot.result.error, RuntimeError)
+    assert slot.result.hits == ()
+
+
+async def test_an_empty_query_is_not_prefetched() -> None:
+    embeddings = FakeEmbeddingClient()
+    factory = _factory(default=[_chunk(1)])
+    slot = await _prefetch("   ", factory=factory, embeddings=embeddings)
+
+    assert slot.result is None
+    assert embeddings.request_count == 0
+    assert factory.record == []  # type: ignore[attr-defined]
+
+
+async def test_the_prefetch_logs_count_but_never_quote() -> None:
+    """R-43(5)/R-45(8) again: the arm's own telemetry is subject to the same rule."""
+    with structlog.testing.capture_logs() as logs:
+        await _prefetch("a very distinctive question", factory=_factory(default=[_chunk(1)]))
+    prefetched = [entry for entry in logs if entry["event"] == QUERY_ARM_PREFETCHED]
+    assert len(prefetched) == 1
+    assert prefetched[0]["candidates"] == 1
+    assert "distinctive" not in repr(logs)
+
+    with structlog.testing.capture_logs() as logs:
+        await _prefetch(
+            "another distinctive question",
+            factory=_factory(errors={"another distinctive question": RuntimeError("boom")}),
+        )
+    failed = [entry for entry in logs if entry["event"] == QUERY_ARM_FAILED]
+    assert len(failed) == 1
+    assert failed[0]["error"] == "RuntimeError"
+    assert "distinctive" not in repr(logs)
+
+
+async def test_the_completion_log_records_which_path_the_turn_took() -> None:
+    """The one field that makes the saving readable from a production log."""
+    slot = await _prefetch("q", factory=_factory(default=[_chunk(1)]))
+    with structlog.testing.capture_logs() as logs:
+        await _run("q", factory=_factory(default=[_chunk(1)]), prefetch=slot)
+    assert [e for e in logs if e["event"] == RETRIEVAL_COMPLETED][0]["prefetched"] is True
+
+    with structlog.testing.capture_logs() as logs:
+        await _run("q", factory=_factory(default=[_chunk(1)]))
+    assert [e for e in logs if e["event"] == RETRIEVAL_COMPLETED][0]["prefetched"] is False
 
 
 # --- module hygiene -----------------------------------------------------------

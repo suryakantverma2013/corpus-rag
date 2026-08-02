@@ -39,6 +39,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, TypedDict
 
+from app.rag.prefetch import QueryArmPrefetch
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -203,4 +205,11 @@ class RAGContext:
     #: unreachable from a deployment. `None` means "build the one `LLM_BACKEND` names", which
     #: is what every real run does.
     chat: ChatClient | None = None
+    #: The T-311 query-arm handoff: `route` starts the original query's retrieval arm
+    #: concurrently with the router call and leaves the hits here for `retrieve`. It lives on
+    #: the context rather than in `RAGState` because it carries chunk *objects*, which
+    #: FR-PER-03 keeps out of the checkpoint — and because it must not survive a restart:
+    #: an empty slot simply means `retrieve` searches the query itself, exactly as it did
+    #: before T-311. Default-constructed, so no caller has to know it exists.
+    prefetch: QueryArmPrefetch = field(default_factory=QueryArmPrefetch)
     is_admin: bool = False

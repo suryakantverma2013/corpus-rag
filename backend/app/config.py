@@ -694,6 +694,17 @@ class RetrievalSettings(BaseSettings):
     #: R-35(5) / R-37(6) adjacent-overlap dedupe. A kill switch for diagnosis, not a taste.
     dedupe_adjacent: bool = Field(default=True)
 
+    #: T-311: start the original query's retrieval arm inside `route`, concurrently with the
+    #: T-304 classification call, instead of after it. Sound because R-45(3) makes probes
+    #: additive — the query is searched on every turn regardless of what the router says, so
+    #: its arm depends on nothing the router produces.
+    #:
+    #: A kill switch on the `dedupe_adjacent` precedent, and the least consequential one in
+    #: this file: **off is not a degraded mode, it is the previous release's timing**. Same
+    #: probes, same order, same merge, same failure directions — only the wall clock differs,
+    #: which is why the whole test suite is required to pass with it either way.
+    prefetch_query_arm: bool = Field(default=True)
+
     @model_validator(mode="after")
     def _coherent(self) -> RetrievalSettings:
         if self.dense_candidates < 1 or self.sparse_candidates < 1:

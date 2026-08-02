@@ -31,7 +31,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Literal
 
 import structlog
@@ -69,6 +69,10 @@ from langgraph.types import Command, interrupt  # noqa: E402
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from langgraph.checkpoint.base import BaseCheckpointSaver
     from langgraph.graph.state import CompiledStateGraph
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.rag.retrieval import Retriever
+    from app.services.embeddings import EmbeddingClient
 
 log = structlog.get_logger(__name__)
 
@@ -321,9 +325,27 @@ async def route(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
     never remove the original signal. T-305 must fan those out **inside** `retrieve`
     (`asyncio.gather`), never via `Send`: `Send` returns concurrent updates to one channel and
     would force merge reducers onto `retrieved_chunk_ids`, which R-42(4) rules out.
+
+    **That same additivity is why this node also starts retrieving** (T-311). The original
+    query is searched on every turn whatever the router concludes, so its arm depends on
+    nothing computed here and there is no reason for it to wait behind a ~840 ms model call.
+    It runs under the same `gather` and leaves its hits in `ctx.prefetch` for `retrieve`.
+    Four properties hold it in place:
+
+    * **Neither coroutine can cancel the other.** Both swallow their own exceptions — this
+      one to `FALLBACK`, the arm into its slot — so `gather` never sees a raise, and a router
+      failure (R-45(2)) cannot take the retrieval down with it.
+    * **The failure direction is unchanged.** A prefetched arm that failed is re-raised by
+      `retrieve`, which fails closed (R-46(6)); nothing about that decision moves here.
+    * **The scope is not rebuilt.** `_retrieval_filter` is the same helper `retrieve` and
+      `rerank` call — a second construction is how R-46(2)'s hole reopens (R-47(5)).
+    * **The screen still precedes retrieval.** `_route_after_screen` sends a blocked prompt
+      to `abstain` and never here, so FR-ORC-07's ordering is still structural: this node is
+      unreachable on the branch where retrieval must not happen.
     """
     from app.rag.history import load_router_tail
-    from app.rag.router import FALLBACK, classify_query
+    from app.rag.router import FALLBACK, RouterDecision, classify_query
+    from app.rag.search import prefetch_query_arm
 
     ctx = runtime.context
     settings = get_settings()
@@ -333,33 +355,60 @@ async def route(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
         # Deliberate "stop paying for the extra call", not a failure path — hence info, where
         # the screen's kill switch logs a warning. Turning this off removes an improvement;
         # turning that one off removes a control.
+        #
+        # No prefetch on this path either, which is what keeps the flag a *pure* cost switch:
+        # with no model call to hide behind there is nothing to overlap, and starting the arm
+        # a superstep early would only move the same work between two nodes.
         log.info("rag.router.disabled", conversation_id=str(ctx.conversation_id))
         return {"query_class": None, "strategy": FALLBACK.strategy, "sub_queries": []}
 
-    try:
-        history = []
-        if settings.router.history_turns > 0:
-            async with ctx.sessionmaker() as session:
-                history = await load_router_tail(
-                    session,
-                    ctx.conversation_id,
-                    turns=settings.router.history_turns,
-                    max_chars=settings.router.history_max_chars,
-                )
-        chat = ctx.chat
-        if chat is None:
-            from app.services.llm import get_chat_client
+    async def _classify() -> RouterDecision:
+        try:
+            history = []
+            if settings.router.history_turns > 0:
+                async with ctx.sessionmaker() as session:
+                    history = await load_router_tail(
+                        session,
+                        ctx.conversation_id,
+                        turns=settings.router.history_turns,
+                        max_chars=settings.router.history_max_chars,
+                    )
+            chat = ctx.chat
+            if chat is None:
+                from app.services.llm import get_chat_client
 
-            chat = get_chat_client()
-        decision = await classify_query(query=query, chat=chat, history=history, settings=settings)
-    except Exception:
-        log.warning(
-            "rag.router.failed",
-            conversation_id=str(ctx.conversation_id),
-            turn_index=state.get("turn_index"),
-            exc_info=True,
+                chat = get_chat_client()
+            return await classify_query(query=query, chat=chat, history=history, settings=settings)
+        except Exception:
+            log.warning(
+                "rag.router.failed",
+                conversation_id=str(ctx.conversation_id),
+                turn_index=state.get("turn_index"),
+                exc_info=True,
+            )
+            return FALLBACK
+
+    async def _prefetch() -> None:
+        if not settings.retrieval.prefetch_query_arm:
+            return
+        filters = _retrieval_filter(state, ctx)
+        if filters is None:
+            # Every `@`-mention was malformed, so the scope is empty by construction and
+            # `retrieve` will return `[]` without searching. Prefetching here would be the
+            # one search R-46(1) exists to prevent.
+            return
+        embeddings, retriever_factory = _retrieval_deps(ctx)
+        await prefetch_query_arm(
+            ctx.prefetch,
+            query=query,
+            filters=filters,
+            sessionmaker=ctx.sessionmaker,
+            embeddings=embeddings,
+            retriever_factory=retriever_factory,
+            settings=settings,
         )
-        decision = FALLBACK
+
+    decision, _ = await asyncio.gather(_classify(), _prefetch())
 
     return {
         "query_class": decision.query_class,
@@ -413,6 +462,28 @@ def _retrieval_filter(state: RAGState, ctx: RAGContext) -> RetrievalFilter | Non
         conversation_id=ctx.conversation_id,
         document_ids=document_ids,
     )
+
+
+def _retrieval_deps(ctx: RAGContext) -> tuple[EmbeddingClient, Callable[[AsyncSession], Retriever]]:
+    """The embedding client and retriever factory a search runs on.
+
+    Shared by `retrieve` and by T-311's prefetch in `route`, for the reason `_retrieval_filter`
+    is shared by `retrieve` and `rerank`: the arm started early and the arms started late must
+    be the same query against the same store, and two builders is how one node quietly starts
+    searching something the other would not.
+
+    `HybridRetriever` is FR-RET-01's committed default when nothing is injected;
+    `PgVectorRetriever` stays reachable through the factory as the sanctioned dense-only
+    fallback.
+    """
+    from app.db.repositories.retrieval import HybridRetriever
+
+    embeddings = ctx.embeddings
+    if embeddings is None:
+        from app.services.embeddings import get_embedding_client
+
+        embeddings = get_embedding_client()
+    return embeddings, ctx.retriever_factory or HybridRetriever
 
 
 def _message_uuid(value: str | None) -> uuid.UUID | None:
@@ -471,8 +542,13 @@ async def retrieve(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
     and `handle_node_error` classifies these as `RETRIEVAL_UNAVAILABLE`. The one degradation
     is inside `retrieve_for_turn` — a *derived* probe may fail without failing the turn,
     because R-45(3) makes probes additive to a query that is always searched itself.
+
+    **The query's arm may already have run** (T-311): `route` starts it concurrently with the
+    classification call and leaves the hits in `ctx.prefetch`, which `retrieve_for_turn`
+    consumes if it was filled for this probe under this scope. That changes when the search
+    happened and nothing else — not the scope, not the merge, and not the direction this node
+    fails in, since a prefetched arm that raised is re-raised here.
     """
-    from app.db.repositories.retrieval import HybridRetriever
     from app.rag.search import retrieve_for_turn
 
     ctx = runtime.context
@@ -484,21 +560,15 @@ async def retrieve(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
         log.warning("graph.mentions_all_unparseable", conversation_id=str(ctx.conversation_id))
         return {"retrieved_chunk_ids": []}
 
-    embeddings = ctx.embeddings
-    if embeddings is None:
-        from app.services.embeddings import get_embedding_client
-
-        embeddings = get_embedding_client()
-
+    embeddings, retriever_factory = _retrieval_deps(ctx)
     hits = await retrieve_for_turn(
         query=state.get("query", ""),
         sub_queries=state.get("sub_queries", []),
         filters=filters,
         sessionmaker=ctx.sessionmaker,
         embeddings=embeddings,
-        # FR-RET-01's committed default when nothing is injected. `PgVectorRetriever` stays
-        # reachable through the factory as the sanctioned dense-only fallback.
-        retriever_factory=ctx.retriever_factory or HybridRetriever,
+        retriever_factory=retriever_factory,
+        prefetch=ctx.prefetch,
     )
     return {"retrieved_chunk_ids": [str(hit.chunk_id) for hit in hits]}
 
