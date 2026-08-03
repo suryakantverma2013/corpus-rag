@@ -365,12 +365,40 @@ def _live_sources() -> list[PromptSource]:
     ]
 
 
+def _live_diagnostic(result, segments, dropped: int) -> str:  # noqa: ANN001
+    """Everything needed to diagnose a live citation failure, in one assertion message.
+
+    T-313 exists because this test failed twice and **the failure message was never
+    captured**, leaving a real observation unusable — nine clean full runs later the cause is
+    still unknown, and the only cheap insurance is that the *next* occurrence explains itself.
+    A live assertion about model behaviour is a probability, not a property, so it will
+    eventually fail again; what must not happen again is failing without evidence.
+    """
+    return (
+        f"\n  cited      : {cited_chunk_ids(segments)}"
+        f"\n  dropped    : {dropped}"
+        f"\n  model      : {result.model}"
+        f"\n  tokens     : prompt={result.prompt_tokens} completion={result.completion_tokens}"
+        f"\n  source_ids : {list(result.source_ids)}"
+        f"\n  answer     : {result.text!r}"
+    )
+
+
 async def test_live_the_answer_cites_the_passage_that_supports_it() -> None:
     """The only test that can show the citation contract works at all.
 
     `SYSTEM_PROMPT` *asks* for `[S<n>]` markers; whether a real model obliges — and whether it
     picks the right one — is not something a fake can vouch for. If this fails, the prompt is
     wrong, not the parser.
+
+    **The strict `== ["c1"]` is deliberate and was re-confirmed by measurement (T-313).** The
+    fixture deliberately includes a third, on-topic-but-non-answering passage, so the obvious
+    reading — that the assertion is over-strict and a good answer citing the overview too
+    would fail it — was the leading hypothesis for why this test was once intermittently red.
+    It is **not supported**: over **26 consecutive live runs** of this exact call, `gpt-4o`
+    cited `["c1"]` and nothing else, every time. Loosening it to "cited first" would therefore
+    weaken a test that is measurably accurate, so the assertion stays and the diagnostics get
+    better instead. (R-48's original "5/5" is superseded by that 26/26.)
     """
     chat, settings = _live_chat()
     try:
@@ -384,11 +412,12 @@ async def test_live_the_answer_cites_the_passage_that_supports_it() -> None:
         await chat.aclose()
 
     segments, dropped = split_answer_segments(result.text, result.source_ids)
-    assert dropped == 0, f"the model cited a source it was not given: {result.text!r}"
-    assert "14 days" in result.text
+    report = _live_diagnostic(result, segments, dropped)
+    assert dropped == 0, f"the model cited a source it was not given:{report}"
+    assert "14 days" in result.text, f"the answer does not carry the fact it was asked for:{report}"
     # The answering passage is the second one, so a correct citation resolves to `c1`.
-    assert cited_chunk_ids(segments) == ["c1"], result.text
-    assert result.prompt_tokens and result.completion_tokens
+    assert cited_chunk_ids(segments) == ["c1"], f"wrong or extra citation:{report}"
+    assert result.prompt_tokens and result.completion_tokens, f"usage was not reported:{report}"
 
 
 async def test_live_an_unsupported_question_is_declined_rather_than_answered() -> None:

@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 
 from app.db.enums import Feedback
+from app.db.models.conversation import Conversation
 from app.db.models.message import Message
 from app.db.repositories.base import BaseRepository
 
@@ -95,6 +96,57 @@ class MessageRepository(BaseRepository[Message]):
             .limit(limit)
         )
         return list(reversed(list((await self.session.scalars(stmt)).all())))
+
+    async def count_by_conversation(self, conversation_id: uuid.UUID) -> int:
+        """How many messages this conversation holds (T-402).
+
+        The send route derives `RAGState.turn_index` from it — monotone per thread, which is
+        all FR-ORC-03 and the resume diagnostics ask of it. Counted in the database rather
+        than by loading the transcript: this runs on every send, and the one thing the caller
+        needs is a number.
+        """
+        stmt = (
+            select(func.count())
+            .select_from(Message)
+            .where(Message.conversation_id == conversation_id)
+        )
+        return int(await self.session.scalar(stmt) or 0)
+
+    async def delete_by_conversation(self, conversation_id: uuid.UUID) -> int:
+        """Remove every message of a conversation, returning the count (T-401).
+
+        A bulk `DELETE` rather than loading and deleting per row: FR-SBR-07 deletes the whole
+        chat, and there is no per-message hook to run. Nothing holds a foreign key to
+        `messages`, so this needs no ordering of its own — but the *conversation* row does,
+        which is why the caller deletes this first.
+        """
+        result = await self.session.execute(
+            delete(Message).where(Message.conversation_id == conversation_id)
+        )
+        await self.session.flush()
+        return int(result.rowcount or 0)
+
+    async def get_owned(self, message_id: uuid.UUID, *, owner_id: uuid.UUID) -> Message | None:
+        """One message, or ``None`` if it does not exist **or sits in someone else's chat** (T-403).
+
+        `messages` carries no `owner_id` — ownership is the conversation's (§4.16) — so the
+        predicate is a join, reaching through one table exactly as
+        `KnowledgeJobRepository.get_scoped` reaches through `documents`.
+
+        Owner-scoped **in the query**, never by loading the row and comparing in Python (the
+        convention FR-RET-04 / NFR-SEC-06 set and `ConversationRepository.get_owned` follows).
+        Here it also keeps the two cases indistinguishable, which is R-54: a foreign id is
+        `404` and never `403` (NFR-SEC-02), for an administrator too, and there is no widening.
+
+        Deliberately **not** filtered on `role`: this is an ownership lookup and T-404's
+        Regenerate needs the identical one. Which roles a route acts on is that route's rule.
+        """
+        stmt = (
+            select(Message)
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .where(Message.id == message_id, Conversation.owner_id == owner_id)
+        )
+        return (await self.session.scalars(stmt)).first()
 
     async def set_feedback(self, message: Message, feedback: Feedback | None) -> Message:
         message.feedback = feedback

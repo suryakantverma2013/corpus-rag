@@ -1002,12 +1002,134 @@ async def review(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
     return {"outcome": "review", "answer": state.get("answer") or ABSTAIN_EMPTY_SCOPE}
 
 
+def _should_persist(state: RAGState) -> bool:
+    """Does this turn become a `messages` row? (T-402)
+
+    `answered` and `abstained` do: an abstention is a response (R-23), it is what the user
+    read, and FR-MSG-08 Regenerate needs a row to replace.
+
+    `error` does **not**. The FR-ERR-04 copy goes to the client over the stream and stops
+    there, so a provider blip does not leave `"System Failure: Please try again."` in a
+    durable transcript, counted by the FR-ANL cards and — the sharper cost — charged against
+    the NFR-CAP-01 budget that R-51(4) derives from `messages`. R-43(5) already records that
+    an errored turn is logs-only until T-604 supplies durable records; this keeps that true.
+
+    `blocked` splits, because two unrelated events share the outcome. An injection-blocked
+    turn is a response to a question the user actually asked and belongs in their transcript
+    (R-44(5) gives it its own copy for exactly that reason). An FR-ORC-02 access denial is
+    not their conversation at all — and on the branch that produces it the conversation may
+    not even exist any more (`govern`'s `no_such_conversation`), so the insert would fail on
+    its own foreign key.
+    """
+    outcome = state.get("outcome")
+    if outcome in ("answered", "abstained"):
+        return True
+    if outcome == "blocked":
+        return state.get("injection_verdict") == "blocked"
+    return False
+
+
+async def _persist_turn(state: RAGState, ctx: RAGContext, *, latency_ms: int | None) -> str | None:
+    """Write the AI `messages` row for this turn and return its id (T-402, §4.16, FR-MSG-06).
+
+    **The chunk read here is load-bearing and R-49(3) leans on it.** The gate does no database
+    work at all, on the argument that this read runs a superstep later and re-checks
+    FR-CIT-06 (1)/(3)/(5) for free: a chunk deleted or revoked between the gate and now is
+    absent from `hits` and its citation is dropped by :func:`app.rag.citations.build_citations`
+    rather than rendered as a chip addressing nothing. Weakening or removing it reopens those
+    checks at serve time.
+
+    It goes through `_retrieval_filter` — the *same* scope helper `retrieve`, `rerank` and
+    `generate` use — for the reason R-47(5) records: a second construction of the FR-ORC-06
+    scope is how the R-46(2) hole reopens one node later.
+
+    `split_answer_segments` is **the one parser** (R-48(4)). It is not re-derived here and
+    must never be: a marker map rebuilt from a differently ordered collection validates
+    against the wrong set and passes (R-44(7)).
+
+    Three things this deliberately does **not** write:
+
+    * **`evaluation`** — that column is DeepEval's alone (R-50). It stays NULL until
+      `workers/evaluate.py` fills it, and `RAGState.groundedness` never goes near it: the
+      gate's structural number and Faithfulness measure the same property by different means
+      and must not be conflated in front of one user (R-49(1), OI-34 as resolved).
+    * **a substituted FR-CIT-04 score** — absent when the reranker failed open (R-47(2)).
+    * **`feedback`** — FR-MSG-08's column, written by T-403.
+    """
+    from app.db.enums import MessageRole
+    from app.db.models.message import Message
+    from app.db.repositories.retrieval import fetch_chunks
+    from app.rag.citations import build_citations
+    from app.rag.generation import cited_chunk_ids, split_answer_segments
+
+    answer = state.get("answer")
+    if not answer:  # pragma: no cover - every persisted outcome sets one
+        return None
+
+    # Only a model-authored answer indexes into the grounding set. An abstention or a blocked
+    # turn carries *our* copy, which no `[S<n>]` marker addresses — passing the grounding set
+    # there would invite a stray marker in a copy string to resolve to a real passage.
+    grounded = state.get("outcome") == "answered"
+    source_ids = [str(cid) for cid in state.get("reranked_chunk_ids") or []] if grounded else []
+
+    segments, _ = split_answer_segments(answer, source_ids)
+    cited = _parse_chunk_ids(cited_chunk_ids(segments))
+
+    async with ctx.sessionmaker() as session:
+        hits = []
+        if cited:
+            filters = _retrieval_filter(state, ctx)
+            if filters is not None:
+                hits = await fetch_chunks(session, cited, filters=filters)
+
+        envelope, dropped = build_citations(
+            segments=segments,
+            source_ids=source_ids,
+            hits=hits,
+            scores=state.get("rerank_scores") or [],
+        )
+        if dropped:
+            log.warning(
+                "graph.citations_dropped",
+                conversation_id=str(ctx.conversation_id),
+                dropped=dropped,
+                cited=len(cited),
+            )
+
+        # Minted here rather than left to the column default, which SQLAlchemy applies at
+        # flush: the id is needed *after* the commit and reading it back off the instance
+        # would make this depend on flush semantics. `str(None)` is a truthy `"None"`, so
+        # getting that wrong sets `answer_message_id` to a string that looks persisted and is
+        # not — the T-201 lesson (`documents` mints its own id for the same reason).
+        message_id = uuid.uuid4()
+        message = Message(
+            id=message_id,
+            conversation_id=ctx.conversation_id,
+            role=MessageRole.AI,
+            content=answer,
+            citations=envelope,
+            model_name=state.get("model_name"),
+            prompt_tokens=state.get("prompt_tokens"),
+            completion_tokens=state.get("completion_tokens"),
+            latency_ms=latency_ms,
+        )
+        session.add(message)
+        await session.commit()
+
+    return str(message_id)
+
+
 async def finalize(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
     """FR-ORC-01 step 6 — the `finally` block: unlock, close telemetry, serve.
 
-    Reached on **every** path, which is what §4.12 precedence note (2) asks for. T-302
-    releases the R-24 lock and writes the telemetry end; T-402 persists the `messages`
-    row and sets `answer_message_id`.
+    Reached on **every** path, which is what §4.12 precedence note (2) asks for. It releases
+    the R-24 lock, writes the telemetry end, and persists the turn's `messages` row
+    (:func:`_persist_turn`) — in that last order deliberately: the row is written *before*
+    the lock is freed, so there is no window in which the GUI is told the turn is over and
+    the answer it should render does not exist yet.
+
+    **Three side effects, three different failure directions**, and none of them may take the
+    turn down (see below).
 
     Clearing `answer` once it is persisted is what makes FR-PER-03 an observable property
     rather than an intention: the state *at rest* — what the next turn loads — is then ids
@@ -1031,7 +1153,42 @@ async def finalize(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
     update: RAGState = {"lock_token": None}
     if state.get("outcome") is None:
         update["outcome"] = "answered"
-    if state.get("answer_message_id"):
+
+    started_at = state.get("started_at")
+    latency_ms = int((time.time() - started_at) * 1000) if started_at is not None else None
+
+    # --- persist the turn (T-402) --------------------------------------------
+    #
+    # Idempotent on resume by construction: `answer_message_id` is checked *before* the
+    # insert, because the app writes through asyncpg and the checkpointer through psycopg
+    # and the two can never share a transaction (R-42, T-302's note). A run that committed
+    # this row and then died before its checkpoint landed resumes here and writes nothing.
+    #
+    # Guarded, because **this node must never raise**: its own error handler routes back to
+    # `finalize`, so an exception here would loop until the recursion limit instead of
+    # failing once. On failure `answer_message_id` stays unset, which leaves `answer` in
+    # state as the run's only copy — the caller still serves it, and nothing is lost that was
+    # not already lost.
+    # **The settled state, not `state`.** `outcome` is written by *this node's* update on the
+    # happy path — the gate routes a passing turn straight here without setting one — so
+    # reading `state` alone sees `None` and treats a successfully answered turn as ungrounded.
+    # That is not a cosmetic difference: `_persist_turn` derives the grounding set from the
+    # outcome, so it would persist every real answer with an empty `source_ids` and drop every
+    # citation on the floor. Caught live, by a turn whose model cited correctly and whose row
+    # came back with no chips.
+    settled: RAGState = {**state, **update}
+    answer_message_id = state.get("answer_message_id")
+    if not answer_message_id and _should_persist(settled):
+        try:
+            answer_message_id = await _persist_turn(settled, ctx, latency_ms=latency_ms)
+        except Exception:
+            log.exception(
+                "graph.persist_failed",
+                conversation_id=str(ctx.conversation_id),
+                turn_index=state.get("turn_index"),
+            )
+    if answer_message_id:
+        update["answer_message_id"] = answer_message_id
         update["answer"] = None
 
     token = state.get("lock_token")
@@ -1047,9 +1204,11 @@ async def finalize(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
                 exc_info=True,
             )
 
-    started_at = state.get("started_at")
-    if started_at is not None:
-        latency_ms = int((time.time() - started_at) * 1000)
+    if latency_ms is not None:
+        # The **same** number `_persist_turn` wrote to `messages.latency_ms`, not a second
+        # reading taken after it. R-43(5) makes those metric columns the FR-ORC-03 telemetry
+        # record for MVP, so NFR-OBS-02's "the stats panel matches telemetry" holds by
+        # identity — which it would stop doing the moment the two clocks were read apart.
         outcome = update.get("outcome") or state.get("outcome")
         if outcome == "error":
             telemetry.turn_failure(

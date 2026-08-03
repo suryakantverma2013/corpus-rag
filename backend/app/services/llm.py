@@ -639,6 +639,29 @@ class OpenAIChatClient:
             raise
         except Exception as exc:
             raise _translate(exc) from exc
+        finally:
+            # Release the response deterministically on the **abandonment** path (T-313).
+            #
+            # Read what this does and does not buy, because the obvious reading is wrong. On
+            # natural exhaustion the SDK already closes the response itself — `__stream__` has
+            # its own `finally: await response.aclose()` — so this call is redundant on the
+            # happy path. It earns its place when iteration is abandoned mid-stream (a
+            # translated error above), where the SDK's `finally` would otherwise run only when
+            # the garbage collector gets to the generator.
+            #
+            # What it does **not** fix, and cannot: `AsyncStream.__stream__` `break`s on the
+            # `[DONE]` sentinel, leaving its private `_iter_events` generator suspended and
+            # unclosed. That is what emits `Task was destroyed but it is pending` and
+            # `coroutine 'AsyncStream._iter_events' was never awaited` at loop shutdown. It is
+            # noise, not a leak — the connection is already back in the pool by then — and it
+            # is unreachable from here, since nothing outside the SDK holds that generator.
+            # Investigated under T-313 and cleared as a suspect; do not "fix" it again.
+            closer = getattr(stream, "close", None)
+            if closer is not None:
+                try:
+                    await closer()
+                except Exception:  # noqa: BLE001 - cleanup must not mask the real error
+                    log.debug("llm.stream_close_failed", exc_info=True)
 
     async def _complete_json(
         self,
