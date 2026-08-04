@@ -322,6 +322,51 @@ async def test_the_message_frame_matches_the_persisted_row(
     assert frame["message"]["segs"] == [{"text": ABSTAIN_EMPTY_SCOPE}]
 
 
+async def test_a_second_turn_writes_its_own_answer_row(
+    client: httpx.AsyncClient, session: AsyncSession, make_token: Callable[..., str]
+) -> None:
+    """T-406 — a conversation is a *checkpoint lineage*, not a variable scope.
+
+    `thread_config` gives a conversation one `thread_id` for its whole life (FR-PER-02) and
+    every `RAGState` channel is a plain `LastValue` with no reducer (R-42(4)), so a channel the
+    turn's input does not seed carries over from the previous turn. `finalize` guards its INSERT
+    with `answer_message_id`, which turn 2 therefore loads already set — skipping the write and
+    serving **turn 1's row** as turn 2's answer.
+
+    This is the test the suite could not have: every other case here sends one message per
+    conversation, and *a suite that sends one message per conversation cannot tell a working
+    second turn from a broken one* (R-54's live lesson, generalised). It works because
+    `CHECKPOINTER_BACKEND` defaults to `postgres` and the checkpointer writes on its own psycopg
+    connection outside this transaction — so the two POSTs genuinely share a thread.
+    """
+    owner, headers = await _caller(session, make_token)
+    conversation = await _conversation(session, owner_id=owner)
+    url = f"/api/v1/conversations/{conversation.id}/messages"
+
+    first = await client.post(url, json={"query": _QUESTION}, headers=headers)
+    second = await client.post(url, json={"query": "and what about exchanges?"}, headers=headers)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+    rows = await _messages(session, conversation.id)
+    assert [row.role for row in rows] == [
+        MessageRole.USER,
+        MessageRole.AI,
+        MessageRole.USER,
+        MessageRole.AI,
+    ], "the second turn wrote no answer row of its own"
+    assert rows[1].id != rows[3].id
+
+    served = [
+        data["message"]["id"]
+        for response in (first, second)
+        for event, data in _frames(response.text)
+        if event == "message"
+    ]
+    assert served == [str(rows[1].id), str(rows[3].id)], "a turn served another turn's row"
+
+
 # ---- list ----
 
 

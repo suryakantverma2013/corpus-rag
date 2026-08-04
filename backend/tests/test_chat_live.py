@@ -198,3 +198,56 @@ async def test_live_a_grounded_turn_persists_a_citation_to_the_answering_passage
     assert body["evaluation"] is None, "a human thumb is not a judge score (R-49(1), OI-34)"
     await session.refresh(answer)
     assert answer.feedback is Feedback.UP
+
+
+@pytest.mark.usefixtures("_live")
+async def test_live_a_second_turn_is_answered_on_its_own_grounding(
+    client: httpx.AsyncClient, session: AsyncSession, make_token: Callable[..., str]
+) -> None:
+    """T-406, against real models — the symptom, not the mechanism.
+
+    The mocked two-turn tests assert that turn 2 writes *a row of its own*. Only a live turn
+    can assert the thing that made this worth stopping T-404 for: that the second row is a
+    **different, correct answer to the second question**, grounded in the passage that question
+    is about. Before the per-turn reset, `finalize` inherited turn 1's `answer_message_id`,
+    skipped its INSERT, and the driver reloaded and served turn 1's refund answer to a question
+    about annual leave.
+
+    Asserted as a property, not as an exact citation set (T-313): the leave passage must be
+    among the cited ones, and the refund answer must not be what came back.
+    """
+    headers, conversation = await _seed(session, make_token)
+    url = f"/api/v1/conversations/{conversation.id}/messages"
+
+    first = await client.post(url, json={"query": _QUESTION}, headers=headers)
+    assert first.status_code == 200, first.text
+    second = await client.post(
+        url,
+        json={"query": "How many unused annual leave days can I carry over?"},
+        headers=headers,
+    )
+    assert second.status_code == 200, second.text
+
+    rows = list(
+        await session.scalars(
+            select(Message).where(Message.conversation_id == conversation.id).order_by(Message.seq)
+        )
+    )
+    assert [row.role for row in rows] == [
+        MessageRole.USER,
+        MessageRole.AI,
+        MessageRole.USER,
+        MessageRole.AI,
+    ]
+    refunds, leave = rows[1], rows[3]
+    diagnostic = f"\nturn 1: {refunds.content!r}\nturn 2: {leave.content!r}"
+
+    assert leave.id != refunds.id, f"the second turn served the first turn's row{diagnostic}"
+    assert leave.content != refunds.content, f"the second answer is a copy of the first{diagnostic}"
+
+    quotes = {seg["quote"] for seg in leave.citations[SEGMENTS_KEY] if seg.get("isCite")}
+    assert quotes, f"the second turn cited nothing{diagnostic}"
+    assert _PASSAGES[0] in quotes, (
+        f"the second answer is not grounded in the passage its question is about{diagnostic}"
+    )
+    assert leave.model_name, "a real turn meters its own generation (R-43(5))"

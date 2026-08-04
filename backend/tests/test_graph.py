@@ -53,7 +53,7 @@ from app.rag.graph import (
 from app.rag.prompts import SYSTEM_PROMPT
 from app.rag.retrieval import RetrievalFilter, RetrievedChunk
 from app.rag.search import RETRIEVAL_COMPLETED
-from app.rag.state import RAGContext, RAGState
+from app.rag.state import RAGContext, RAGState, fresh_turn_state
 from app.security.prompt_injection import CONTEXT_FENCE_OPEN
 from app.services.llm import ChatResponseError, ChatUnavailableError, FakeChatClient
 from app.services.processing_lock import MemoryProcessingLockStore
@@ -244,10 +244,17 @@ def _context(
 
 
 async def _run(context: RAGContext, saver: InMemorySaver | None = None, **state: object):
-    """Run one turn to completion; return `(executed_node_names, final_state_values)`."""
+    """Run one turn to completion; return `(executed_node_names, final_state_values)`.
+
+    The payload starts from `fresh_turn_state()` because that is what the one production driver
+    does (T-406) — a harness that seeded fewer channels than `run_turn` would make every
+    second-turn test here pass against a graph that carries state over in production.
+    `test_run_turn_seeds_every_channel` is what pins the real driver to the same helper; this
+    only keeps the harness honest about it.
+    """
     compiled = build_graph(saver or InMemorySaver())
     config = thread_config(context.conversation_id)
-    payload: dict = {"query": "what do my documents say?", "turn_index": 0}
+    payload: dict = {**fresh_turn_state(), "query": "what do my documents say?", "turn_index": 0}
     payload.update(state)
     executed: list[str] = []
     async for chunk in compiled.astream(
@@ -628,6 +635,11 @@ async def test_a_denied_turn_takes_no_lock_and_opens_no_span() -> None:
     `finalize` therefore has neither a token to release nor a span to close, and must
     tolerate both absences — the second is not hypothetical, since a latency computed from
     a missing `started_at` would raise inside the one node R-42(5) makes unskippable.
+
+    Since T-406 "no span" is `started_at is None` rather than a missing key: a channel the
+    per-turn reset seeds always exists. That is the assertion `finalize` actually guards on
+    (`is not None`), so this is the stronger form — and the reason the reset seeds `None` and
+    not `0.0`, which would close a span that never opened.
     """
     context = _context(conversation_owner=uuid.uuid4())
     lock = context.processing_lock
@@ -639,7 +651,7 @@ async def test_a_denied_turn_takes_no_lock_and_opens_no_span() -> None:
     assert executed == ["govern", "finalize"]
     assert lock.calls == []
     assert values["outcome"] == "blocked"
-    assert "started_at" not in values
+    assert values["started_at"] is None
 
     events = {entry["event"] for entry in logs}
     assert telemetry.TURN_DENIED in events
@@ -1843,6 +1855,226 @@ async def test_the_gate_logs_no_payload_text(caplog: pytest.LogCaptureFixture) -
         assert "what do my documents say?" not in rendered
         assert "refunds take 30 days" not in rendered
         assert "handbook.pdf" not in rendered
+
+
+# --- the per-turn reset (T-406) -----------------------------------------------
+#
+# One `thread_id` serves a conversation for its whole life (FR-PER-02) and every channel is a
+# `LastValue` with no reducer (R-42(4)), so a channel the input does not seed holds *last
+# turn's* value. Every test below runs two turns on **one saver and one context**, which is
+# the shape none of the tests above have — and the reason four defects shipped green.
+
+
+async def test_a_second_turn_on_one_thread_persists_its_own_answer() -> None:
+    """`finalize` guards its INSERT with `answer_message_id`, which turn 2 used to inherit.
+
+    The consequence was not a missing row but a *wrong* one: the driver reloads the id from
+    state, so turn 2 served turn 1's answer to turn 2's question.
+    """
+    saver = InMemorySaver()
+    context = _context()
+
+    await _run(context, saver=saver, user_message_id=str(uuid.uuid4()))
+    _, values = await _run(
+        context,
+        saver=saver,
+        query="and exchanges?",
+        turn_index=1,
+        user_message_id=str(uuid.uuid4()),
+    )
+
+    rows = _persisted(context)
+    assert len(rows) == 2, "the second turn wrote no answer row of its own"
+    assert rows[0].id != rows[1].id
+    assert values["answer_message_id"] == str(rows[1].id)
+
+
+async def test_a_stale_error_outcome_does_not_suppress_the_next_turn_s_row() -> None:
+    """The sticky-`outcome` defect, which the id test above cannot see.
+
+    `finalize` writes `outcome` only when it is unset, and `_should_persist` refuses an
+    `error` (R-54(3)) — so one provider blip used to make a conversation stop recording
+    answers *for ever*, while `graph.turn.failure` fired on healthy turns. An errored turn
+    never sets `answer_message_id`, so this is genuinely independent.
+    """
+    saver = InMemorySaver()
+    retriever = _StubRetriever(error=SQLAlchemyError("retrieval is down"))
+    context = _context(retriever=retriever)
+
+    _, failed = await _run(context, saver=saver, user_message_id=str(uuid.uuid4()))
+    assert failed["outcome"] == "error"
+    assert _persisted(context) == [], "an errored turn is served, never stored"
+
+    retriever.error = None
+    _, values = await _run(
+        context,
+        saver=saver,
+        query="and exchanges?",
+        turn_index=1,
+        user_message_id=str(uuid.uuid4()),
+    )
+
+    assert values["outcome"] == "abstained"
+    assert values["error_code"] is None
+    assert len(_persisted(context)) == 1, "a healthy turn after an errored one must persist"
+
+
+async def test_an_abstention_does_not_inherit_the_previous_turn_s_model_name() -> None:
+    """The only test that forces "reset every channel" rather than "reset `answer_message_id`".
+
+    `abstain` writes no `model_name` or token counts — correctly, it did not call a model — so
+    without the reset the empty-scope abstention persists the *previous* turn's metering into
+    `messages`, where R-43(5) makes those columns the FR-ORC-03 telemetry record and the
+    FR-ANL cards read them.
+    """
+    saver = InMemorySaver()
+    retriever = _StubRetriever([_chunk("refunds take 30 days")])
+    context = _context(retriever=retriever)
+
+    await _run(context, saver=saver, user_message_id=str(uuid.uuid4()))
+    grounded = _persisted(context)[0]
+    assert grounded.model_name is not None, "the first turn must actually meter something"
+
+    retriever.hits = []
+    await _run(
+        context,
+        saver=saver,
+        query="and exchanges?",
+        turn_index=1,
+        user_message_id=str(uuid.uuid4()),
+    )
+
+    abstained = _persisted(context)[1]
+    assert abstained.content == ABSTAIN_EMPTY_SCOPE
+    assert abstained.model_name is None
+    assert abstained.prompt_tokens is None
+    assert abstained.completion_tokens is None
+
+
+async def test_the_retry_budget_is_not_carried_across_turns() -> None:
+    """FR-ORC-07's bound is per turn; carried over, one retry exhausts every later turn's."""
+    saver = InMemorySaver()
+    context = _context()
+
+    _, spent = await _run(context, saver=saver, retry_count=3, user_message_id=str(uuid.uuid4()))
+    assert spent["retry_count"] == 3
+
+    _, values = await _run(
+        context,
+        saver=saver,
+        query="and exchanges?",
+        turn_index=1,
+        user_message_id=str(uuid.uuid4()),
+    )
+    assert values["retry_count"] == 0
+
+
+def test_the_per_turn_reset_names_every_state_field() -> None:
+    """The static half of the drift guard (T-406).
+
+    A channel missing from `fresh_turn_state` is a carry-over that ships silently, so the
+    helper is asserted against the type hints *and* against the frozen set — the second is not
+    redundant, since adding a field to both `RAGState` and the reset while forgetting
+    `_FROZEN_FIELDS` is exactly the contract change R-42(2) wants noticed.
+    """
+    assert set(fresh_turn_state()) == set(get_type_hints(RAGState)) == _FROZEN_FIELDS
+
+
+async def test_run_turn_seeds_every_channel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The dynamic half, and the load-bearing one.
+
+    The static test cannot see a driver that stopped using the helper — and `run_turn` is the
+    only caller of the graph, so if its payload drifts the reset is decorative. Asserted
+    against `_FROZEN_FIELDS` rather than against `fresh_turn_state()` so that a driver seeding
+    the fields *by hand* still fails: the state contract must live in one place.
+    """
+    from app.services import chat as chat_service
+
+    recorded: dict[str, object] = {}
+    user_message_id = uuid.uuid4()
+
+    class _Recorder:
+        async def astream(self, payload: dict, **kwargs: object):  # noqa: ARG002
+            recorded.update(payload)
+            return
+            yield  # pragma: no cover - makes this an async generator
+
+        async def aget_state(self, config: object):  # noqa: ARG002
+            return types.SimpleNamespace(values={"user_message_id": str(user_message_id)})
+
+    async def _get_graph() -> _Recorder:
+        return _Recorder()
+
+    monkeypatch.setattr(graph_module, "get_graph", _get_graph)
+    conversation = Conversation(id=uuid.uuid4(), owner_id=OWNER_ID, tenant_id=TENANT_ID)
+
+    events = chat_service.run_turn(
+        conversation=conversation,
+        owner_id=OWNER_ID,
+        query="what do my documents say?",
+        user_message_id=user_message_id,
+        turn_index=0,
+        sessionmaker=lambda: _StubSession(conversation),  # type: ignore[arg-type]
+    )
+    async for _ in events:
+        pass
+
+    assert set(recorded) == _FROZEN_FIELDS
+
+
+async def test_a_snapshot_from_another_run_is_never_served(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`aget_state` is **thread**-latest, not run-scoped (T-406, OI-36).
+
+    Two runs in flight on one conversation — two browser tabs today, a Regenerate click after
+    T-404 — leave whichever finished last in the snapshot. Serving it would hand this caller a
+    row answering a different question; FR-ERR-04 copy is wrong but recoverable, so the guard
+    refuses rather than guesses.
+    """
+    from app.services import chat as chat_service
+
+    stranger = uuid.uuid4()
+
+    class _Recorder:
+        async def astream(self, payload: dict, **kwargs: object):  # noqa: ARG002
+            return
+            yield  # pragma: no cover - makes this an async generator
+
+        async def aget_state(self, config: object):  # noqa: ARG002
+            return types.SimpleNamespace(
+                values={
+                    "user_message_id": str(stranger),
+                    "outcome": "answered",
+                    "answer_message_id": str(uuid.uuid4()),
+                    "answer": "another question's answer",
+                }
+            )
+
+    async def _get_graph() -> _Recorder:
+        return _Recorder()
+
+    monkeypatch.setattr(graph_module, "get_graph", _get_graph)
+    conversation = Conversation(id=uuid.uuid4(), owner_id=OWNER_ID, tenant_id=TENANT_ID)
+
+    with structlog.testing.capture_logs() as logs:
+        events = [
+            event
+            async for event in chat_service.run_turn(
+                conversation=conversation,
+                owner_id=OWNER_ID,
+                query="what do my documents say?",
+                user_message_id=uuid.uuid4(),
+                turn_index=1,
+                sessionmaker=lambda: _StubSession(conversation),  # type: ignore[arg-type]
+            )
+        ]
+
+    served = events[-1]
+    assert served.message is None
+    assert served.text != "another question's answer"
+    assert served.outcome is None
+    assert any(entry["event"] == "chat.snapshot_mismatch" for entry in logs)
 
 
 # --- the FR-PER-03 lightweight-state contract ---------------------------------

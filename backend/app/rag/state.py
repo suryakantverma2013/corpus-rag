@@ -57,6 +57,7 @@ __all__ = [
     "RAGContext",
     "RAGState",
     "Strategy",
+    "fresh_turn_state",
 ]
 
 #: FR-RET-03 retrieval strategies. `graph` falls back to hybrid until GraphRAG ships (R-21).
@@ -111,7 +112,10 @@ class RAGState(TypedDict, total=False):
     mentioned_document_ids: list[str]
 
     # --- §4.12 prologue (T-302) ---
-    started_at: float
+    #: Wall clock, opened by `telemetry_start`. Optional since T-406: the per-turn reset must be
+    #: able to express "no span yet", and a `0.0` sentinel would satisfy `finalize`'s
+    #: `is not None` guard and close a span the denial path never opened (R-43(5) pairing).
+    started_at: float | None
     #: Opaque handle for the R-24 per-user action gate; released by `finalize`.
     lock_token: str | None
 
@@ -167,6 +171,66 @@ class RAGState(TypedDict, total=False):
     #: the checkpointer through psycopg, so the two can never be atomic — this field is what
     #: makes `finalize` idempotent on resume instead of writing a second answer row.
     answer_message_id: str | None
+
+
+def fresh_turn_state() -> RAGState:
+    """Every channel at its start-of-turn value (T-406). Spread into a run's input.
+
+    **A thread is a checkpoint lineage, not a variable scope.** `thread_config` gives a
+    conversation one `thread_id` for its whole life (FR-PER-02) and every channel above is a
+    plain `LastValue` with no reducer (R-42(4)), so anything the input does not seed is *last
+    turn's value*, silently. That is not a corner case: it made `finalize` skip its INSERT and
+    serve turn 1's row as turn 2's answer, made a single errored turn suppress persistence for
+    the life of the chat, and made an abstention inherit the previous turn's `model_name` and
+    token counts.
+
+    **Every field here is per-turn — there is no conversation-scoped channel**, by ruling and
+    not by accident: conversation state lives in `messages` (R-42(1), OI-23) and the caller's
+    identity in the never-checkpointed `RAGContext` (R-42(3)). So the correct reset is *all of
+    them*, and a new channel that does not appear below is a carry-over waiting to ship —
+    which is why `tests/test_graph.py` asserts this dict against `RAGState` and against the
+    frozen field set, and asserts that `run_turn` still seeds every channel.
+
+    The reset belongs in the **input**, not in a node at `START`. The tempting reason — "a
+    START node would re-run on resume and wipe a run parked on `interrupt()`" — was *measured
+    and is false*: a resume passes `None`, langgraph re-enters the pending task and never
+    re-runs the prologue, and `test_checkpointer.py`'s resume test stays green against a
+    prototype that put the reset in a node. The real reasons are two, and both are about drift:
+    such a node must read the turn's *input* fields out of the state it is resetting and write
+    them back, so the input list becomes a second hand-maintained copy of the contract that
+    grows with every field a driver seeds (T-404 adds one); and nothing can then check the
+    driver, where the input reset makes `test_run_turn_seeds_every_channel` possible. It also
+    costs a superstep and a checkpoint write per turn for something the input expresses free.
+    """
+    return {
+        "query": "",
+        "user_message_id": "",
+        "turn_index": 0,
+        "mentioned_document_ids": [],
+        "started_at": None,
+        "lock_token": None,
+        "injection_verdict": None,
+        "injection_rule": None,
+        "query_class": None,
+        # FR-RET-03's own default, and the value `route` fails open to (R-45(2)).
+        "strategy": "hybrid",
+        "sub_queries": [],
+        "retrieved_chunk_ids": [],
+        "reranked_chunk_ids": [],
+        "rerank_scores": [],
+        "answer": None,
+        "model_name": None,
+        "prompt_tokens": None,
+        "completion_tokens": None,
+        "groundedness": None,
+        "gate_verdict": None,
+        "gate_reason": None,
+        "citation_ids": [],
+        "retry_count": 0,
+        "outcome": None,
+        "error_code": None,
+        "answer_message_id": None,
+    }
 
 
 @dataclass(frozen=True, slots=True)

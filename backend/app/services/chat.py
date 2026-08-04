@@ -202,7 +202,7 @@ async def run_turn(
     by this call remembering to pass `False`.
     """
     from app.rag.graph import get_graph, thread_config
-    from app.rag.state import RAGContext
+    from app.rag.state import RAGContext, fresh_turn_state
 
     settings = settings or get_settings()
     result = result if result is not None else TurnResult()
@@ -216,9 +216,16 @@ async def run_turn(
     )
     config = thread_config(conversation.id, settings)
 
+    # **The reset is not optional and is not tidiness** (T-406). The thread is one checkpoint
+    # lineage for the conversation's whole life (FR-PER-02) and every channel is a `LastValue`
+    # with no reducer (R-42(4)), so a channel this input does not seed silently holds *last
+    # turn's* value — which made `finalize` skip its INSERT and serve turn 1's row as turn 2's
+    # answer. `fresh_turn_state` owns the field list so that this caller, T-404's and any
+    # future one cannot each carry their own copy of the state contract.
     stage: str | None = None
     async for frame in graph.astream(
         {
+            **fresh_turn_state(),
             "query": query,
             "user_message_id": str(user_message_id),
             "turn_index": turn_index,
@@ -243,6 +250,25 @@ async def run_turn(
     # `GRAPH_DURABILITY=sync` (R-42(10)) is what makes this read see the final superstep.
     snapshot = await graph.aget_state(config)
     state: dict[str, Any] = dict(snapshot.values or {})
+
+    # That read is **thread**-latest, not run-scoped: the thread is shared by every turn of the
+    # conversation (FR-PER-02), so two runs in flight at once — two browser tabs today, one
+    # Regenerate click after T-404 — leave whichever finished last in the snapshot, and the
+    # other call would serve a row belonging to a different question. Refuse instead: serving
+    # FR-ERR-04 copy for a turn whose row did commit is recoverable by a reload, serving another
+    # turn's answer is not. Reconstructing this run's result by merging the update frames was
+    # rejected for the reason above — it is a second implementation of the checkpointer's merge,
+    # wrong exactly on the failure path. The real fix (per-run `checkpoint_ns`, or a
+    # conversation-scoped gate) is OI-36.
+    if state.get("user_message_id") != str(user_message_id):
+        log.warning(
+            "chat.snapshot_mismatch",
+            conversation_id=str(conversation.id),
+            user_message_id=str(user_message_id),
+            snapshot_user_message_id=state.get("user_message_id"),
+            turn_index=turn_index,
+        )
+        state = {}
 
     result.outcome = state.get("outcome")
     result.error_code = state.get("error_code")
