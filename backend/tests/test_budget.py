@@ -23,7 +23,12 @@ from app.db.models.message import Message
 from app.db.repositories.conversations import ConversationRepository
 from app.db.repositories.messages import MessageRepository
 from app.db.repositories.users import UserRepository
-from app.rag.budget import ContextUsage, check_submission, conversation_usage
+from app.rag.budget import (
+    ContextUsage,
+    check_regeneration,
+    check_submission,
+    conversation_usage,
+)
 from app.tokens import estimate_tokens
 
 # 400 characters -> 100 tokens under the shared rule, so arithmetic in these tests is exact.
@@ -298,3 +303,64 @@ def test_there_is_no_context_enabled_switch() -> None:
     carry scores.
     """
     assert "enabled" not in ContextSettings.model_fields
+
+
+# --- FR-MSG-08 Regenerate's own projection (T-404) ----------------------------
+
+
+def test_a_full_chat_can_still_regenerate_its_last_answer() -> None:
+    """The test that *is* the guard: plain `check_submission` refuses this and must not be used.
+
+    A regenerate adds **no new question** — the user's turn is already a row — and the answer it
+    is about to write **replaces** one `usage` has already counted. Projecting it as a
+    submission therefore double-counts and refuses precisely the chat a user reaches for
+    Regenerate in: the full one. A control that fails exactly when it is needed is the
+    false-positive failure R-44 calls worse than no control.
+    """
+    settings = _settings(window_tokens=10_400, answer_reserve_tokens=1_500)
+    usage = ContextUsage(used_tokens=10_000, limit_tokens=10_400)
+    replaced = "x" * 8_000  # 2,000 tokens under the shared rule
+
+    check = check_regeneration(usage, replaced, settings=settings)
+
+    assert check.allowed
+    assert check.projected_tokens == 10_000 - 2_000 + 1_500
+    assert not check_submission(usage, "", settings=settings).allowed, (
+        "the submission projection is what this exists to replace"
+    )
+
+
+def test_a_regenerate_is_still_refused_when_the_replacement_cannot_fit() -> None:
+    """The refusal is real, not theoretical: a near-ceiling chat whose last answer is shorter
+    than the reserve genuinely has no room for a new one."""
+    settings = _settings(window_tokens=10_400, answer_reserve_tokens=1_500)
+    usage = ContextUsage(used_tokens=10_300, limit_tokens=10_400)
+
+    check = check_regeneration(usage, "x" * 40, settings=settings)  # 10 tokens
+
+    assert not check.allowed
+    assert check.overflow_tokens > 0
+
+
+def test_the_regenerate_check_reports_the_real_usage_not_the_adjusted_one() -> None:
+    """The `409` body feeds the FR-ANL-03 card, and a card showing a number the meter never
+    displays would read as a bug in the meter."""
+    settings = _settings(window_tokens=10_400, answer_reserve_tokens=1_500)
+    usage = ContextUsage(used_tokens=20_000, limit_tokens=10_400)
+
+    check = check_regeneration(usage, _100_TOKENS, settings=settings)
+
+    assert check.usage.used_tokens == 20_000
+    assert check.projected_tokens == 20_000 - 100 + 1_500
+    assert check.query_tokens == 0, "a regenerate adds no query"
+
+
+def test_a_regenerate_projection_landing_exactly_on_the_limit_is_allowed() -> None:
+    """Ties permissive, matching `check_submission` — the same rule, not a second one."""
+    settings = _settings(window_tokens=10_000, answer_reserve_tokens=1_500)
+    usage = ContextUsage(used_tokens=8_600, limit_tokens=10_000)
+
+    check = check_regeneration(usage, _100_TOKENS, settings=settings)
+
+    assert check.projected_tokens == 10_000
+    assert check.allowed

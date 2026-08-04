@@ -234,14 +234,17 @@ def _cited_ids(envelope: dict[str, Any]) -> tuple[uuid.UUID, ...]:
 
 
 async def _question_for(session: AsyncSession, message: Message) -> str:
-    """The user turn this answer replies to — DeepEval's `input`."""
-    history = await MessageRepository(session).list_before(
+    """The user turn this answer replies to — DeepEval's `input`.
+
+    Delegates to the repository (T-404): Regenerate needs the identical derivation to know
+    *which question to re-run*, and two walks of the same `seq` adjacency would be two chances
+    for the judge to score an answer against a different question than the one regenerated it.
+    The read is now `LIMIT 1` on the index rather than the whole preceding transcript.
+    """
+    question = await MessageRepository(session).preceding_user_message(
         message.conversation_id, message_id=message.id
     )
-    for prior in reversed(history):
-        if prior.role is MessageRole.USER:
-            return prior.content
-    return ""
+    return question.content if question is not None else ""
 
 
 def _skip(message_id: str, reason: str) -> None:

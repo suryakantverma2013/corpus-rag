@@ -10,7 +10,7 @@ import uuid
 
 from sqlalchemy import delete, func, select
 
-from app.db.enums import Feedback
+from app.db.enums import Feedback, MessageRole
 from app.db.models.conversation import Conversation
 from app.db.models.message import Message
 from app.db.repositories.base import BaseRepository
@@ -96,6 +96,78 @@ class MessageRepository(BaseRepository[Message]):
             .limit(limit)
         )
         return list(reversed(list((await self.session.scalars(stmt)).all())))
+
+    async def preceding_user_message(
+        self, conversation_id: uuid.UUID, *, message_id: uuid.UUID
+    ) -> Message | None:
+        """The user turn an answer replies to (T-404, T-309).
+
+        `messages` carries no question↔answer foreign key — §4.16 models a transcript, not a
+        pair — so the link is `seq` adjacency: the nearest `USER` row before this one. That is
+        exactly what a Regenerate needs (the question to re-run) and what the FR-EVL-01 judge
+        needs (DeepEval's `input`), which is why both read it here rather than each walking the
+        transcript in their own way.
+
+        Same scalar-subquery bound as :meth:`list_before`, and for the same reason: a
+        `message_id` from another conversation yields `None` rather than that conversation's
+        last question, because the subquery returns NULL and `seq < NULL` is false for every
+        row. `LIMIT 1` on the index, so this never loads the transcript to find one row.
+        """
+        cutoff = (
+            select(Message.seq)
+            .where(Message.id == message_id, Message.conversation_id == conversation_id)
+            .scalar_subquery()
+        )
+        stmt = (
+            select(Message)
+            .where(
+                Message.conversation_id == conversation_id,
+                Message.seq < cutoff,
+                Message.role == MessageRole.USER,
+            )
+            .order_by(Message.seq.desc())
+            .limit(1)
+        )
+        return (await self.session.scalars(stmt)).first()
+
+    async def latest_ai_message(self, conversation_id: uuid.UUID) -> Message | None:
+        """The newest AI answer in this conversation, or ``None`` (T-404).
+
+        Backs FR-MSG-08's latest-answer-only rule. Regenerating mid-transcript would rewrite an
+        answer that every later turn was generated *from*, and nothing in the spec says what
+        happens to those — so the route compares this row's id with the target's and refuses
+        anything else.
+        """
+        stmt = (
+            select(Message)
+            .where(Message.conversation_id == conversation_id, Message.role == MessageRole.AI)
+            .order_by(Message.seq.desc())
+            .limit(1)
+        )
+        return (await self.session.scalars(stmt)).first()
+
+    async def count_before(self, conversation_id: uuid.UUID, *, message_id: uuid.UUID) -> int:
+        """How many messages precede ``message_id`` — a row's rank in its conversation (T-404).
+
+        A regenerate must re-run the *original* turn's index, not the transcript's current
+        length: `turn_index` correlates the logs of one exchange, and
+        :meth:`count_by_conversation` would now return a larger number for the same turn, so a
+        regenerated turn would appear in telemetry as a turn that never happened.
+
+        Bounded by the same scalar subquery as :meth:`list_before`, so a foreign id counts zero
+        rather than the whole of another conversation.
+        """
+        cutoff = (
+            select(Message.seq)
+            .where(Message.id == message_id, Message.conversation_id == conversation_id)
+            .scalar_subquery()
+        )
+        stmt = (
+            select(func.count())
+            .select_from(Message)
+            .where(Message.conversation_id == conversation_id, Message.seq < cutoff)
+        )
+        return int(await self.session.scalar(stmt) or 0)
 
     async def count_by_conversation(self, conversation_id: uuid.UUID) -> int:
         """How many messages this conversation holds (T-402).

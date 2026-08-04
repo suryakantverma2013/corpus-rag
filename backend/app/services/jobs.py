@@ -64,20 +64,29 @@ class JobQueueError(Exception):
     """The job could not be handed to the broker."""
 
 
-def evaluation_idempotency_key(message_id: uuid.UUID, content: str) -> str:
-    """Broker-level dedup key for an FR-EVL-01 evaluation job (T-309, R-50).
+def evaluation_idempotency_key(
+    message_id: uuid.UUID, content: str, *, nonce: str | None = None
+) -> str:
+    """Broker-level dedup key for an FR-EVL-01 evaluation job (T-309, R-50; T-404).
 
-    The **answer text is part of the key**, and that is the whole point. Keying on the message
-    id alone would be correct for redelivery but wrong for FR-MSG-08 Regenerate, which
-    replaces `messages.content` in place: the second evaluation would carry the same key, arq
-    would recognise it as a duplicate, and the message would keep the scores of an answer that
-    no longer exists — silently, and permanently. Hashing the content makes a regenerated
-    answer a genuinely different job while a redelivery of the same one stays a duplicate.
+    The **answer text is part of the key** so that a *redelivery* of the same job is a
+    duplicate — which is the property T-309 wanted and the only one the content hash actually
+    delivers.
 
-    **Binds T-402/T-403:** Regenerate must also clear `messages.evaluation`, or the worker's
-    already-evaluated skip will drop the re-run before it starts.
+    **It does not make a regenerated answer a new job, and this docstring used to claim it
+    did.** A byte-identical regeneration hashes identically, arq drops it as a duplicate, and
+    because Regenerate clears `messages.evaluation` in the same statement that replaces the
+    text, the message is then left **permanently unscored** — no chip, ever, with nothing
+    logged. Identical output is not exotic: generation here is effectively deterministic and
+    short factual answers repeat verbatim. The false claim is why the hole survived two tasks.
+
+    So the regenerate path passes a ``nonce`` (T-404). The two are complementary rather than
+    alternatives: the content hash keeps a redelivery idempotent, the nonce makes a deliberate
+    re-run a genuinely different job.
     """
     digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
+    if nonce:
+        return f"eval:{message_id}:{digest}:{nonce}"
     return f"eval:{message_id}:{digest}"
 
 

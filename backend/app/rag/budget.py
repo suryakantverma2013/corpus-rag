@@ -41,6 +41,7 @@ from app.tokens import estimate_tokens
 __all__ = [
     "ContextUsage",
     "SubmissionCheck",
+    "check_regeneration",
     "check_submission",
     "conversation_usage",
 ]
@@ -131,5 +132,45 @@ def check_submission(
         allowed=projected <= usage.limit_tokens,
         projected_tokens=projected,
         query_tokens=query_tokens,
+        usage=usage,
+    )
+
+
+def check_regeneration(
+    usage: ContextUsage,
+    replaced: str,
+    *,
+    settings: Settings | None = None,
+) -> SubmissionCheck:
+    """Decide FR-STA-04 for an FR-MSG-08 Regenerate. Pure — no I/O, no clock (T-404).
+
+    :func:`check_submission` is the wrong instrument here and would double-count twice over.
+    A regenerate adds **no new question** — the user's turn is already a row — and the answer
+    it is about to write **replaces** one that `usage` has already counted. So the projection
+    is `used − tokens(replaced) + reserve`: the same shape as a send, with the outgoing answer
+    subtracted instead of a new query added.
+
+    Using the plain submission check instead would refuse a chat that is merely *full*, which
+    is precisely the chat a user reaches for Regenerate in — a control that fails exactly when
+    it is needed is the false-positive failure R-44 calls worse than no control.
+
+    **The check carries the real `usage`, not the adjusted figure.** The `409` body feeds the
+    FR-ANL-03 card, and a card showing a number the meter never displays would read as a bug in
+    the meter. Only `projected_tokens` reflects the subtraction.
+
+    A refusal here is still possible and still meaningful: a chat near the ceiling whose last
+    answer is shorter than the reserve genuinely has no room for a new one. Ties are permissive,
+    matching :func:`check_submission`.
+    """
+    settings = settings or get_settings()
+    replaced_tokens = estimate_tokens(replaced)
+    # Floored at zero: `usage` is read in a separate statement from the row, so a concurrent
+    # delete could in principle make the subtraction exceed the total. A negative projection
+    # would silently allow anything.
+    projected = max(0, usage.used_tokens - replaced_tokens) + settings.context.answer_reserve_tokens
+    return SubmissionCheck(
+        allowed=projected <= usage.limit_tokens,
+        projected_tokens=projected,
+        query_tokens=0,
         usage=usage,
     )

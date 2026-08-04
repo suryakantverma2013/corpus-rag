@@ -28,6 +28,7 @@ import pytest
 import structlog
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START
+from sqlalchemy import Update
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import get_settings
@@ -75,6 +76,13 @@ class _StubScalars:
         return self._rows
 
 
+class _StubUpdateResult:
+    """What `AsyncSession.execute` returns for an `UPDATE` — the one attribute we read."""
+
+    def __init__(self, rowcount: int) -> None:
+        self.rowcount = rowcount
+
+
 class _StubSession:
     """The calls `govern` makes on a session, and nothing else.
 
@@ -112,6 +120,9 @@ class _StubSession:
         self.commits = 0
         self.scalar_queries = 0
         self.executes = 0
+        #: Every `UPDATE` the run issued (T-404's replace path), and what it answers with.
+        self.updates: list[object] = []
+        self.update_rowcount = 1
 
     async def get(self, model: type, id_: uuid.UUID) -> Conversation | None:  # noqa: ARG002
         return self._conversation
@@ -120,7 +131,13 @@ class _StubSession:
         self.scalar_queries += 1
         return _StubScalars(self._messages)
 
-    async def execute(self, statement: object) -> _StubScalars:  # noqa: ARG002
+    async def execute(self, statement: object) -> object:
+        # The T-404 replace path issues an `UPDATE`, where every other caller here issues a
+        # `SELECT`. Distinguished by statement type rather than by a flag, so a test cannot
+        # accidentally assert an update against a select.
+        if isinstance(statement, Update):
+            self.updates.append(statement)
+            return _StubUpdateResult(self.update_rowcount)
         self.executes += 1
         return _StubScalars(
             [
@@ -1857,6 +1874,78 @@ async def test_the_gate_logs_no_payload_text(caplog: pytest.LogCaptureFixture) -
         assert "handbook.pdf" not in rendered
 
 
+# --- FR-MSG-08 Regenerate: the replace path (T-404, R-56) ---------------------
+
+
+async def test_a_regenerate_updates_the_target_row_instead_of_inserting() -> None:
+    """`regenerate_message_id` is what `finalize` writes *into* (T-404).
+
+    The `added` assertion is the load-bearing half: an implementation that inserted would show
+    the user one question answered twice and charge the NFR-CAP-01 budget for both (R-51(4)).
+    """
+    target = str(uuid.uuid4())
+    context = _context()
+
+    _, values = await _run(context, regenerate_message_id=target)
+
+    session = context.sessionmaker()
+    assert session.updates, "the replace path issued no UPDATE"  # type: ignore[attr-defined]
+    assert _persisted(context) == [], "a regenerate must not insert a row"
+    assert values["answer_message_id"] == target
+
+
+async def test_a_regenerate_clears_the_evaluation_and_the_feedback_in_the_same_statement() -> None:
+    """Both judgements *about the text* go, and they go with the text (R-56).
+
+    In the **same** statement deliberately: a route-level pre-clear followed by a failed re-run
+    would destroy the scores and the rating of an answer that still exists. `content` and
+    `citations` travel together for the sharper reason — T-309 replays the segment parser
+    against `citations.source_ids`, so new text beside an old envelope validates against the
+    wrong grounding set *and passes*.
+    """
+    context = _context()
+
+    await _run(context, regenerate_message_id=str(uuid.uuid4()))
+
+    (statement,) = context.sessionmaker().updates  # type: ignore[attr-defined]
+    written = {column.name for column in statement._values}  # noqa: SLF001
+    assert {"evaluation", "feedback"} <= written
+    assert {"content", "citations"} <= written, "the envelope must never outlive its text"
+    assert statement.compile().params["evaluation"] is None
+    assert statement.compile().params["feedback"] is None
+
+
+async def test_a_resumed_regenerate_writes_nothing_a_second_time() -> None:
+    """The reason the field is checkpointed rather than carried on `RAGContext` (T-404).
+
+    `RAGContext` is never persisted (R-42(3)), so a regenerate interrupted by a restart would
+    resume with no target and **insert** a second answer row — the failure `answer_message_id`
+    exists to prevent, on the path hardest to notice. The two fields stay separate: this one
+    means "write here", that one means "already written".
+    """
+    target = str(uuid.uuid4())
+    context = _context()
+
+    await _run(context, regenerate_message_id=target, answer_message_id=target)
+
+    session = context.sessionmaker()
+    assert session.updates == []  # type: ignore[attr-defined]
+    assert _persisted(context) == []
+
+
+async def test_a_vanished_target_is_reported_and_not_reinserted() -> None:
+    """The conversation was deleted mid-turn. Degrade like a failed insert, never re-create."""
+    context = _context()
+    context.sessionmaker().update_rowcount = 0  # type: ignore[attr-defined]
+
+    with structlog.testing.capture_logs() as logs:
+        _, values = await _run(context, regenerate_message_id=str(uuid.uuid4()))
+
+    assert _persisted(context) == []
+    assert values.get("answer_message_id") is None
+    assert any(entry["event"] == "graph.replace_target_missing" for entry in logs)
+
+
 # --- the per-turn reset (T-406) -----------------------------------------------
 #
 # One `thread_id` serves a conversation for its whole life (FR-PER-02) and every channel is a
@@ -2120,6 +2209,9 @@ _FROZEN_FIELDS = frozenset(
         "user_message_id",
         "turn_index",
         "mentioned_document_ids",
+        # T-404. The first addition since T-301 — see the board line and R-56: it is
+        # checkpointed because a resumed regenerate with no target inserts a second answer row.
+        "regenerate_message_id",
         "started_at",
         "lock_token",
         "injection_verdict",

@@ -391,3 +391,62 @@ async def test_audit_log_record_and_filtered_list(session: AsyncSession) -> None
     # Paging.
     assert len(await repo.list_events(limit=1)) == 1
     assert len(await repo.list_events(limit=1, offset=2)) == 1
+
+
+async def test_the_regenerate_derivations_are_bounded_by_the_conversation(
+    session: AsyncSession,
+) -> None:
+    """T-404's three reads, and the boundary is the property (R-56).
+
+    `messages` has no question↔answer foreign key — §4.16 models a transcript — so a
+    regenerate finds its question by `seq` adjacency. All three reads are bounded by the same
+    scalar subquery `list_before` uses, so a `message_id` from **another** conversation yields
+    nothing rather than that conversation's last question: the subquery returns NULL and
+    `seq < NULL` is false for every row. That is the safe direction, and it is the one an
+    ownership check alone would not give — the route resolves the conversation from the message,
+    so a mismatch here would re-run a question the caller never asked.
+    """
+    user = await _make_user(session)
+    repo = MessageRepository(session)
+    conversations = []
+    for _ in range(2):
+        conversations.append(
+            await ConversationRepository(session).add(
+                Conversation(owner_id=user.id, tenant_id=DEFAULT_TENANT_ID, title="chat")
+            )
+        )
+    mine, theirs = conversations
+
+    await repo.add(Message(conversation_id=mine.id, role=MessageRole.USER, content="first?"))
+    await repo.add(Message(conversation_id=mine.id, role=MessageRole.AI, content="first."))
+    question = await repo.add(
+        Message(conversation_id=mine.id, role=MessageRole.USER, content="second?")
+    )
+    answer = await repo.add(
+        Message(conversation_id=mine.id, role=MessageRole.AI, content="second.")
+    )
+    await repo.add(Message(conversation_id=theirs.id, role=MessageRole.USER, content="elsewhere?"))
+    await session.flush()
+
+    found = await repo.preceding_user_message(mine.id, message_id=answer.id)
+    assert found is not None
+    assert found.id == question.id, "the nearest USER row before the answer, not the first"
+
+    # The original turn's rank, which is what `turn_index` must be — `count_by_conversation`
+    # returns 4 here, an index no turn ever had.
+    assert await repo.count_before(mine.id, message_id=question.id) == 2
+    assert await repo.count_by_conversation(mine.id) == 4
+
+    latest = await repo.latest_ai_message(mine.id)
+    assert latest is not None
+    assert latest.id == answer.id
+
+    # Cross-conversation: every read is bounded, none falls through to the whole table.
+    assert await repo.preceding_user_message(theirs.id, message_id=answer.id) is None
+    assert await repo.count_before(theirs.id, message_id=answer.id) == 0
+
+    # And the history a regenerate re-runs on excludes both the answer being replaced and the
+    # question itself (R-48(7)) — which only holds because it is seeded with the *question's*
+    # id, not the answer's.
+    history = await repo.list_before(mine.id, message_id=question.id)
+    assert [row.content for row in history] == ["first?", "first."]

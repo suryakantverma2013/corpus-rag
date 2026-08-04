@@ -1029,8 +1029,20 @@ def _should_persist(state: RAGState) -> bool:
     return False
 
 
-async def _persist_turn(state: RAGState, ctx: RAGContext, *, latency_ms: int | None) -> str | None:
+async def _persist_turn(
+    state: RAGState,
+    ctx: RAGContext,
+    *,
+    latency_ms: int | None,
+    replace_id: str | None = None,
+) -> str | None:
     """Write the AI `messages` row for this turn and return its id (T-402, §4.16, FR-MSG-06).
+
+    With ``replace_id`` this **updates that row in place** instead of inserting — FR-MSG-08's
+    Regenerate (T-404). Replace rather than append, because §4.16 makes the transcript what the
+    user sees and the FR-ANL cards count: an appended answer would show the same question
+    answered twice, and NFR-CAP-01's budget (derived from `messages`, R-51(4)) would charge the
+    conversation for both.
 
     **The chunk read here is load-bearing and R-49(3) leans on it.** The gate does no database
     work at all, on the argument that this read runs a superstep later and re-checks
@@ -1054,8 +1066,17 @@ async def _persist_turn(state: RAGState, ctx: RAGContext, *, latency_ms: int | N
       gate's structural number and Faithfulness measure the same property by different means
       and must not be conflated in front of one user (R-49(1), OI-34 as resolved).
     * **a substituted FR-CIT-04 score** — absent when the reranker failed open (R-47(2)).
-    * **`feedback`** — FR-MSG-08's column, written by T-403.
+    * **`feedback`** — FR-MSG-08's column, written by T-403. **On the replace path it is
+      cleared**, which is not a contradiction: R-55(5) constrains what the *feedback route*
+      may touch, not what may touch feedback. A 👎 followed by Regenerate is the common
+      sequence, so carrying the thumb forward would attach a negative rating to a new and
+      possibly good answer with nothing in the row recording that the text changed — and
+      OI-24's calibration loop consumes `(answer, thumb)` pairs, where a mismatched pair is
+      worse than a missing one. `evaluation` is cleared on exactly this reasoning (R-50(5));
+      clearing one and keeping the other leaves the row half-stale undetectably.
     """
+    from sqlalchemy import update
+
     from app.db.enums import MessageRole
     from app.db.models.message import Message
     from app.db.repositories.retrieval import fetch_chunks
@@ -1095,6 +1116,47 @@ async def _persist_turn(state: RAGState, ctx: RAGContext, *, latency_ms: int | N
                 dropped=dropped,
                 cited=len(cited),
             )
+
+        if replace_id is not None:
+            # **`content` and `citations` are written together, always.** T-309 replays
+            # `split_answer_segments` against `citations.source_ids`, so a row carrying new
+            # content beside the old envelope validates against the wrong grounding set *and
+            # passes* — a silent, permanent mis-scoring.
+            #
+            # `evaluation` and `feedback` clear in this **same statement** rather than at the
+            # route. A route-level pre-clear that is then followed by a failed re-run destroys
+            # the scores and the rating of an answer that still exists; here the row is only
+            # ever touched by a turn that produced a replacement.
+            #
+            # `id`, `seq`, `conversation_id`, `role` and `created_at` are untouched: `seq`
+            # carries display order (T-108) and `messages` has no `updated_at`, so moving
+            # `created_at` would misreport when the exchange happened.
+            updated = await session.execute(
+                update(Message)
+                .where(Message.id == uuid.UUID(replace_id))
+                .values(
+                    content=answer,
+                    citations=envelope,
+                    model_name=state.get("model_name"),
+                    prompt_tokens=state.get("prompt_tokens"),
+                    completion_tokens=state.get("completion_tokens"),
+                    latency_ms=latency_ms,
+                    evaluation=None,
+                    feedback=None,
+                )
+            )
+            await session.commit()
+            if not updated.rowcount:
+                # The row was deleted mid-turn (the conversation went away). Nothing to serve
+                # and nothing to report: returning `None` leaves `answer` in state, which is
+                # the same degradation an INSERT failure produces.
+                log.warning(
+                    "graph.replace_target_missing",
+                    conversation_id=str(ctx.conversation_id),
+                    message_id=replace_id,
+                )
+                return None
+            return replace_id
 
         # Minted here rather than left to the column default, which SQLAlchemy applies at
         # flush: the id is needed *after* the commit and reading it back off the instance
@@ -1176,11 +1238,19 @@ async def finalize(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
     # outcome, so it would persist every real answer with an empty `source_ids` and drop every
     # citation on the floor. Caught live, by a turn whose model cited correctly and whose row
     # came back with no chips.
+    # **Two fields, two meanings, deliberately not merged** (T-404). `answer_message_id` means
+    # "this turn's row is already written"; `regenerate_message_id` means "write into that row
+    # instead of inserting". Resume then works in both directions from one guard, because
+    # `answer_message_id` is set only after the commit: a resumed send skips the INSERT, and a
+    # resumed regenerate redoes the UPDATE — idempotent by shape, where a redone INSERT is not.
     settled: RAGState = {**state, **update}
     answer_message_id = state.get("answer_message_id")
+    replace_id = state.get("regenerate_message_id")
     if not answer_message_id and _should_persist(settled):
         try:
-            answer_message_id = await _persist_turn(settled, ctx, latency_ms=latency_ms)
+            answer_message_id = await _persist_turn(
+                settled, ctx, latency_ms=latency_ms, replace_id=replace_id
+            )
         except Exception:
             log.exception(
                 "graph.persist_failed",

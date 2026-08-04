@@ -199,6 +199,30 @@ async def test_live_a_grounded_turn_persists_a_citation_to_the_answering_passage
     await session.refresh(answer)
     assert answer.feedback is Feedback.UP
 
+    # T-404 rides on the same turn for the same reason, one task later: this is the only fixture
+    # whose row carries real resolved citations *and* a real thumb, so it is the only place that
+    # can show a regenerate replacing a genuinely grounded answer rather than a one-run envelope.
+    # Both ids are read *before* the expiry below: `expire_all` marks every loaded instance
+    # stale, so a later `answer.id` would try to reload it and raise `MissingGreenlet`.
+    answer_id, conversation_id = answer.id, conversation.id
+    regenerated = await client.post(f"/api/v1/messages/{answer_id}/regenerate", headers=headers)
+    assert regenerated.status_code == 200, regenerated.text
+
+    session.expire_all()  # the replace commits in the graph's own session — see T-404's tests
+    rows = list(
+        await session.scalars(
+            select(Message).where(Message.conversation_id == conversation_id).order_by(Message.seq)
+        )
+    )
+    assert len(rows) == 2, "a regenerate replaces the row; it must not append a second answer"
+    replaced = rows[1]
+    assert replaced.id == answer_id
+    assert replaced.feedback is None, "the thumb refers to text that no longer exists"
+    assert replaced.evaluation is None, "cleared for the FR-EVL-01 job to refill"
+    citations = [seg for seg in replaced.citations[SEGMENTS_KEY] if seg.get("isCite")]
+    assert citations, f"the replacement lost its chips{diagnostic}"
+    assert {citation["quote"] for citation in citations} <= set(_PASSAGES)
+
 
 @pytest.mark.usefixtures("_live")
 async def test_live_a_second_turn_is_answered_on_its_own_grounding(

@@ -37,7 +37,12 @@ from app.db.enums import Feedback, MessageRole
 from app.db.models.conversation import Conversation
 from app.db.models.message import Message
 from app.db.repositories.messages import MessageRepository
-from app.rag.budget import SubmissionCheck, check_submission, conversation_usage
+from app.rag.budget import (
+    SubmissionCheck,
+    check_regeneration,
+    check_submission,
+    conversation_usage,
+)
 from app.rag.errors import copy_for
 from app.services.jobs import JobQueue, JobQueueError, evaluation_idempotency_key
 
@@ -45,13 +50,18 @@ log = structlog.get_logger(__name__)
 
 __all__ = [
     "FEEDBACK_RECORDED",
+    "REGENERATE_COMPLETED",
     "ChatEvent",
     "ContextWindowExceededError",
-    "TurnResult",
     "MessageEvent",
+    "NotLatestAnswerError",
+    "RegenerationTarget",
     "StageEvent",
+    "TurnResult",
     "record_feedback",
     "record_question",
+    "record_regeneration",
+    "resolve_regeneration",
     "run_turn",
 ]
 
@@ -60,6 +70,13 @@ __all__ = [
 #: action on a turn that already ended, and an event inside that set would leave a consumer
 #: pairing spans that never opened.
 FEEDBACK_RECORDED = "chat.feedback.recorded"
+
+#: FR-MSG-08's other half (T-404), on the same footing as `FEEDBACK_RECORDED` and for the same
+#: reason: **outside** the closed `graph.turn.*` vocabulary R-43(5) fixed. The turn itself already
+#: emits a matched `graph.turn.start`/`.end` pair from `finalize`, exactly as a send does — this
+#: records that the turn was a *replacement*, which no span inside that set could carry without
+#: leaving a consumer pairing spans that never opened.
+REGENERATE_COMPLETED = "chat.regenerate.completed"
 
 
 class ContextWindowExceededError(Exception):
@@ -73,6 +90,16 @@ class ContextWindowExceededError(Exception):
     def __init__(self, check: SubmissionCheck) -> None:
         super().__init__("context window exceeded")
         self.check = check
+
+
+class NotLatestAnswerError(Exception):
+    """FR-MSG-08 — only the newest AI answer may be regenerated (T-404).
+
+    A `409`, not the `404` a foreign or non-AI target gets: the caller owns this row and is
+    looking at it, so this is the "correct client, state moved under it" case — a later turn
+    landed while the action bar was open. R-55(2)'s `404` covers requests no correct client
+    makes; this is one a correct client makes and loses.
+    """
 
 
 # --- events -------------------------------------------------------------------
@@ -172,6 +199,69 @@ async def record_question(
     return row, turn_index
 
 
+@dataclass(frozen=True, slots=True)
+class RegenerationTarget:
+    """Everything a Regenerate needs to re-run the original turn (T-404).
+
+    `question` is the `messages` row, not its text: `run_turn` seeds `user_message_id` from it,
+    which is what makes `list_before` reconstruct the *original* turn's history — excluding both
+    the answer being replaced and (given the latest-only rule) any later turn.
+    """
+
+    answer: Message
+    question: Message
+    turn_index: int
+
+
+async def resolve_regeneration(
+    session: AsyncSession,
+    *,
+    conversation_id: uuid.UUID,
+    answer: Message,
+    settings: Settings | None = None,
+) -> RegenerationTarget:
+    """Admit an FR-MSG-08 Regenerate: latest-answer rule, question, turn index, budget (T-404).
+
+    Ordered as the send path is, and for the same reason: everything that can refuse happens
+    before the response starts, because once a `200` and the first SSE frame are on the wire a
+    failure can only be reported inside the stream where no status can carry it.
+
+    **Latest AI answer only.** Regenerating mid-transcript rewrites an answer that every later
+    turn was generated *from*, and no requirement says what becomes of those — the spec has no
+    cascade rule, so the honest options were "refuse" or "invent one".
+
+    **`turn_index` is the original question's rank, not the transcript's length.** It correlates
+    one exchange's logs (FR-ORC-03), so re-deriving it from `count_by_conversation` would file a
+    regenerated turn under an index no turn ever had.
+
+    **The budget check is `check_regeneration`, not `check_submission`** (R-51): no new question
+    is added and the answer about to be written replaces one already counted, so the submission
+    projection double-counts and would refuse precisely the full chat a user reaches for
+    Regenerate in.
+    """
+    settings = settings or get_settings()
+    repo = MessageRepository(session)
+
+    latest = await repo.latest_ai_message(conversation_id)
+    if latest is None or latest.id != answer.id:
+        raise NotLatestAnswerError
+
+    question = await repo.preceding_user_message(conversation_id, message_id=answer.id)
+    if question is None:
+        # An answer with no question before it. Not reachable through the send path, which
+        # commits the user's row first — so this is a corrupt or hand-made transcript, and
+        # re-running an empty query would ground an answer in nothing.
+        raise NotLatestAnswerError
+
+    usage = await conversation_usage(session, conversation_id, settings=settings)
+    check = check_regeneration(usage, answer.content, settings=settings)
+    if not check.allowed:
+        raise ContextWindowExceededError(check)
+
+    turn_index = await repo.count_before(conversation_id, message_id=question.id)
+    return RegenerationTarget(answer=answer, question=question, turn_index=turn_index)
+
+
 # --- the run ------------------------------------------------------------------
 
 
@@ -183,6 +273,7 @@ async def run_turn(
     user_message_id: uuid.UUID,
     turn_index: int,
     mentioned_document_ids: Sequence[uuid.UUID] = (),
+    regenerate_message_id: uuid.UUID | None = None,
     sessionmaker: async_sessionmaker[AsyncSession],
     settings: Settings | None = None,
     result: TurnResult | None = None,
@@ -230,6 +321,10 @@ async def run_turn(
             "user_message_id": str(user_message_id),
             "turn_index": turn_index,
             "mentioned_document_ids": [str(d) for d in mentioned_document_ids],
+            # `None` on every ordinary send; `finalize` then inserts as it always has (T-404).
+            "regenerate_message_id": (
+                str(regenerate_message_id) if regenerate_message_id is not None else None
+            ),
         },
         context=context,
         config=config,
@@ -297,7 +392,9 @@ async def run_turn(
     )
 
 
-async def enqueue_evaluation(queue: JobQueue, message: Message) -> None:
+async def enqueue_evaluation(
+    queue: JobQueue, message: Message, *, nonce: str | None = None
+) -> None:
     """Hand the served answer to the FR-EVL-01 judge (R-50(5)). Never raises.
 
     Called **after** the answer's transaction has committed and after the client has been
@@ -306,13 +403,15 @@ async def enqueue_evaluation(queue: JobQueue, message: Message) -> None:
     user has already read. Scores are optional by FR-EVL-01's own wording — a response *may*
     carry them — so the degraded outcome here is "no chips", which is sanctioned.
 
-    The key hashes the answer text, which is what makes FR-MSG-08 Regenerate a genuinely new
-    job while a redelivery stays a duplicate (see `evaluation_idempotency_key`).
+    ``nonce`` is passed by the FR-MSG-08 Regenerate path and by nothing else. The content hash
+    alone makes a *redelivery* a duplicate, which is what T-309 wanted — but it also makes a
+    **byte-identical regeneration** one, and that leaves the message permanently unscored
+    (T-404; see `evaluation_idempotency_key`).
     """
     try:
         await queue.enqueue_evaluate(
             message_id=message.id,
-            idempotency_key=evaluation_idempotency_key(message.id, message.content),
+            idempotency_key=evaluation_idempotency_key(message.id, message.content, nonce=nonce),
         )
     except JobQueueError:
         log.warning("chat.evaluation_enqueue_failed", message_id=str(message.id), exc_info=True)
@@ -350,4 +449,36 @@ def record_feedback(
         conversation_id=str(conversation_id),
         owner_id=str(owner_id),
         feedback=feedback.value if feedback is not None else None,
+    )
+
+
+def record_regeneration(
+    *,
+    message_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    owner_id: uuid.UUID,
+    turn_index: int,
+    outcome: str | None,
+) -> None:
+    """Record that an answer was replaced rather than written (FR-MSG-08, T-404).
+
+    `record_feedback`'s shape and its constraints. **Outside the closed `graph.turn.*` set**
+    (R-43(5)) — the turn already emitted its own matched span pair from `finalize`, identical to
+    a send's, and this says the one thing that span cannot: that the row existed beforehand.
+
+    **Ids, an int and a closed-set string** — like the telemetry helpers, this takes no parameter
+    that *could* carry the question or either answer, so the rule is structural rather than a
+    convention about what to pass.
+
+    Emitted after the commit, on `conversation.deleted`'s rule: a logged event must correspond to
+    durable state. It therefore does not fire for a re-run that errored, which is correct — that
+    turn replaced nothing.
+    """
+    log.info(
+        REGENERATE_COMPLETED,
+        message_id=str(message_id),
+        conversation_id=str(conversation_id),
+        owner_id=str(owner_id),
+        turn_index=turn_index,
+        outcome=outcome,
     )

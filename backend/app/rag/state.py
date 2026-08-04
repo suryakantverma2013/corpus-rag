@@ -110,6 +110,18 @@ class RAGState(TypedDict, total=False):
     #: without bound and move an access-control decision into Python, which FR-RET-04 /
     #: NFR-SEC-06 forbid.
     mentioned_document_ids: list[str]
+    #: FR-MSG-08 Regenerate: the `messages.id` this turn **overwrites** instead of inserting
+    #: (T-404). `None` on an ordinary send, which is every other caller.
+    #:
+    #: **It is checkpointed, and it has to be** — the one field that ended fifteen tasks of
+    #: leaving `RAGState` alone. `RAGContext` is never checkpointed (R-42(3)), so a regenerate
+    #: interrupted by a restart would resume with no target and *insert a second answer row* —
+    #: exactly the failure `answer_message_id` exists to prevent, on the path where it is
+    #: hardest to notice. It stays **separate from `answer_message_id`**: that field means
+    #: "already written", this one means "write here", and collapsing the two would destroy
+    #: R-42's idempotency argument. Deriving the target in `finalize` instead ("the latest AI
+    #: row") is a heuristic that overwrites the wrong row under any race.
+    regenerate_message_id: str | None
 
     # --- §4.12 prologue (T-302) ---
     #: Wall clock, opened by `telemetry_start`. Optional since T-406: the per-turn reset must be
@@ -207,6 +219,7 @@ def fresh_turn_state() -> RAGState:
         "user_message_id": "",
         "turn_index": 0,
         "mentioned_document_ids": [],
+        "regenerate_message_id": None,
         "started_at": None,
         "lock_token": None,
         "injection_verdict": None,

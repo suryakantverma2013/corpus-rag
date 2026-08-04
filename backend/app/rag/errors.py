@@ -26,6 +26,8 @@ __all__ = [
     "BLOCKED_INJECTION",
     "CONTEXT_WINDOW_EXCEEDED",
     "CONTEXT_WINDOW_EXCEEDED_CODE",
+    "NOT_LATEST_ANSWER",
+    "NOT_LATEST_ANSWER_CODE",
     "FAILURE_COPY",
     "SYSTEM_FAILURE",
     "FailureClass",
@@ -87,6 +89,23 @@ CONTEXT_WINDOW_EXCEEDED_CODE = "CONTEXT_WINDOW_EXCEEDED"
 CONTEXT_WINDOW_EXCEEDED = (  # TBD(§8.4) — copy owned by T-505 via OI-26(c)
     "This conversation has reached its length limit. Start a new chat to keep going — your "
     "documents and their answers stay where they are."
+)
+
+#: FR-MSG-08 — the caller asked to regenerate an answer that is no longer the latest (T-404).
+#:
+#: The other `409` on this surface, and a **second code** rather than a second copy of the one
+#: above, because a client must branch on them differently: the budget refusal ends the
+#: conversation until the user starts a new chat, while this one resolves itself the moment the
+#: client reloads the transcript. T-405's generated types carry the distinction only if the two
+#: are distinct here.
+#:
+#: `404` would be wrong: the caller owns this row and is looking at it. R-55(2)'s single `404`
+#: covers requests no *correct* client makes; this is one a correct client makes and loses to a
+#: later turn landing under an open action bar.
+NOT_LATEST_ANSWER_CODE = "NOT_LATEST_ANSWER"
+NOT_LATEST_ANSWER = (  # TBD(§8.4) — copy owned by T-505/T-508 with the rest of the action bar
+    "Only the most recent answer can be regenerated. Refresh the conversation to see the "
+    "latest reply."
 )
 
 #: FR-RET-05 / R-49 — what a turn answers when the FR-CIT-06(4) groundedness gate rejects it.

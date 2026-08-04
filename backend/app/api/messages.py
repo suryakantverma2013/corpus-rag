@@ -42,7 +42,12 @@ from app.db.models.message import Message
 from app.db.repositories.conversations import ConversationRepository
 from app.db.repositories.messages import MessageRepository
 from app.rag.citations import envelope_segments
-from app.rag.errors import CONTEXT_WINDOW_EXCEEDED, CONTEXT_WINDOW_EXCEEDED_CODE
+from app.rag.errors import (
+    CONTEXT_WINDOW_EXCEEDED,
+    CONTEXT_WINDOW_EXCEEDED_CODE,
+    NOT_LATEST_ANSWER,
+    NOT_LATEST_ANSWER_CODE,
+)
 from app.security.rate_limit import chat_limit, limiter, principal_or_ip_key
 from app.services import chat as chat_service
 from app.services.chat import ContextWindowExceededError, MessageEvent, StageEvent, TurnResult
@@ -63,6 +68,12 @@ _NOT_FOUND = "Conversation not found."
 _MESSAGE_NOT_FOUND = "Message not found."
 
 _QUERY_MAX = 8000  # TBD(§8.4) — a hard ceiling well above the NFR-CAP-01 budget FR-STA-04 enforces
+
+#: Send and regenerate share **one** NFR-SEC-07 bucket (T-404). slowapi scopes a limit to the
+#: endpoint by default (`limit_scope = lim.scope or endpoint`), which would hand one user two
+#: chat budgets — and the `RATELIMIT_CHAT` threshold is a spend control over full turns, which a
+#: regenerate is: same models, same ~5–6 s, same cost. `shared_limit` names the scope instead.
+_CHAT_BUCKET = "chat"
 
 
 class SendMessageRequest(BaseModel):
@@ -142,6 +153,30 @@ def _to_response(message: Message) -> MessageResponse:
     )
 
 
+def _budget_conflict(exc: ContextWindowExceededError) -> HTTPException:
+    """FR-STA-04's refusal, shared by send and regenerate (R-51(5), T-404).
+
+    A refusal, not an FR-ORC-05 failure: nothing was attempted. `409` on the R-24 processing
+    lock's precedent — a state the caller resolves by acting. The **code** is stable and is what
+    a client branches on; the copy is provisional while OI-26(c) (the escape path) belongs to
+    T-505.
+
+    `used_tokens` is the conversation's **real** usage on both paths, never the adjusted
+    projection a regenerate checks against — it feeds the FR-ANL-03 card, and a card showing a
+    number the meter never displays would read as a bug in the meter.
+    """
+    return HTTPException(
+        status.HTTP_409_CONFLICT,
+        {
+            "error_code": CONTEXT_WINDOW_EXCEEDED_CODE,
+            "message": CONTEXT_WINDOW_EXCEEDED,
+            "used_tokens": exc.check.usage.used_tokens,
+            "limit_tokens": exc.check.usage.limit_tokens,
+            "overflow_tokens": exc.check.overflow_tokens,
+        },
+    )
+
+
 async def _owned_or_404(
     session: AsyncSession, conversation_id: uuid.UUID, owner_id: uuid.UUID
 ) -> Conversation:
@@ -199,7 +234,7 @@ async def list_messages(
     },
     summary="Ask a question (SSE)",
 )
-@limiter.limit(chat_limit, key_func=principal_or_ip_key)
+@limiter.shared_limit(chat_limit, scope=_CHAT_BUCKET, key_func=principal_or_ip_key)
 async def send_message(
     request: Request,
     # Unused by the handler, but slowapi writes its `X-RateLimit-*` headers onto it and
@@ -227,20 +262,7 @@ async def send_message(
             session, conversation=conversation, query=body.query, settings=settings
         )
     except ContextWindowExceededError as exc:
-        # A refusal, not an FR-ORC-05 failure (R-51(5)): nothing was attempted. `409` on the
-        # R-24 processing lock's precedent — a state the caller resolves by acting. The
-        # **code** is stable and is what a client branches on; the copy is provisional while
-        # OI-26(c) (the escape path) belongs to T-505.
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            {
-                "error_code": CONTEXT_WINDOW_EXCEEDED_CODE,
-                "message": CONTEXT_WINDOW_EXCEEDED,
-                "used_tokens": exc.check.usage.used_tokens,
-                "limit_tokens": exc.check.usage.limit_tokens,
-                "overflow_tokens": exc.check.overflow_tokens,
-            },
-        ) from exc
+        raise _budget_conflict(exc) from exc
 
     result = TurnResult()
 
@@ -275,24 +297,167 @@ async def send_message(
     return EventSourceResponse(publish(), ping=int(settings.sse.ping_seconds))
 
 
-def _message_frame(event: MessageEvent) -> dict[str, Any]:
+def _message_frame(event: MessageEvent, *, fallback_id: uuid.UUID | None = None) -> dict[str, Any]:
     """The `message` frame.
 
     An outcome that was served but not stored — an FR-ORC-05 failure, or an FR-ORC-02 denial —
     has no row and so no `id`. The client still renders the text and may branch on
     `error_code`; there is nothing to give feedback on and nothing to regenerate, which is the
     intended consequence of not persisting a failed turn.
+
+    **`fallback_id` is the one place a regenerate diverges from a send** (T-404), and only on
+    that failure branch. The client already has a bubble on screen, so a null id there would
+    leave it unable to say which answer the error belongs to; carrying the target's id lets it
+    re-render the **surviving** answer non-destructively. The event *sequence* is identical,
+    which is what "the same shape as a send" means.
     """
     frame: dict[str, Any] = {"outcome": event.outcome, "error_code": event.error_code}
     if event.message is not None:
         frame["message"] = _to_response(event.message).model_dump(mode="json")
     else:
         frame["message"] = {
-            "id": None,
+            "id": str(fallback_id) if fallback_id is not None else None,
             "role": MessageRole.AI.value,
             "segs": [{"text": event.text}],
         }
     return frame
+
+
+@message_router.post(
+    "/{message_id}/regenerate",
+    response_class=EventSourceResponse,
+    responses={
+        status.HTTP_200_OK: {
+            "description": (
+                "An SSE stream, identical in shape to a send: `stage` frames carrying no "
+                "content, one `message` frame with the replacement, then `done`. The `message` "
+                "frame always carries the target's id — on failure it carries the *unchanged* "
+                "answer plus `error_code`."
+            )
+        },
+        status.HTTP_404_NOT_FOUND: {"description": "No AI message with this id for this caller."},
+        status.HTTP_409_CONFLICT: {
+            "description": (
+                "`NOT_LATEST_ANSWER` — a later turn has landed; or "
+                "`CONTEXT_WINDOW_EXCEEDED` — FR-STA-04's budget. Branch on `error_code`."
+            )
+        },
+        status.HTTP_429_TOO_MANY_REQUESTS: {
+            "description": "NFR-SEC-07 — shares the send route's per-user chat budget."
+        },
+    },
+    summary="Regenerate an answer (SSE)",
+)
+@limiter.shared_limit(chat_limit, scope=_CHAT_BUCKET, key_func=principal_or_ip_key)
+async def regenerate_message(
+    request: Request,
+    # slowapi writes its `X-RateLimit-*` headers onto this and raises without it — see
+    # `send_message`. A regenerate is a full turn on the same models at the same cost, so it
+    # shares that route's bucket rather than getting a second one.
+    response: Response,
+    message_id: uuid.UUID,
+    user: CurrentUser,
+    session: DbSession,
+    sessionmaker: StreamSessionmaker,
+    queue: JobQueueDep,
+    settings: SettingsDep,
+) -> EventSourceResponse:
+    """FR-MSG-08's Regenerate — re-run the question and **replace** the answer (T-404, R-56).
+
+    Addressed by message id like its sibling `feedback` route, and refused the same way: absent,
+    foreign or non-AI targets are one `404` with one copy (R-55(2)), for an administrator too.
+    The second refusal is this route's own — **only the latest AI answer may be regenerated**
+    (`409` + `NOT_LATEST_ANSWER`), because rewriting a mid-transcript answer silently invalidates
+    every turn generated from it and the spec has no cascade rule.
+
+    **The row is replaced, never appended.** §4.16 makes the transcript what the user sees and
+    the FR-ANL cards count, and R-51(4) derives the NFR-CAP-01 budget from it — so an appended
+    answer would show one question answered twice and charge the conversation for both.
+    `finalize` does the write, through `RAGState.regenerate_message_id`, which is what keeps it
+    idempotent across a resume.
+
+    **A failed re-run leaves the answer exactly as it was.** `_should_persist` excludes `error`
+    (R-54(3)), so the UPDATE is simply never reached — and because `evaluation`/`feedback` clear
+    inside that same UPDATE rather than here, a failure cannot destroy the scores or the rating
+    of an answer that still exists. An **abstained or injection-blocked** re-run does replace, on
+    FR-MSG-08's unconditional wording and R-23's "an abstention is a response": the common cause
+    is that the user lost access to the document the old answer cited, and keeping that prose
+    would preserve text whose sources are gone. There is no undo, which is a cost the ruling
+    records rather than hides.
+
+    **Not gated by the R-24 lock at this route** — R-55(1) honoured, not contradicted. Regenerate
+    *takes* the gate (the graph's `lock` node acquires it exactly as for a send), which is what
+    pauses the caller's document affordances; it does not *check* it. A route-level `409` would
+    refuse a regenerate in one chat because a different chat of the same user is mid-turn, since
+    R-43(1) keys the gate on the caller — the precise defect R-55(1) rejected for feedback — and
+    R-43(2) names "Regenerate over a live turn" as the case its token-matched release exists to
+    make compose. Two concurrent regenerates of one row are last-write-wins and benign: there is
+    no read-modify-write, so either order commits a complete, internally consistent answer.
+    """
+    repository = MessageRepository(session)
+    answer = await repository.get_owned(message_id, owner_id=user.id)
+    if answer is None or answer.role is not MessageRole.AI:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, _MESSAGE_NOT_FOUND)
+
+    try:
+        target = await chat_service.resolve_regeneration(
+            session,
+            conversation_id=answer.conversation_id,
+            answer=answer,
+            settings=settings,
+        )
+    except chat_service.NotLatestAnswerError as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {"error_code": NOT_LATEST_ANSWER_CODE, "message": NOT_LATEST_ANSWER},
+        ) from exc
+    except ContextWindowExceededError as exc:
+        raise _budget_conflict(exc) from exc
+
+    conversation = await _owned_or_404(session, answer.conversation_id, user.id)
+    result = TurnResult()
+    # Passed to the evaluation key so a *byte-identical* regeneration is still a new job. The
+    # content hash alone would make it a duplicate, and since the UPDATE cleared `evaluation`
+    # the message would stay unscored for ever (T-404; see `evaluation_idempotency_key`).
+    nonce = uuid.uuid4().hex[:8]
+
+    async def publish() -> Any:
+        served: Message | None = None
+        async for event in chat_service.run_turn(
+            conversation=conversation,
+            owner_id=user.id,
+            query=target.question.content,
+            user_message_id=target.question.id,
+            turn_index=target.turn_index,
+            regenerate_message_id=answer.id,
+            sessionmaker=sessionmaker,
+            settings=settings,
+            result=result,
+        ):
+            match event:
+                case StageEvent(stage=stage):
+                    yield {"event": "stage", "data": json.dumps({"stage": stage})}
+                case MessageEvent():
+                    served = event.message
+                    yield {
+                        "event": "message",
+                        "data": json.dumps(_message_frame(event, fallback_id=answer.id)),
+                    }
+
+        if served is not None:
+            chat_service.record_regeneration(
+                message_id=served.id,
+                conversation_id=served.conversation_id,
+                owner_id=user.id,
+                turn_index=target.turn_index,
+                outcome=result.outcome,
+            )
+            if result.outcome == "answered":
+                await chat_service.enqueue_evaluation(queue, served, nonce=nonce)
+
+        yield {"event": "done", "data": json.dumps({"outcome": result.outcome})}
+
+    return EventSourceResponse(publish(), ping=int(settings.sse.ping_seconds))
 
 
 @message_router.post(
