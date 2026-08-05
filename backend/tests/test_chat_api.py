@@ -83,11 +83,17 @@ async def _conversation(session: AsyncSession, *, owner_id: uuid.UUID) -> Conver
 
 
 def _frames(text: str) -> list[tuple[str, dict]]:
-    """Parse an SSE body into `(event, data)` pairs.
+    """Parse an SSE body into `(event, payload)` pairs.
 
     Hand-rolled rather than pulled from a library: the point of these tests is the wire
     format, and a parser that normalised it away would assert nothing about what a browser
     actually receives.
+
+    Since T-405 each `data:` line is the **whole frame** — `{"event": ..., "data": {...}}` —
+    rather than the bare payload. The envelope is what makes the union discriminable in
+    TypeScript (`done`'s `{outcome}` is a subset of `message`'s keys, so a payload-only union
+    could not be narrowed at all). The event name therefore appears twice, and this helper
+    asserts the two agree, which is what pins `SseFrame.to_event`.
     """
     out: list[tuple[str, dict]] = []
     event: str | None = None
@@ -95,7 +101,9 @@ def _frames(text: str) -> list[tuple[str, dict]]:
         if line.startswith("event:"):
             event = line.removeprefix("event:").strip()
         elif line.startswith("data:") and event is not None:
-            out.append((event, json.loads(line.removeprefix("data:").strip())))
+            frame = json.loads(line.removeprefix("data:").strip())
+            assert frame["event"] == event, f"SSE event line {event!r} != payload {frame!r}"
+            out.append((event, frame["data"]))
             event = None
     return out
 

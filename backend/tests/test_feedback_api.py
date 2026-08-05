@@ -446,21 +446,9 @@ def test_the_feedback_event_stays_outside_the_closed_turn_vocabulary() -> None:
 
 
 # ---- T-405's contract ----
-
-
-def test_the_feedback_key_is_required_in_the_openapi_schema(app) -> None:  # noqa: ANN001
-    """The property R-55(3) buys, asserted where T-405's generated client will read it.
-
-    A default added later would silently make the field optional in the TypeScript type, and
-    the composer would then be able to send `{}` — the silent-erasure path — with the type
-    checker's blessing.
-    """
-    schemas = app.openapi()["components"]["schemas"]
-
-    assert schemas["FeedbackRequest"]["required"] == ["feedback"]
-    # Required **and** nullable: the generated type is `feedback: Feedback | null`, not
-    # `feedback?: Feedback`. The `null` arm is FR-MSG-06's third state, not an optional key.
-    variants = schemas["FeedbackRequest"]["properties"]["feedback"]["anyOf"]
-    assert {"type": "null"} in variants
-    assert {"$ref": "#/components/schemas/Feedback"} in variants
-    assert schemas["Feedback"]["enum"] == ["up", "down"]
+#
+# `test_the_feedback_key_is_required_in_the_openapi_schema` **moved** to
+# `tests/test_openapi_contract.py` when T-405 landed, and the move is the point: it ran on the
+# `app` fixture here, which is DB-gated and *skips* when Postgres is unreachable — so the one
+# assertion protecting R-55(4)'s required key would have stopped running without saying so.
+# It now uses the DB-free `openapi_document` fixture, beside the rest of the schema contract.

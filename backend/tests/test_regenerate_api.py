@@ -184,13 +184,17 @@ def _url(message_id: uuid.UUID) -> str:
 
 
 def _frames(text: str) -> list[tuple[str, dict]]:
+    """`(event, payload)` pairs. See `tests/test_chat_api.py::_frames` — since T-405 each
+    `data:` line carries the whole frame envelope, and the two event names must agree."""
     out: list[tuple[str, dict]] = []
     event: str | None = None
     for line in text.splitlines():
         if line.startswith("event:"):
             event = line.removeprefix("event:").strip()
         elif line.startswith("data:") and event is not None:
-            out.append((event, json.loads(line.removeprefix("data:").strip())))
+            frame = json.loads(line.removeprefix("data:").strip())
+            assert frame["event"] == event, f"SSE event line {event!r} != payload {frame!r}"
+            out.append((event, frame["data"]))
             event = None
     return out
 

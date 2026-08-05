@@ -20,16 +20,16 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
-from sse_starlette.sse import EventSourceResponse
 
-from app.api.documents import _frame, stream_documents
+from app.api.documents import StreamScope, _frame, hold_stream_slot, stream_documents
 from app.config import Settings, SseSettings, get_settings
 from app.db.base import DEFAULT_TENANT_ID
 from app.db.enums import DocumentStatus, JobStatus, JobType
@@ -155,7 +155,6 @@ def _fast_settings(**sse: object) -> Settings:
         update={
             "sse": SseSettings(
                 poll_interval_seconds=0.01,
-                ping_seconds=3600.0,
                 **sse,  # type: ignore[arg-type]
             )
         }
@@ -171,27 +170,28 @@ async def _states(connection: AsyncConnection, *, owner_id: uuid.UUID) -> tuple[
 
 async def _open_stream(
     session: AsyncSession, connection: AsyncConnection, *, owner_id: uuid.UUID
-) -> EventSourceResponse:
-    """Call the route handler directly and hand back its live response.
+) -> AsyncIterator[object]:
+    """Call the route handler directly and hand back its frame generator.
 
     **Why not `client.stream(...)`.** `httpx.ASGITransport` (0.28.1) accumulates the whole
     response body and only returns once the ASGI app has finished — see `send()` in
     `httpx/_transports/asgi.py`, which appends to `body_parts` and waits on
     `response_complete`. An SSE stream never finishes, so any test that drove this over
-    the ASGI transport would hang rather than fail. The handler is an ordinary coroutine,
-    so calling it directly exercises the same scope resolution, the same registry
-    accounting and the same generator — everything except the socket, which the live
-    end-to-end check in the task's verification step covers.
+    the ASGI transport would hang rather than fail.
+
+    Since T-405 the handler **is** the generator (`fastapi.sse`), so this yields frames
+    directly rather than a response object. Its scope and its stream slot now arrive as
+    resolved dependencies — which is exactly the point of that refactor, and is why the slot
+    accounting is tested against `hold_stream_slot` itself below.
     """
     user = await UserRepository(session).get(owner_id)
     assert user is not None
-    return await stream_documents(
+    return stream_documents(
+        scope_=StreamScope(knowledge_base_id=None),
+        _slot=None,
         user=user,
-        session=session,
         sessionmaker=_factory(connection),  # type: ignore[arg-type]
         settings=_fast_settings(),
-        scope=None,
-        conversation_id=None,
     )
 
 
@@ -451,8 +451,8 @@ async def test_the_snapshot_frame_carries_the_metadata_only_dto(
 
     frame = _frame(Snapshot(documents=await _states(db_connection, owner_id=owner)))
 
-    assert frame["event"] == "snapshot"
-    rows = json.loads(frame["data"])
+    assert frame.event == "snapshot"
+    rows = json.loads(frame.to_event().data.model_dump_json())["data"]
     assert [row["document_id"] for row in rows] == [str(document.id)]
     assert rows[0]["stalled"] is False
     assert rows[0]["status"] == "EMBEDDING"
@@ -469,8 +469,8 @@ async def test_a_change_is_framed_as_one_document_event(
 
     frame = _frame(DocumentChanged(state=states[0]))
 
-    assert frame["event"] == "document"
-    row = json.loads(frame["data"])
+    assert frame.event == "document"
+    row = json.loads(frame.to_event().data.model_dump_json())["data"]
     assert row["document_id"] == str(document.id)
     assert row["status"] == "PARSING"
     assert row["stalled"] is False
@@ -481,8 +481,11 @@ def test_a_removal_is_framed_as_an_id_only() -> None:
 
     frame = _frame(DocumentRemoved(document_id=document_id))
 
-    assert frame["event"] == "removed"
-    assert json.loads(frame["data"]) == {"document_id": str(document_id)}
+    assert frame.event == "removed"
+    assert json.loads(frame.to_event().data.model_dump_json()) == {
+        "event": "removed",
+        "data": {"document_id": str(document_id)},
+    }
 
 
 async def test_exceeding_the_stream_cap_is_429(
@@ -499,21 +502,53 @@ async def test_exceeding_the_stream_cap_is_429(
     assert response.status_code == 429
 
 
-async def test_the_stream_holds_a_slot_and_releases_it_when_closed(
+async def test_the_stream_yields_a_snapshot_first(
     session: AsyncSession, db_connection: AsyncConnection, make_token: Callable[..., str]
 ) -> None:
-    """The normal end of a stream is the client vanishing, which reaches the generator as
-    a `GeneratorExit` — so the slot must be released in a `finally`, not after the loop."""
+    """The handler is the generator now (T-405), so its first frame is the connect snapshot."""
     owner, _ = await _caller(session, make_token)
     await _document(session, owner_id=owner)
 
-    response = await _open_stream(session, db_connection, owner_id=owner)
-    assert response.media_type == "text/event-stream"
-
-    frames = response.body_iterator
+    frames = await _open_stream(session, db_connection, owner_id=owner)
     first = await anext(frames)
-    assert first["event"] == "snapshot"
+    assert first.event == "snapshot"
+    await frames.aclose()
+
+
+async def test_the_slot_dependency_holds_one_and_releases_it_on_close(
+    session: AsyncSession, make_token: Callable[..., str]
+) -> None:
+    """R-41(7)'s cap, now owned by a `yield` dependency rather than the handler (T-405).
+
+    The release lives in that dependency's `finally`, and FastAPI closes the request-scoped
+    exit stack **after** the streaming response completes — so the slot covers exactly the
+    stream's lifetime. The previous shape acquired in the handler and released inside the
+    publisher, which leaked a slot whenever anything between the two raised.
+    """
+    owner, _ = await _caller(session, make_token)
+    user = await UserRepository(session).get(owner)
+    assert user is not None
+
+    slot = hold_stream_slot(user=user, settings=_fast_settings())
+    await anext(slot)
     assert document_events.registry.count(owner) == 1
 
-    await frames.aclose()
+    await slot.aclose()
     assert document_events.registry.count(owner) == 0
+
+
+async def test_the_slot_dependency_refuses_over_the_cap(
+    session: AsyncSession, make_token: Callable[..., str]
+) -> None:
+    """The `429` is raised before any frame, which is the whole reason it is a dependency."""
+    owner, _ = await _caller(session, make_token)
+    user = await UserRepository(session).get(owner)
+    assert user is not None
+    document_events.registry.acquire(owner, limit=1)
+
+    slot = hold_stream_slot(user=user, settings=_fast_settings(max_streams_per_user=1))
+    with pytest.raises(HTTPException) as excinfo:
+        await anext(slot)
+    assert excinfo.value.status_code == 429
+
+    document_events.registry.release(owner)

@@ -22,5 +22,9 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  /* Tests are typechecked by tsconfig.test.json, which is the only project that gets Node
+     types. Keeping them out of here is what stops application code — which ships to a
+     browser — from compiling a reference to `process` or `node:fs`. */
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/test"]
 }

@@ -1,0 +1,31 @@
+{
+  /* Tests only. Identical to tsconfig.app.json except that it adds Node types — the CSS
+     drift guards in src/styles/tokens.test.ts read tokens.css from disk, because Vite's
+     `?raw` yields an empty string under Vitest (`css: false` stubs CSS modules) and
+     `import.meta.url` is not a file URL after Vite's transform. Node types are confined to
+     this project so application code cannot reach for `process` or `node:fs`. */
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.test.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023", "DOM"],
+    "module": "esnext",
+    "types": ["vite/client", "node"],
+    "allowArbitraryExtensions": true,
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    /* Linting */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/test"]
+}

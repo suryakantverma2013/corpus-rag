@@ -19,6 +19,7 @@ import uuid
 from app.rag.citations import (
     SEGMENTS_KEY,
     SOURCE_IDS_KEY,
+    TextSegment,
     build_citations,
     envelope_segments,
     scores_by_chunk_id,
@@ -167,7 +168,27 @@ def test_an_unreadable_envelope_still_renders_the_answer_text() -> None:
 
     The transcript is the user's own; refusing to render it is the worst available outcome,
     and `messages.citations` is a JSONB column that predates this shape.
+
+    T-405 typed the return without narrowing that promise: validation moved *into*
+    `envelope_segments` precisely so a strict DTO could not turn a legacy row into a `500`.
     """
-    assert envelope_segments(None, content="hello") == [{"text": "hello"}]
-    assert envelope_segments({"segments": []}, content="hello") == [{"text": "hello"}]
-    assert envelope_segments({"nope": 1}, content="hello") == [{"text": "hello"}]
+    fallback = [TextSegment(text="hello")]
+    assert envelope_segments(None, content="hello") == fallback
+    assert envelope_segments({"segments": []}, content="hello") == fallback
+    assert envelope_segments({"nope": 1}, content="hello") == fallback
+
+
+def test_a_segment_that_is_neither_shape_falls_back_to_the_answer_text() -> None:
+    """The tolerance is now *wider* than it was, which is worth pinning (T-405).
+
+    A Mapping that is not a valid segment previously sailed through as an untyped dict and
+    broke the renderer at display time. It now falls back here — which is what the docstring
+    above always promised.
+    """
+    assert envelope_segments({"segments": [{"weird": 1}]}, content="hello") == [
+        TextSegment(text="hello")
+    ]
+    # A citation missing half its fields is not half-rendered either.
+    assert envelope_segments({"segments": [{"isCite": True, "doc": "d.pdf"}]}, content="x") == [
+        TextSegment(text="x")
+    ]

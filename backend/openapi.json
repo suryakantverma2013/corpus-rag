@@ -1,0 +1,4897 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Corpus API",
+    "summary": "Corpus RAG Chatbot backend (Nexus AI platform).",
+    "description": "Backend for the Corpus RAG chatbot GUI.\n\nEvery operation outside `auth` and `system` requires a realm-signed RS256 bearer token from\n`POST /api/v1/auth/login` (R-28), and is scoped to the caller: a resource belonging to another\nuser answers `404`, never `403`, for an administrator too (R-54(1), NFR-SEC-02).\n\nThree operations stream Server-Sent Events rather than returning a body. They authenticate with\nthe ordinary `Authorization` header, which `EventSource` cannot send, so a browser client must\nconsume them with `fetch` + `ReadableStream` (R-41(3)). Each frame's `data:` line is one JSON\nobject carrying its own `event` discriminator.\n",
+    "version": "0.1.0"
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "Same origin as the GUI."
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Liveness probe",
+        "description": "Liveness probe — the process is up (no dependency checks).",
+        "operationId": "liveness",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LivenessResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "API readiness probe",
+        "description": "Readiness probe — every dependency the *API* serves requests from (NFR-REL-02).",
+        "operationId": "readiness",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "At least one dependency failed its probe (NFR-REL-02).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/ready/worker": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Worker readiness probe",
+        "description": "Readiness probe for the ingestion worker deployable (T-207, R-38(2)).",
+        "operationId": "worker_readiness",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "At least one dependency failed its probe (NFR-REL-02).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/login": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Exchange credentials for a token pair",
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid email or password (FR-AUT-04).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "NFR-SEC-07 — too many attempts. `Retry-After` carries the cooldown.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The identity provider is unreachable (R-28).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/refresh": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Exchange a refresh token for a new pair",
+        "operationId": "refresh",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The refresh token is invalid or expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "NFR-SEC-07 — too many attempts. `Retry-After` carries the cooldown.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The identity provider is unreachable (R-28).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Revoke a refresh token",
+        "operationId": "logout",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LogoutRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "503": {
+            "description": "The identity provider is unreachable (R-28).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/me": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "The caller's own profile",
+        "operationId": "me",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/change-password": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Change the caller's own password",
+        "operationId": "change_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangePasswordRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "The current password is incorrect.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "NFR-SEC-07 — too many attempts. `Retry-After` carries the cooldown.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Server-side identity configuration error. Check the server logs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The identity provider is unreachable (R-28).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/users": {
+      "post": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Create a user",
+        "operationId": "create_user",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateUserRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A user with that email already exists.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "NFR-SEC-07 — too many attempts. `Retry-After` carries the cooldown.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Server-side identity configuration error. Check the server logs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The identity provider is unreachable (R-28).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "List users",
+        "operationId": "list_users",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "first",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "First"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Search"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UserResponse"
+                  },
+                  "title": "Response List Users"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "NFR-SEC-07 — too many attempts. `Retry-After` carries the cooldown.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Server-side identity configuration error. Check the server logs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The identity provider is unreachable (R-28).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/users/{user_id}": {
+      "patch": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Update a user",
+        "operationId": "update_user",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "User Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateUserRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "You cannot perform this action on your own account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "User not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A user with that email already exists.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "NFR-SEC-07 — too many attempts. `Retry-After` carries the cooldown.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Server-side identity configuration error. Check the server logs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The identity provider is unreachable (R-28).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Delete a user",
+        "operationId": "delete_user",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "User Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "You cannot delete your own account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "User not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "NFR-SEC-07 — too many attempts. `Retry-After` carries the cooldown.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Server-side identity configuration error. Check the server logs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The identity provider is unreachable (R-28).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/audit": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Read the audit trail",
+        "operationId": "list_audit_events",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "actor_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Actor Id"
+            }
+          },
+          {
+            "name": "event_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/AuditEventType"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Event Type"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AuditLogResponse"
+                  },
+                  "title": "Response List Audit Events"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/documents": {
+      "post": {
+        "tags": [
+          "documents"
+        ],
+        "summary": "Upload a document",
+        "operationId": "upload_document",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_document"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted; ingestion queued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Duplicate checksum — not re-ingested."
+          },
+          "404": {
+            "description": "scope=chat naming no conversation of this caller's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The upload exceeds the per-file size ceiling.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Not a supported document format (FR-KBM-02).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "507": {
+            "description": "FR-ERR-02 — the caller's storage quota is exhausted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Object storage is unreachable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Empty file, or scope=chat without a conversation_id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "R-24 — another file action is in flight for this caller.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "NFR-SEC-07 — too many attempts. `Retry-After` carries the cooldown.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "documents"
+        ],
+        "summary": "List documents",
+        "description": "The FR-KBM-03/09 page for the calling user (R-40(5)).\n\n`scope`/`conversation_id` are spelled exactly as the upload form spells them, so the\nmodal uses one vocabulary in both directions; omitting `scope` returns both sections,\nwhich is the FR-KBM-09 table view. A legitimate scope with nothing in it yet is an\nempty list, not a `404`.\n\n**Caller-scoped, with no admin widening** — deliberately asymmetric with `GET /{id}`,\nwhich is owner-or-admin so an admin can read anything they can act on. There is no GUI\nsurface for browsing another user's knowledge base (FR-KBM-01..09 is the caller's own\nmodal), so a cross-user list would be speculative surface needing its own authorization\nstory.\n\nNot rate-limited: no read route in this API is, and a limiter would force a\n`request`/`response` pair onto a pure read for nothing.",
+        "operationId": "list_documents",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "global",
+                    "chat"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Scope"
+            }
+          },
+          {
+            "name": "conversation_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Conversation Id"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/DocumentStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DocumentResponse"
+                  },
+                  "title": "Response List Documents"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "scope=chat without a conversation_id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such conversation for this caller.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/documents/{document_id}": {
+      "delete": {
+        "tags": [
+          "documents"
+        ],
+        "summary": "Delete a document",
+        "operationId": "delete_document",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Document Id"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Accepted; the document left retrieval.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Already deleted — nothing queued."
+          },
+          "404": {
+            "description": "No such document for this caller.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "R-24 — another file action is in flight for this caller.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "NFR-SEC-07 — too many attempts. `Retry-After` carries the cooldown.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "documents"
+        ],
+        "summary": "Get one document",
+        "description": "One document's metadata, owner-or-admin (R-40(5)).\n\nA soft-deleted document is returned with its terminal state rather than 404'd: a client\nthat has just received `DELETE`'s `202` and polls must see `DELETED`, not a sudden\n`404` it cannot tell apart from a wrong id. The list excludes tombstones; this does not.",
+        "operationId": "get_document",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Document Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such document for this caller.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/documents/{document_id}/retry": {
+      "post": {
+        "tags": [
+          "documents"
+        ],
+        "summary": "Retry a failed ingestion",
+        "operationId": "retry_document",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Document Id"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Accepted; ingestion re-queued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetryResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such document for this caller.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The document is not in FAILED, or a response is generating.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "NFR-SEC-07 — too many attempts. `Retry-After` carries the cooldown.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/documents/events": {
+      "get": {
+        "tags": [
+          "documents"
+        ],
+        "summary": "Live document-status stream (SSE)",
+        "description": "FR-KBM-09's live surface (R-41).\n\nFilters, scope resolution and authorization are deliberately identical to\n`list_documents` — same parameter spelling, same `400`/`404`, same caller scoping with\nno admin widening — so the stream and the page it updates can never disagree about\nwhat the caller may see.\n\n**Authenticated by the ordinary `Authorization` header (R-41(3)).** A browser's\n`EventSource` cannot send one, so the GUI (T-508) consumes this with `fetch` +\n`ReadableStream` and parses the frames itself. Every query-string alternative was\nrejected: a raw token there is written to access logs, proxy logs, `Referer` headers\nand browser history, and stays valid in all of them long after the tab closes.\n\nScope resolution and the stream-slot reservation are both **dependencies**\n(`resolve_stream_scope`, `hold_stream_slot`), so a bad request still fails as an ordinary\n`400`/`404`/`429` — once the `200` and the first byte are out, there is no status code left\nto fail with, and a generator handler's body does not run until then (T-405). The loop\nitself uses `sessionmaker`, never the request-scoped session, so a long-lived stream cannot\npin a pool slot.",
+        "operationId": "stream_documents",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "global",
+                    "chat"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Scope"
+            }
+          },
+          {
+            "name": "conversation_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Conversation Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "An SSE stream. `snapshot` carries the full set on connect, `document` one changed row, `removed` a document id that has left the set.",
+            "content": {
+              "text/event-stream": {
+                "itemSchema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "string",
+                      "contentMediaType": "application/json",
+                      "contentSchema": {
+                        "$ref": "#/components/schemas/DocumentStreamFrame"
+                      }
+                    },
+                    "event": {
+                      "type": "string"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "retry": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentStreamFrame"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "scope=chat without a conversation_id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such conversation for this caller.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many concurrent streams for this caller.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/documents/{document_id}/replace": {
+      "post": {
+        "tags": [
+          "documents"
+        ],
+        "summary": "Replace a document with a new version",
+        "description": "FR-KBM-07's Replace (R-40(1)): new bytes at version n+1, old version keeps serving.",
+        "operationId": "replace_document",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Document Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_replace_document"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted; the new version is queued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplaceResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Identical bytes — nothing queued."
+          },
+          "404": {
+            "description": "No such document for this caller.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The upload exceeds the per-file size ceiling.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Not a supported document format (FR-KBM-02).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "507": {
+            "description": "FR-ERR-02 — the caller's storage quota is exhausted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Object storage is unreachable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Empty file, or scope=chat without a conversation_id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "NFR-SEC-07 — too many attempts. `Retry-After` carries the cooldown.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not ACTIVE/FAILED, the bytes belong to another document, or a response is generating."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{job_id}": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Get ingestion/deletion job status",
+        "operationId": "get_job",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such job for this caller."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conversations": {
+      "get": {
+        "tags": [
+          "conversations"
+        ],
+        "summary": "List the caller's chats",
+        "description": "FR-SBR-03 sidebar order — most recently updated first.\n\nA bare array, matching `GET /documents` (R-40(5)); no paging, because the sidebar renders\nthe whole list and a user's chat count is bounded by how many they have made.",
+        "operationId": "list_conversations",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ConversationResponse"
+                  },
+                  "type": "array",
+                  "title": "Response List Conversations"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "conversations"
+        ],
+        "summary": "Start a new chat",
+        "operationId": "create_conversation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateConversationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationDetailResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/conversations/{conversation_id}": {
+      "get": {
+        "tags": [
+          "conversations"
+        ],
+        "summary": "Get one chat",
+        "operationId": "get_conversation",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Conversation Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationDetailResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such chat for this caller."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "conversations"
+        ],
+        "summary": "Rename a chat",
+        "operationId": "rename_conversation",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Conversation Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenameConversationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationDetailResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such chat for this caller."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "conversations"
+        ],
+        "summary": "Delete a chat",
+        "description": "FR-SBR-07 — deletes the transcript **and** the LangGraph thread (R-42(11)).\n\nThe `503` is not a formality: `delete_conversation` purges the thread *before* it commits,\nso a checkpointer outage leaves the chat intact and retryable rather than orphaning its\ngraph state where nothing will ever collect it (OI-30).",
+        "operationId": "delete_conversation",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Conversation Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such chat for this caller."
+          },
+          "503": {
+            "description": "The checkpointer could not be reached; nothing was deleted."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/{conversation_id}/messages": {
+      "get": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "List a chat's messages",
+        "description": "The transcript, oldest first.\n\nOrdered by `messages.seq`, never `created_at` (T-108): a turn writes the question and the\nanswer close together, and `created_at` is the *transaction* timestamp, so any tiebreak on\nthe random UUID `id` is a coin flip on rendering the answer above the question.\n\nR-45(6)'s binding — read history through `app.rag.history` rather than mapping rows by\nhand — governs the **prompt** path, where `MessageRole.AI` is `\"ai\"` and `compose_messages`\nsilently drops a role it does not know. It is discharged inside `generate`. This is the\nAPI's own view and maps the enum explicitly, which is the same trap named once more:\nthe wire value is `\"ai\"`, not `\"assistant\"`.",
+        "operationId": "list_messages",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Conversation Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MessageResponse"
+                  },
+                  "title": "Response List Messages"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such chat for this caller."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "Ask a question (SSE)",
+        "description": "Run one FR-ORC-01 turn and stream its progress.\n\nEverything that can refuse the turn happens **before** the response starts: once a `200`\nand the first SSE frame are on the wire, a failure can only be reported inside the stream,\nwhere no HTTP status can carry it. So ownership (R-54), the FR-STA-04 admission check and\nthe rate limit all live in `admit_send` — this body runs only once the turn is admitted,\nbecause FastAPI creates a generator without executing a statement of it (T-405).\n\nThe annotation declares the **schema**; what is yielded is `frame.to_event()`, a\n`ServerSentEvent`, so the frames keep their named `event:` line — R-41 and T-508 are written\nagainst those names. FastAPI supports exactly this (it skips `stream_item_field` validation\nfor a `ServerSentEvent` and still takes the published union from the annotation), and the\ncost — that the union is not enforced at runtime — is covered by\n`test_every_chat_frame_builder_returns_a_declared_frame`.",
+        "operationId": "send_message",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Conversation Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendMessageRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "An SSE stream. `stage` reports coarse progress and carries no content, `message` the completed and verified answer, `done` closes the turn.",
+            "content": {
+              "text/event-stream": {
+                "itemSchema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "string",
+                      "contentMediaType": "application/json",
+                      "contentSchema": {
+                        "$ref": "#/components/schemas/ChatStreamFrame"
+                      }
+                    },
+                    "event": {
+                      "type": "string"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "retry": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ChatStreamFrame"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such chat for this caller."
+          },
+          "409": {
+            "description": "FR-STA-04 — the conversation's token budget is exhausted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContextWindowExceededResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "NFR-SEC-07 — shares the regenerate route's chat budget.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/messages/{message_id}/regenerate": {
+      "post": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "Regenerate an answer (SSE)",
+        "description": "FR-MSG-08's Regenerate — re-run the question and **replace** the answer (T-404, R-56).\n\nAddressed by message id like its sibling `feedback` route, and refused the same way: absent,\nforeign or non-AI targets are one `404` with one copy (R-55(2)), for an administrator too.\nThe second refusal is this route's own — **only the latest AI answer may be regenerated**\n(`409` + `NOT_LATEST_ANSWER`), because rewriting a mid-transcript answer silently invalidates\nevery turn generated from it and the spec has no cascade rule.\n\n**The row is replaced, never appended.** §4.16 makes the transcript what the user sees and\nthe FR-ANL cards count, and R-51(4) derives the NFR-CAP-01 budget from it — so an appended\nanswer would show one question answered twice and charge the conversation for both.\n`finalize` does the write, through `RAGState.regenerate_message_id`, which is what keeps it\nidempotent across a resume.\n\n**A failed re-run leaves the answer exactly as it was.** `_should_persist` excludes `error`\n(R-54(3)), so the UPDATE is simply never reached — and because `evaluation`/`feedback` clear\ninside that same UPDATE rather than here, a failure cannot destroy the scores or the rating\nof an answer that still exists. An **abstained or injection-blocked** re-run does replace, on\nFR-MSG-08's unconditional wording and R-23's \"an abstention is a response\": the common cause\nis that the user lost access to the document the old answer cited, and keeping that prose\nwould preserve text whose sources are gone. There is no undo, which is a cost the ruling\nrecords rather than hides.\n\n**Not gated by the R-24 lock at this route** — R-55(1) honoured, not contradicted. Regenerate\n*takes* the gate (the graph's `lock` node acquires it exactly as for a send), which is what\npauses the caller's document affordances; it does not *check* it. A route-level `409` would\nrefuse a regenerate in one chat because a different chat of the same user is mid-turn, since\nR-43(1) keys the gate on the caller — the precise defect R-55(1) rejected for feedback — and\nR-43(2) names \"Regenerate over a live turn\" as the case its token-matched release exists to\nmake compose. Two concurrent regenerates of one row are last-write-wins and benign: there is\nno read-modify-write, so either order commits a complete, internally consistent answer.\n\nIts refusals — the single `404` and the two `409`s — live in `admit_regeneration`, because\na generator handler's body runs after the `200` (see `send_message`, T-405).",
+        "operationId": "regenerate_message",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "message_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Message Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "An SSE stream, identical in shape to a send: `stage` frames carrying no content, one `message` frame with the replacement, then `done`. The `message` frame always carries the target's id — on failure it carries the *unchanged* answer plus `error_code`.",
+            "content": {
+              "text/event-stream": {
+                "itemSchema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "string",
+                      "contentMediaType": "application/json",
+                      "contentSchema": {
+                        "$ref": "#/components/schemas/ChatStreamFrame"
+                      }
+                    },
+                    "event": {
+                      "type": "string"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "retry": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ChatStreamFrame"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No AI message with this id for this caller."
+          },
+          "409": {
+            "description": "`NOT_LATEST_ANSWER` — a later turn has landed; or `CONTEXT_WINDOW_EXCEEDED` — FR-STA-04's budget. Branch on `error_code`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatConflictResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "NFR-SEC-07 — shares the send route's per-user chat budget.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/messages/{message_id}/feedback": {
+      "post": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "Rate an answer",
+        "description": "FR-MSG-08's 👍/👎, and FR-MSG-06's third state, the clear (T-403, R-55).\n\nAddressed by **message id**, not through its conversation, because FR-MSG-08 spells the\npath that way and the action bar has only the message. Ownership is therefore a join and\nit lives in the query (`MessageRepository.get_owned`) — R-54: a message in someone else's\nchat is `404`, never `403`, for an administrator exactly as for anyone else.\n\n**One status and one string cover all three ways this can fail.** A message that does not\nexist, one in a foreign chat, and one whose role is `user` are indistinguishable in the\nresponse on purpose: distinguishing them would make the route a probe for which ids exist\n(NFR-SEC-02). The wrong-role case is a `404` rather than the `409` this surface uses for\n`NotRetryableError` / `NotReplaceableError` — those answer a request a *correct* client\ncould make against state that moved under it, whereas FR-MSG-04 puts the action bar beneath\nAI answers only, so no correct client produces this one. It is also already the answer\nR-54(3) gives an errored turn: nothing was persisted, so there is nothing to rate.\n\n**Not gated by the R-24 processing lock**, although FR-MSG-08 names it. R-43(4) enforces\nthat gate at exactly R-24's four *file* verbs and states read routes are never gated; this\nis a write, but on a row a finished turn already committed and served. The in-flight answer\nhas no row yet, so it can never be this route's target — and because the lock is keyed on\nthe caller, gating would refuse feedback on one message because a *different* one is\ngenerating, which is not the requirement's clause but a bug. FR-MSG-08's \"disabled while\ngenerating\" is discharged as the GUI affordance OI-31 already governs, which also leaves\nOI-31's unpredicted-`409` gap unmanufactured.\n\nIdempotent: the same value twice is a `200`. The column is state, not an event log.\n\nTouches `messages.feedback` and nothing else — in particular never `evaluation`, which is\nDeepEval's alone (R-49(1), OI-34 as R-50(6) closed it). A human thumb is not a judge score,\nand the FR-EVL-02 chip must not move because someone disagreed with it.",
+        "operationId": "set_feedback",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "message_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Message Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeedbackRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No AI message with this id for this caller."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AuditEventType": {
+        "type": "string",
+        "enum": [
+          "AUTH",
+          "USER_ROLE_CHANGE",
+          "DOCUMENT_UPLOAD",
+          "DOCUMENT_REPLACE",
+          "DOCUMENT_DELETE",
+          "PERMISSION_CHANGE"
+        ],
+        "title": "AuditEventType",
+        "description": "Security- and lifecycle-relevant audit categories (NFR-SEC-08)."
+      },
+      "AuditLogResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "actor_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor Id"
+          },
+          "event_type": {
+            "$ref": "#/components/schemas/AuditEventType"
+          },
+          "target_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Type"
+          },
+          "target_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Id"
+          },
+          "details": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Details"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "actor_id",
+          "event_type",
+          "target_type",
+          "target_id",
+          "details",
+          "created_at"
+        ],
+        "title": "AuditLogResponse"
+      },
+      "Body_replace_document": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_replace_document"
+      },
+      "Body_upload_document": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "global",
+              "chat"
+            ],
+            "title": "Scope",
+            "default": "global"
+          },
+          "conversation_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversation Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_document"
+      },
+      "ChangePasswordRequest": {
+        "properties": {
+          "current_password": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Current Password"
+          },
+          "new_password": {
+            "type": "string",
+            "minLength": 1,
+            "title": "New Password"
+          }
+        },
+        "type": "object",
+        "required": [
+          "current_password",
+          "new_password"
+        ],
+        "title": "ChangePasswordRequest"
+      },
+      "ChatConflictResponse": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/ContextWindowExceededResponse"
+          },
+          {
+            "$ref": "#/components/schemas/NotLatestAnswerResponse"
+          }
+        ]
+      },
+      "ChatDoneFrame": {
+        "properties": {
+          "event": {
+            "type": "string",
+            "const": "done",
+            "title": "Event",
+            "default": "done"
+          },
+          "data": {
+            "$ref": "#/components/schemas/DoneData"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "ChatDoneFrame",
+        "description": "End of turn."
+      },
+      "ChatMessageFrame": {
+        "properties": {
+          "event": {
+            "type": "string",
+            "const": "message",
+            "title": "Event",
+            "default": "message"
+          },
+          "data": {
+            "$ref": "#/components/schemas/MessageFrameData"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "ChatMessageFrame",
+        "description": "The whole verified answer, in one frame.\n\nThere is no token streaming and that is a ruling, not an omission: R-48(1)/R-49(3) put the\nFR-CIT-06 gate between generation and the client, so nothing of the answer exists to send\nuntil it has passed (R-54(2))."
+      },
+      "ChatStageFrame": {
+        "properties": {
+          "event": {
+            "type": "string",
+            "const": "stage",
+            "title": "Event",
+            "default": "stage"
+          },
+          "data": {
+            "$ref": "#/components/schemas/StageData"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "ChatStageFrame",
+        "description": "Coarse progress. Emitted only when the stage *changes*."
+      },
+      "ChatStreamFrame": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ChatStageFrame"
+          },
+          {
+            "$ref": "#/components/schemas/ChatMessageFrame"
+          },
+          {
+            "$ref": "#/components/schemas/ChatDoneFrame"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "event",
+          "mapping": {
+            "done": "#/components/schemas/ChatDoneFrame",
+            "message": "#/components/schemas/ChatMessageFrame",
+            "stage": "#/components/schemas/ChatStageFrame"
+          }
+        }
+      },
+      "CheckResult": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "error"
+            ],
+            "title": "Status"
+          },
+          "latency_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latency Ms"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "CheckResult",
+        "description": "Outcome of a single dependency probe."
+      },
+      "CitationLocator": {
+        "properties": {
+          "kind": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CitationLocatorKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "page": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page"
+          },
+          "section_path": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Section Path"
+          },
+          "section_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Section Index"
+          },
+          "row_start": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Row Start"
+          },
+          "row_end": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Row End"
+          },
+          "line_start": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line Start"
+          },
+          "line_end": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line End"
+          }
+        },
+        "type": "object",
+        "title": "CitationLocator",
+        "description": "R-34's structured address, beside the rendered label.\n\nEvery field is optional because `Locator.as_metadata()` drops the ones that do not apply to\nthe kind — a PDF citation carries `page`, a DOCX one `section_path`, a CSV one\n`row_start`/`row_end`. FR-CIT-04 is explicit that clients read **these fields** and never\nparse the label, which is why the structured copy is published at all."
+      },
+      "CitationLocatorKind": {
+        "type": "string",
+        "enum": [
+          "page",
+          "section",
+          "rows"
+        ]
+      },
+      "CitationSegment": {
+        "properties": {
+          "isCite": {
+            "type": "boolean",
+            "const": true,
+            "title": "Iscite",
+            "default": true
+          },
+          "doc": {
+            "type": "string",
+            "title": "Doc"
+          },
+          "page": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page"
+          },
+          "locator": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CitationLocator"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "quote": {
+            "type": "string",
+            "title": "Quote"
+          },
+          "chunkId": {
+            "type": "string",
+            "title": "Chunkid"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score",
+            "description": "The FR-CIT-04 rerank score. **Absent** — not null — when the reranker failed open and published none (R-47(2)). Render the card with no number."
+          }
+        },
+        "type": "object",
+        "required": [
+          "doc",
+          "quote",
+          "chunkId"
+        ],
+        "title": "CitationSegment",
+        "description": "A citation run — the FR-CIT-01 chip and the FR-CIT-03 hover card.\n\nSee :func:`_citation` for what each field carries and why `page` holds a label rather than a\nnumber."
+      },
+      "ContextWindowExceededDetail": {
+        "properties": {
+          "error_code": {
+            "type": "string",
+            "const": "CONTEXT_WINDOW_EXCEEDED",
+            "title": "Error Code"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "used_tokens": {
+            "type": "integer",
+            "title": "Used Tokens"
+          },
+          "limit_tokens": {
+            "type": "integer",
+            "title": "Limit Tokens"
+          },
+          "overflow_tokens": {
+            "type": "integer",
+            "title": "Overflow Tokens"
+          }
+        },
+        "type": "object",
+        "required": [
+          "error_code",
+          "message",
+          "used_tokens",
+          "limit_tokens",
+          "overflow_tokens"
+        ],
+        "title": "ContextWindowExceededDetail",
+        "description": "FR-STA-04's refusal (R-51(5)), on both `send` and `regenerate`.\n\nA refusal, not an FR-ORC-05 failure: nothing was attempted, so it carries no\n`FailureClass`. The three token counts are here because the GUI's FR-ANL-03 meter is the\nthing the user must act on, and re-fetching the conversation to learn why the composer\nrefused would race the very state that refused it.\n\n`used_tokens` is the conversation's **real** usage on both paths, never the adjusted\nprojection a regenerate checks against — a card showing a number the meter never displays\nwould read as a bug in the meter."
+      },
+      "ContextWindowExceededResponse": {
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/ContextWindowExceededDetail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "detail"
+        ],
+        "title": "ContextWindowExceededResponse",
+        "description": "The wire body. FastAPI wraps `detail`, so the envelope is what a client parses."
+      },
+      "ContextWindowResponse": {
+        "properties": {
+          "used_tokens": {
+            "type": "integer",
+            "title": "Used Tokens"
+          },
+          "limit_tokens": {
+            "type": "integer",
+            "title": "Limit Tokens"
+          },
+          "remaining_tokens": {
+            "type": "integer",
+            "title": "Remaining Tokens"
+          },
+          "percent_used": {
+            "type": "number",
+            "title": "Percent Used"
+          }
+        },
+        "type": "object",
+        "required": [
+          "used_tokens",
+          "limit_tokens",
+          "remaining_tokens",
+          "percent_used"
+        ],
+        "title": "ContextWindowResponse",
+        "description": "The FR-ANL-03 CONTEXT WINDOW card, for one conversation (R-51 binds T-401 to carry it).\n\n**This is conversation length, not model cost.** R-30 counts history + the current query\nand excludes the system prompt and the retrieved chunks, so a turn's real\n`messages.prompt_tokens` will routinely exceed `used_tokens` — correctly, because they\nmeasure different quantities (R-51(1)). Nothing may derive one from the other."
+      },
+      "ConversationDetailResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "archived": {
+            "type": "boolean",
+            "title": "Archived"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "context": {
+            "$ref": "#/components/schemas/ContextWindowResponse"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "archived",
+          "created_at",
+          "updated_at",
+          "context"
+        ],
+        "title": "ConversationDetailResponse",
+        "description": "A single conversation, with the FR-ANL-03 meter.\n\nCarried on the single-conversation responses only. The list route omits it deliberately:\nthe meter is derived from every `messages.content` in the chat (R-51(4) — usage is\ncomputed, never stored), so putting it on a list would read the full transcript of every\nconversation in the sidebar to render a card FR-ANL-03 shows for the *active* one."
+      },
+      "ConversationResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "archived": {
+            "type": "boolean",
+            "title": "Archived"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "archived",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ConversationResponse",
+        "description": "One conversation. `id` is also the LangGraph `thread_id` (FR-PER-02)."
+      },
+      "CreateConversationRequest": {
+        "properties": {
+          "title": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "type": "object",
+        "title": "CreateConversationRequest"
+      },
+      "CreateUserRequest": {
+        "properties": {
+          "email": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Email"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "password": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Password"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role",
+            "default": "user"
+          }
+        },
+        "type": "object",
+        "required": [
+          "email",
+          "password"
+        ],
+        "title": "CreateUserRequest"
+      },
+      "DegradedMessage": {
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "role": {
+            "type": "string",
+            "const": "ai",
+            "title": "Role",
+            "default": "ai"
+          },
+          "segs": {
+            "items": {
+              "$ref": "#/components/schemas/TextSegment"
+            },
+            "type": "array",
+            "title": "Segs"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "segs"
+        ],
+        "title": "DegradedMessage",
+        "description": "The served-but-unstored branch: an FR-ORC-05 failure or an FR-ORC-02 denial.\n\nR-54(3) keeps those turns out of `messages`, so there is no row and nothing to rate or\nregenerate — the intended consequence of not persisting a failed turn.\n\n**`id` is the one place a regenerate diverges from a send** (T-404), and only here: a send\nhas no row so it is `null`, while a regenerate carries the *target's* id, because the client\nalready has that bubble on screen and a null id would leave it unable to say which answer\nthe error belongs to. `segs` is always exactly one text run."
+      },
+      "DeleteResponse": {
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Document Id"
+          },
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DocumentStatus"
+          },
+          "already_deleted": {
+            "type": "boolean",
+            "title": "Already Deleted",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "document_id",
+          "job_id",
+          "status"
+        ],
+        "title": "DeleteResponse",
+        "description": "FR-ING-05's `202` body, plus the R-39(2) already-deleted signal.\n\n`already_deleted` pairs with a `200`: nothing was queued, so `job_id` is null. Same\nshape as the FR-KBM-08 duplicate, and for the same reason — a second Delete click on a\nrow that has already gone is not an error the GUI should render."
+      },
+      "DocumentChangedFrame": {
+        "properties": {
+          "event": {
+            "type": "string",
+            "const": "document",
+            "title": "Event",
+            "default": "document"
+          },
+          "data": {
+            "$ref": "#/components/schemas/DocumentEventResponse"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "DocumentChangedFrame",
+        "description": "One row whose state changed.\n\nEmitted from **polling**, so it samples state rather than replaying every transition: a fast\ningestion was measured going `QUEUED → INDEXING → ACTIVE` inside one interval (T-210). A\nclient must render whatever arrives and never assume it will see each FR-ING-01 stage."
+      },
+      "DocumentEventResponse": {
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Document Id"
+          },
+          "filename": {
+            "type": "string",
+            "title": "Filename"
+          },
+          "mime_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mime Type"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DocumentStatus"
+          },
+          "current_version": {
+            "type": "integer",
+            "title": "Current Version"
+          },
+          "searchable": {
+            "type": "boolean",
+            "title": "Searchable"
+          },
+          "size_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Bytes"
+          },
+          "page_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page Count"
+          },
+          "chunk_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chunk Count"
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
+          "knowledge_base_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Knowledge Base Id"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "global",
+              "chat"
+            ],
+            "title": "Scope"
+          },
+          "conversation_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversation Id"
+          },
+          "latest_job_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Job Id"
+          },
+          "latest_job_error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Job Error Code"
+          },
+          "latest_job_document_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Job Document Version"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "deleted_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deleted At"
+          },
+          "stalled": {
+            "type": "boolean",
+            "title": "Stalled"
+          }
+        },
+        "type": "object",
+        "required": [
+          "document_id",
+          "filename",
+          "mime_type",
+          "status",
+          "current_version",
+          "searchable",
+          "size_bytes",
+          "page_count",
+          "chunk_count",
+          "error_message",
+          "knowledge_base_id",
+          "scope",
+          "conversation_id",
+          "latest_job_id",
+          "latest_job_error_code",
+          "latest_job_document_version",
+          "created_at",
+          "updated_at",
+          "deleted_at",
+          "stalled"
+        ],
+        "title": "DocumentEventResponse",
+        "description": "The list/get DTO plus the one field the live channel adds (R-41(4)/(5)).\n\nSubclassed rather than redefined so the stream cannot drift from the route it mirrors:\na field added to `DocumentResponse` appears here automatically, and a live table whose\ncontents depended on whether the modal happened to be open when a change landed is\nexactly the failure this inheritance rules out.\n\n`stalled` is **derived, not stored** — no `DocumentStatus` carries it (R-38(3): a state\nexists to be written by a transition, and nothing transitions into \"stalled\") and\nFR-KBM-04 gains no ninth label. It means \"an in-flight document has gone quiet longer\nthan a worker could legitimately be silent\", which T-212 measured as up to\n`job_timeout + 10` seconds behind arq's in-progress guard. It is **never** true for\n`DELETE_PENDING`/`DELETING`; R-39(7) requires those keep rendering as `Deleting`."
+      },
+      "DocumentRemovedData": {
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Document Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "document_id"
+        ],
+        "title": "DocumentRemovedData",
+        "description": "A document that has left the caller's set.\n\nOnly an id: a completed deletion has no visible state to transition into, so a tombstone can\nsignal only by disappearing (R-41(4))."
+      },
+      "DocumentRemovedFrame": {
+        "properties": {
+          "event": {
+            "type": "string",
+            "const": "removed",
+            "title": "Event",
+            "default": "removed"
+          },
+          "data": {
+            "$ref": "#/components/schemas/DocumentRemovedData"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "DocumentRemovedFrame",
+        "description": "A document left the set — deleted, or moved out of the caller's scope."
+      },
+      "DocumentResponse": {
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Document Id"
+          },
+          "filename": {
+            "type": "string",
+            "title": "Filename"
+          },
+          "mime_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mime Type"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DocumentStatus"
+          },
+          "current_version": {
+            "type": "integer",
+            "title": "Current Version"
+          },
+          "searchable": {
+            "type": "boolean",
+            "title": "Searchable"
+          },
+          "size_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Bytes"
+          },
+          "page_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page Count"
+          },
+          "chunk_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chunk Count"
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
+          "knowledge_base_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Knowledge Base Id"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "global",
+              "chat"
+            ],
+            "title": "Scope"
+          },
+          "conversation_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversation Id"
+          },
+          "latest_job_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Job Id"
+          },
+          "latest_job_error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Job Error Code"
+          },
+          "latest_job_document_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Job Document Version"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "deleted_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deleted At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "document_id",
+          "filename",
+          "mime_type",
+          "status",
+          "current_version",
+          "searchable",
+          "size_bytes",
+          "page_count",
+          "chunk_count",
+          "error_message",
+          "knowledge_base_id",
+          "scope",
+          "conversation_id",
+          "latest_job_id",
+          "latest_job_error_code",
+          "latest_job_document_version",
+          "created_at",
+          "updated_at",
+          "deleted_at"
+        ],
+        "title": "DocumentResponse",
+        "description": "One document, for both the list and the single-document read (R-40(5)).\n\n**Metadata only.** R-31(4) names T-209 as a likely route to a download/export/preview\nsurface, which would make Corpus a file-distribution vector and turn the malware\nscanner from optional into required — so `storage_uri` is deliberately absent and no\nfield on this model carries or points at bytes. `checksum_sha256` is absent too: no\nrequirement asks for it, and the duplicate story is already told by the upload and\nreplace responses. No chunk id appears anywhere either (R-36(6)(b)): a replaced\ndocument's historical chunk ids dangle by design, and nothing here may become a way to\nresolve one.\n\n**`current_version` is the version serving retrieval, not the version being built.**\nWhile a replace is in flight `latest_job_document_version` is `current_version + 1`,\nand that inequality is the only signal distinguishing \"this document failed and is\nsilent\" from \"this document's replace failed and the previous version still answers\"\n(OI-29). The job's own status and progress are deliberately not denormalised here —\n`GET /jobs/{id}` owns them, and a surface rendering two statuses read at two different\nmoments will eventually render them disagreeing."
+      },
+      "DocumentSnapshotFrame": {
+        "properties": {
+          "event": {
+            "type": "string",
+            "const": "snapshot",
+            "title": "Event",
+            "default": "snapshot"
+          },
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/DocumentEventResponse"
+            },
+            "type": "array",
+            "title": "Data"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "DocumentSnapshotFrame",
+        "description": "The full set, sent on **every** connect — including a reconnect.\n\nThere is no `Last-Event-ID` replay by ruling (R-41(6)): a fresh snapshot is strictly more\ncorrect than a delta stream with gaps in it."
+      },
+      "DocumentStatus": {
+        "type": "string",
+        "enum": [
+          "UPLOADED",
+          "QUEUED",
+          "PARSING",
+          "CHUNKING",
+          "EMBEDDING",
+          "INDEXING",
+          "ACTIVE",
+          "FAILED",
+          "DELETE_PENDING",
+          "DELETING",
+          "DELETED"
+        ],
+        "title": "DocumentStatus",
+        "description": "The 11 document lifecycle states (FR-ING-01, §4.15)."
+      },
+      "DocumentStreamFrame": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/DocumentSnapshotFrame"
+          },
+          {
+            "$ref": "#/components/schemas/DocumentChangedFrame"
+          },
+          {
+            "$ref": "#/components/schemas/DocumentRemovedFrame"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "event",
+          "mapping": {
+            "document": "#/components/schemas/DocumentChangedFrame",
+            "removed": "#/components/schemas/DocumentRemovedFrame",
+            "snapshot": "#/components/schemas/DocumentSnapshotFrame"
+          }
+        }
+      },
+      "DoneData": {
+        "properties": {
+          "outcome": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TurnOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "title": "DoneData",
+        "description": "Closes the turn. Carries the outcome again so a client that dropped the `message`\nframe still learns how it ended."
+      },
+      "ErrorResponse": {
+        "properties": {
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Human-readable copy. Render it; never branch on it."
+          }
+        },
+        "type": "object",
+        "required": [
+          "detail"
+        ],
+        "title": "ErrorResponse",
+        "description": "The ordinary error body: ``{\"detail\": \"...\"}``.\n\nNot a bespoke envelope — this *is* what `HTTPException(status, \"some copy\")` serialises to,\nand re-shaping it now would break every route at once for no gain. Declaring it simply\nstops the generated client typing an error body as `unknown`.\n\nThe copy is frequently a `# TBD(§8.4)` string, so a client must **render** it and never\nmatch on it. Where a decision hangs on the error, there is a code — see the two models\nbelow, and R-43(6)'s `FailureClass` on the SSE path."
+      },
+      "EvaluationResponse": {
+        "properties": {
+          "relevancy": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Relevancy"
+          },
+          "faithfulness": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Faithfulness"
+          }
+        },
+        "type": "object",
+        "title": "EvaluationResponse",
+        "description": "The FR-EVL-02 chips — **exactly two** metrics (R-50(1)).\n\nThe other two FR-EVL-01 metrics are reference-based and cannot run on a live turn, which is\nwhy they belong to the offline harness (T-312) and their FR-ANL-04 cells read `—`\npermanently.\n\nEither field may be `None`: the evaluation path **fails open** (R-50(3)) and metrics are\nguarded independently, so a partial result is written rather than discarded. The whole\nobject is `None` until the FR-EVL-01 job lands and stays `None` for ever if the judge never\nanswers — a correct end state, not an error.\n\n`groundedness` is deliberately absent: the T-308 gate's structural number is not this chip\n(R-49(1), OI-34 as R-50(6) closed it), and a human thumb is not a judge score either\n(R-55(5))."
+      },
+      "Feedback": {
+        "type": "string",
+        "enum": [
+          "up",
+          "down"
+        ],
+        "title": "Feedback",
+        "description": "Thumbs feedback on an AI message (FR-MSG-06/08)."
+      },
+      "FeedbackRequest": {
+        "properties": {
+          "feedback": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Feedback"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "feedback"
+        ],
+        "title": "FeedbackRequest",
+        "description": "FR-MSG-08's thumbs payload — three states, and the key is **required**.\n\nFR-MSG-06 types the field `'up'|'down'|null`, so clearing is reachable (FR-MSG-08 says the\ncontrol *toggles*, and a second click on the lit thumb turns it off) and has to be\nexpressible. `Feedback` has no `NONE` member and must not grow one: `NULL` is already the\ncolumn's absent state, and a third enum value would make \"cleared\" and \"never rated\" two\nrepresentations of one fact.\n\nRequired rather than defaulted to `None`, which is `RenameConversationRequest.title`'s\nshape: with a default, `{}` would silently erase a rating the user gave. It is a `422`."
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "JobResponse": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Job Id"
+          },
+          "document_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Document Id"
+          },
+          "job_type": {
+            "$ref": "#/components/schemas/JobType"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          },
+          "progress": {
+            "type": "integer",
+            "title": "Progress"
+          },
+          "attempt_count": {
+            "type": "integer",
+            "title": "Attempt Count"
+          },
+          "document_version": {
+            "type": "integer",
+            "title": "Document Version"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "job_id",
+          "document_id",
+          "job_type",
+          "status",
+          "progress",
+          "attempt_count",
+          "document_version",
+          "error_code",
+          "error_message",
+          "created_at",
+          "started_at",
+          "completed_at"
+        ],
+        "title": "JobResponse",
+        "description": "FR-ING-06's job view.\n\n`progress` is the coarse stage milestone the worker writes (5/25/45/65/85/100); no stage\nreports partial progress, so it moves in steps rather than smoothly."
+      },
+      "JobStatus": {
+        "type": "string",
+        "enum": [
+          "QUEUED",
+          "RUNNING",
+          "SUCCEEDED",
+          "FAILED",
+          "DEAD_LETTER"
+        ],
+        "title": "JobStatus",
+        "description": "Knowledge-job execution states, incl. dead-letter (FR-ING-04/06)."
+      },
+      "JobType": {
+        "type": "string",
+        "enum": [
+          "INGEST",
+          "DELETE"
+        ],
+        "title": "JobType",
+        "description": "Knowledge-job kinds (FR-ING-02/05)."
+      },
+      "LivenessResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ok",
+            "title": "Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "LivenessResponse",
+        "description": "Liveness is a constant: reaching the handler at all is the answer."
+      },
+      "LoginRequest": {
+        "properties": {
+          "email": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Email"
+          },
+          "password": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Password"
+          }
+        },
+        "type": "object",
+        "required": [
+          "email",
+          "password"
+        ],
+        "title": "LoginRequest"
+      },
+      "LogoutRequest": {
+        "properties": {
+          "refresh_token": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Refresh Token"
+          }
+        },
+        "type": "object",
+        "required": [
+          "refresh_token"
+        ],
+        "title": "LogoutRequest"
+      },
+      "MeResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "email": {
+            "type": "string",
+            "title": "Email"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "roles": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Roles"
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "email",
+          "display_name",
+          "roles",
+          "is_active"
+        ],
+        "title": "MeResponse"
+      },
+      "MessageFrameData": {
+        "properties": {
+          "outcome": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TurnOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code",
+            "description": "An FR-ORC-05 `FailureClass`. Absent on `abstained` and injection-`blocked` turns, which are decisions rather than failures and carry their own copy (R-44(5))."
+          },
+          "message": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MessageResponse"
+              },
+              {
+                "$ref": "#/components/schemas/DegradedMessage"
+              }
+            ],
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "title": "MessageFrameData",
+        "description": "The completed turn: one verified answer, or the copy that replaces it."
+      },
+      "MessageResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "role": {
+            "$ref": "#/components/schemas/MessageRole"
+          },
+          "segs": {
+            "items": {
+              "$ref": "#/components/schemas/Segment"
+            },
+            "type": "array",
+            "title": "Segs"
+          },
+          "evaluation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EvaluationResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "feedback": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Feedback"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "model_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Name"
+          },
+          "prompt_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt Tokens"
+          },
+          "completion_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completion Tokens"
+          },
+          "latency_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latency Ms"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "role",
+          "segs",
+          "created_at"
+        ],
+        "title": "MessageResponse",
+        "description": "One message, in the FR-MSG-06 shape.\n\n`segs` is **derived, never stored as such** (R-48(4)): `messages.content` holds the answer\nwith its `[S<n>]` markers intact and `messages.citations` the resolved segments. The raw\ncontent is deliberately not exposed — a client rendering it would show the markers, which\nis precisely what the segmentation exists to prevent.\n\nBoth JSONB-backed fields are typed as of T-405 — `list[dict[str, Any]]` reached a generated\nclient as `Record<string, never>[]`, so the FR-CIT-01 chip and FR-CIT-03 hover card would\nhave been hand-written types. Neither typing can fail a read: both go through a tolerant\ncoercion (`envelope_segments`, :func:`_evaluation`) that falls back rather than raising."
+      },
+      "MessageRole": {
+        "type": "string",
+        "enum": [
+          "user",
+          "ai"
+        ],
+        "title": "MessageRole",
+        "description": "Message author (FR-MSG-06)."
+      },
+      "NotLatestAnswerDetail": {
+        "properties": {
+          "error_code": {
+            "type": "string",
+            "const": "NOT_LATEST_ANSWER",
+            "title": "Error Code"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "error_code",
+          "message"
+        ],
+        "title": "NotLatestAnswerDetail",
+        "description": "FR-MSG-08 / R-56(1) — the target is no longer the latest AI answer.\n\nA **second code** rather than a second copy of the one above, because the two are resolved\ndifferently: the budget refusal ends the conversation until the user starts a new chat,\nwhile this one clears the moment the client reloads the transcript. `app/rag/errors.py:99`\nrecords that the distinction reaches the client only if the codes stay distinct here; the\n`Literal` is what carries it into the generated types."
+      },
+      "NotLatestAnswerResponse": {
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/NotLatestAnswerDetail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "detail"
+        ],
+        "title": "NotLatestAnswerResponse",
+        "description": "The wire body for R-56(1)'s refusal."
+      },
+      "ReadinessResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded"
+            ],
+            "title": "Status"
+          },
+          "checks": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/CheckResult"
+            },
+            "type": "object",
+            "title": "Checks"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "checks"
+        ],
+        "title": "ReadinessResponse",
+        "description": "NFR-REL-02's readiness body, on both arms (T-405).\n\nTyped so the `503` branch is expressible in the schema at all: the status code is set\nimperatively on the response object, so FastAPI cannot infer it, and before T-405 the whole\nbody was an untyped `dict[str, object]`."
+      },
+      "RefreshRequest": {
+        "properties": {
+          "refresh_token": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Refresh Token"
+          }
+        },
+        "type": "object",
+        "required": [
+          "refresh_token"
+        ],
+        "title": "RefreshRequest"
+      },
+      "RenameConversationRequest": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Title"
+          }
+        },
+        "type": "object",
+        "required": [
+          "title"
+        ],
+        "title": "RenameConversationRequest",
+        "description": "FR-SBR-04. `title` is required — this route renames and does nothing else."
+      },
+      "ReplaceResponse": {
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Document Id"
+          },
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DocumentStatus"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "duplicate": {
+            "type": "boolean",
+            "title": "Duplicate",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "document_id",
+          "job_id",
+          "status",
+          "version"
+        ],
+        "title": "ReplaceResponse",
+        "description": "R-40(1)'s `202`, plus the identical-bytes `200`.\n\n`version` is the version the worker will **build**; `DocumentResponse.current_version`\nstays on the one still serving until the swap commits (R-36(3)). The names differ on\npurpose. On the duplicate `200` the two are equal and `job_id` is null."
+      },
+      "RetryResponse": {
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Document Id"
+          },
+          "job_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Job Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DocumentStatus"
+          }
+        },
+        "type": "object",
+        "required": [
+          "document_id",
+          "job_id",
+          "status"
+        ],
+        "title": "RetryResponse",
+        "description": "FR-ING-06's retry `202`. Always a fresh job id (R-39(5))."
+      },
+      "Role": {
+        "type": "string",
+        "enum": [
+          "admin",
+          "user"
+        ],
+        "title": "Role",
+        "description": "Corpus roles. Values are the Keycloak role names."
+      },
+      "Segment": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/CitationSegment"
+          },
+          {
+            "$ref": "#/components/schemas/TextSegment"
+          }
+        ]
+      },
+      "SendMessageRequest": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Query"
+          },
+          "document_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "title": "Document Ids"
+          }
+        },
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "title": "SendMessageRequest",
+        "description": "FR-CMP-01's composer payload.\n\n`document_ids` are the FR-CMP-04 `@`-mentions and they **narrow** the retrieval scope\n(R-46(1)) — they are AND-ed with the caller's ambient scope, never unioned, so a mention\nnaming a document outside it retrieves nothing rather than reaching it."
+      },
+      "StageData": {
+        "properties": {
+          "stage": {
+            "$ref": "#/components/schemas/TurnStage"
+          }
+        },
+        "type": "object",
+        "required": [
+          "stage"
+        ],
+        "title": "StageData",
+        "description": "R-43(5) made structural: this payload **cannot** carry text.\n\nOne field, so the \"progress frames carry no content\" rule of R-54(2) is a property of the\ntype rather than a discipline at the yield site."
+      },
+      "TextSegment": {
+        "properties": {
+          "text": {
+            "type": "string",
+            "title": "Text"
+          }
+        },
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "title": "TextSegment",
+        "description": "A plain run of the answer.\n\nThe persisted shape is exactly ``{\"text\": ...}`` and nothing may be added: this is also what\n`plain_segments` writes for abstentions, blocked turns and any pre-T-402 row."
+      },
+      "TokenResponse": {
+        "properties": {
+          "access_token": {
+            "type": "string",
+            "title": "Access Token"
+          },
+          "refresh_token": {
+            "type": "string",
+            "title": "Refresh Token"
+          },
+          "token_type": {
+            "type": "string",
+            "title": "Token Type",
+            "default": "bearer"
+          },
+          "expires_in": {
+            "type": "integer",
+            "title": "Expires In"
+          }
+        },
+        "type": "object",
+        "required": [
+          "access_token",
+          "refresh_token",
+          "expires_in"
+        ],
+        "title": "TokenResponse"
+      },
+      "TurnOutcome": {
+        "type": "string",
+        "enum": [
+          "answered",
+          "abstained",
+          "blocked",
+          "error",
+          "review"
+        ]
+      },
+      "TurnStage": {
+        "type": "string",
+        "enum": [
+          "preparing",
+          "retrieving",
+          "generating",
+          "verifying"
+        ]
+      },
+      "UpdateUserRequest": {
+        "properties": {
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "is_active": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Active"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Role"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "new_password": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "New Password"
+          }
+        },
+        "type": "object",
+        "title": "UpdateUserRequest",
+        "description": "Admin PATCH — every field optional; at least one required (FR-USR-05/07)."
+      },
+      "UploadResponse": {
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Document Id"
+          },
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DocumentStatus"
+          },
+          "duplicate": {
+            "type": "boolean",
+            "title": "Duplicate",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "document_id",
+          "job_id",
+          "status"
+        ],
+        "title": "UploadResponse",
+        "description": "FR-ING-02's `202` body, plus the FR-KBM-08 duplicate signal.\n\nOn a duplicate the response is `200` (nothing was queued), `job_id` is null and\n`status` is the *existing* document's lifecycle state, so the drop zone can point at\nthe row already present instead of showing an error."
+      },
+      "UserResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "email": {
+            "type": "string",
+            "title": "Email"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "roles": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Roles"
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "email",
+          "display_name",
+          "roles",
+          "is_active"
+        ],
+        "title": "UserResponse"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    },
+    "securitySchemes": {
+      "HTTPBearer": {
+        "type": "http",
+        "description": "Realm-signed RS256 access token from `POST /api/v1/auth/login` (R-28).",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "auth",
+      "description": "Login, refresh, logout and the caller's own profile (§4.17)."
+    },
+    {
+      "name": "conversations",
+      "description": "Chats: create, list, rename, delete (FR-SBR-*)."
+    },
+    {
+      "name": "messages",
+      "description": "Ask, read, rate and regenerate answers (FR-MSG-*)."
+    },
+    {
+      "name": "documents",
+      "description": "Knowledge-base files and their live status (FR-KBM-*)."
+    },
+    {
+      "name": "jobs",
+      "description": "Ingestion and deletion job status (FR-ING-*)."
+    },
+    {
+      "name": "users",
+      "description": "Administrator user management (FR-USR-*)."
+    },
+    {
+      "name": "audit",
+      "description": "Audit trail (NFR-OBS-03)."
+    },
+    {
+      "name": "system",
+      "description": "Unversioned liveness and readiness probes (NFR-REL-02)."
+    }
+  ]
+}

@@ -11,6 +11,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 
+from app.api.errors import MISCONFIGURED, RATE_LIMITED, UPSTREAM_DOWN, error_responses
 from app.auth import service
 from app.auth.dependencies import CurrentPrincipal, CurrentUser, DbSession, Keycloak
 from app.auth.keycloak_client import (
@@ -64,7 +65,16 @@ def _token_response(tokens: dict[str, Any]) -> TokenResponse:
     )
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post(
+    "/login",
+    response_model=TokenResponse,
+    responses={
+        **error_responses((401, "Invalid email or password (FR-AUT-04).")),
+        **RATE_LIMITED,
+        **UPSTREAM_DOWN,
+    },
+    summary="Exchange credentials for a token pair",
+)
 @limiter.limit(login_limit, key_func=client_ip_key)
 async def login(
     request: Request, response: Response, body: LoginRequest, kc: Keycloak, session: DbSession
@@ -82,7 +92,16 @@ async def login(
     return _token_response(tokens)
 
 
-@router.post("/refresh", response_model=TokenResponse)
+@router.post(
+    "/refresh",
+    response_model=TokenResponse,
+    responses={
+        **error_responses((401, "The refresh token is invalid or expired.")),
+        **RATE_LIMITED,
+        **UPSTREAM_DOWN,
+    },
+    summary="Exchange a refresh token for a new pair",
+)
 @limiter.limit(refresh_limit, key_func=client_ip_key)
 async def refresh(
     request: Request, response: Response, body: RefreshRequest, kc: Keycloak, session: DbSession
@@ -96,7 +115,12 @@ async def refresh(
     return _token_response(tokens)
 
 
-@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+@router.post(
+    "/logout",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses=UPSTREAM_DOWN,
+    summary="Revoke a refresh token",
+)
 async def logout(body: LogoutRequest, kc: Keycloak, session: DbSession) -> None:
     try:
         await service.logout(refresh_token=body.refresh_token, kc=kc, session=session)
@@ -104,7 +128,7 @@ async def logout(body: LogoutRequest, kc: Keycloak, session: DbSession) -> None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, _UPSTREAM) from exc
 
 
-@router.get("/me", response_model=MeResponse)
+@router.get("/me", response_model=MeResponse, summary="The caller's own profile")
 async def me(principal: CurrentPrincipal, user: CurrentUser) -> MeResponse:
     return MeResponse(
         id=user.id,
@@ -115,7 +139,17 @@ async def me(principal: CurrentPrincipal, user: CurrentUser) -> MeResponse:
     )
 
 
-@router.post("/change-password", status_code=status.HTTP_204_NO_CONTENT)
+@router.post(
+    "/change-password",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={
+        **error_responses((401, "The current password is incorrect.")),
+        **RATE_LIMITED,
+        **MISCONFIGURED,
+        **UPSTREAM_DOWN,
+    },
+    summary="Change the caller's own password",
+)
 @limiter.limit(change_password_limit, key_func=principal_or_ip_key)
 async def change_password(
     request: Request,

@@ -29,6 +29,11 @@ node_modules/
 frontend/dist/
 frontend/.vite/
 *.tsbuildinfo
+
+# `backend/openapi.json` and `frontend/src/api/schema.d.ts` are generated and **committed**
+# on purpose (T-405). Committing them means `npm run build` needs no Python, and a developer
+# who changed a route without regenerating sees a dirty working tree — which, with no CI in
+# this repo, is the only signal there is. A backend pytest guards the first against the app.
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

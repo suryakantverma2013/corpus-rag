@@ -12,6 +12,7 @@ import uuid
 
 from fastapi import APIRouter, HTTPException, Query, status
 
+from app.api.errors import MISCONFIGURED, RATE_LIMITED, UPSTREAM_DOWN, error_responses
 from app.auth import users_service
 from app.auth.dependencies import DbSession, Keycloak, RequireAdmin
 from app.auth.keycloak_client import (
@@ -26,6 +27,11 @@ from app.auth.schemas import CreateUserRequest, UpdateUserRequest, UserResponse
 from app.auth.users_service import SelfMutationError
 
 router = APIRouter(prefix="/users", tags=["users"])
+
+#: Every route here talks to Keycloak's Admin API, so all four share the same failure set
+#: (T-110's narrowing: `503` means unreachable, `500` means our own credentials or request).
+#: Declared centrally as of T-405 — before it, these routes carried no `responses=` at all.
+_KEYCLOAK_FAILURES = {**RATE_LIMITED, **MISCONFIGURED, **UPSTREAM_DOWN}
 
 _CONFLICT = "A user with that email already exists."
 _NOT_FOUND = "User not found."
@@ -44,7 +50,16 @@ _MISCONFIGURED = (
 )
 
 
-@router.post("", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=UserResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        **error_responses((409, "A user with that email already exists.")),
+        **_KEYCLOAK_FAILURES,
+    },
+    summary="Create a user",
+)
 async def create_user(
     body: CreateUserRequest, admin: RequireAdmin, kc: Keycloak, session: DbSession
 ) -> UserResponse:
@@ -68,7 +83,12 @@ async def create_user(
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, _UPSTREAM) from exc
 
 
-@router.get("", response_model=list[UserResponse])
+@router.get(
+    "",
+    response_model=list[UserResponse],
+    responses=_KEYCLOAK_FAILURES,
+    summary="List users",
+)
 async def list_users(
     _admin: RequireAdmin,
     kc: Keycloak,
@@ -84,7 +104,19 @@ async def list_users(
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, _UPSTREAM) from exc
 
 
-@router.patch("/{user_id}", response_model=UserResponse)
+@router.patch(
+    "/{user_id}",
+    response_model=UserResponse,
+    responses={
+        **error_responses(
+            (403, "You cannot perform this action on your own account."),
+            (404, "User not found."),
+            (409, "A user with that email already exists."),
+        ),
+        **_KEYCLOAK_FAILURES,
+    },
+    summary="Update a user",
+)
 async def update_user(
     user_id: uuid.UUID,
     body: UpdateUserRequest,
@@ -108,7 +140,18 @@ async def update_user(
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, _UPSTREAM) from exc
 
 
-@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={
+        **error_responses(
+            (403, "You cannot delete your own account."),
+            (404, "User not found."),
+        ),
+        **_KEYCLOAK_FAILURES,
+    },
+    summary="Delete a user",
+)
 async def delete_user(
     user_id: uuid.UUID, admin: RequireAdmin, kc: Keycloak, session: DbSession
 ) -> None:

@@ -15,14 +15,15 @@ All three FR-ERR rejection strings are provisional pending §8.4 — the limits 
 
 from __future__ import annotations
 
-import json
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Annotated, assert_never
+from typing import Annotated, Literal, assert_never
 
 from fastapi import (
     APIRouter,
+    Depends,
     File,
     Form,
     HTTPException,
@@ -32,9 +33,19 @@ from fastapi import (
     UploadFile,
     status,
 )
-from pydantic import BaseModel
-from sse_starlette.sse import EventSourceResponse
+from fastapi.sse import EventSourceResponse
+from pydantic import BaseModel, Field
 
+from app.api.errors import (
+    PROCESSING_LOCKED,
+    QUOTA_EXCEEDED,
+    RATE_LIMITED,
+    STORAGE_DOWN,
+    TOO_LARGE,
+    UNSUPPORTED_TYPE,
+    error_responses,
+)
+from app.api.events import SseFrame
 from app.auth.dependencies import (
     CurrentPrincipal,
     CurrentUser,
@@ -93,8 +104,19 @@ _PROCESSING_LOCKED = (  # TBD(§8.4) copy — FR-STA-02 / FR-ORC-04, R-43
 #: throttle from a busy chat. `423 Locked` describes a locked *resource*, and what is locked
 #: here is the caller's session, not the document. `409` is the vocabulary this surface
 #: already uses for `NotRetryableError` / `NotReplaceableError`: one status, one handler.
-_PROCESSING_LOCKED_RESPONSE = {
-    status.HTTP_409_CONFLICT: {"description": "A response is generating for this user."},
+#:
+#: All four gated verbs also carry the NFR-SEC-07 throttle, so the two travel together.
+#: `PROCESSING_LOCKED`/`RATE_LIMITED` come from `app/api/errors.py` (T-405), which is what gives
+#: the body a schema rather than only a description.
+_LOCKED_AND_LIMITED = {**PROCESSING_LOCKED, **RATE_LIMITED}
+
+#: Everything the two multipart routes can refuse an upload with (R-33(6)).
+_UPLOAD_FAILURES = {
+    **TOO_LARGE,
+    **UNSUPPORTED_TYPE,
+    **QUOTA_EXCEEDED,
+    **STORAGE_DOWN,
+    **error_responses((400, "Empty file, or scope=chat without a conversation_id.")),
 }
 
 
@@ -119,7 +141,9 @@ class UploadResponse(BaseModel):
     responses={
         status.HTTP_200_OK: {"description": "Duplicate checksum — not re-ingested."},
         status.HTTP_202_ACCEPTED: {"description": "Accepted; ingestion queued."},
-        **_PROCESSING_LOCKED_RESPONSE,
+        **error_responses((404, "scope=chat naming no conversation of this caller's.")),
+        **_UPLOAD_FAILURES,
+        **_LOCKED_AND_LIMITED,
     },
     summary="Upload a document",
 )
@@ -207,8 +231,8 @@ class RetryResponse(BaseModel):
     responses={
         status.HTTP_200_OK: {"description": "Already deleted — nothing queued."},
         status.HTTP_202_ACCEPTED: {"description": "Accepted; the document left retrieval."},
-        status.HTTP_404_NOT_FOUND: {"description": "No such document for this caller."},
-        **_PROCESSING_LOCKED_RESPONSE,
+        **error_responses((404, "No such document for this caller.")),
+        **_LOCKED_AND_LIMITED,
     },
     summary="Delete a document",
 )
@@ -251,10 +275,11 @@ async def delete_document(
     status_code=status.HTTP_202_ACCEPTED,
     responses={
         status.HTTP_202_ACCEPTED: {"description": "Accepted; ingestion re-queued."},
-        status.HTTP_404_NOT_FOUND: {"description": "No such document for this caller."},
-        status.HTTP_409_CONFLICT: {
-            "description": "The document is not in FAILED, or a response is generating."
-        },
+        **error_responses(
+            (404, "No such document for this caller."),
+            (409, "The document is not in FAILED, or a response is generating."),
+        ),
+        **RATE_LIMITED,
     },
     summary="Retry a failed ingestion",
 )
@@ -385,8 +410,10 @@ def _to_response(listing: DocumentListing) -> DocumentResponse:
     "",
     response_model=list[DocumentResponse],
     responses={
-        status.HTTP_400_BAD_REQUEST: {"description": "scope=chat without a conversation_id."},
-        status.HTTP_404_NOT_FOUND: {"description": "No such conversation for this caller."},
+        **error_responses(
+            (400, "scope=chat without a conversation_id."),
+            (404, "No such conversation for this caller."),
+        ),
     },
     summary="List documents",
 )
@@ -467,31 +494,146 @@ def _to_event_response(state: DocumentState) -> DocumentEventResponse:
     )
 
 
+class DocumentRemovedData(BaseModel):
+    """A document that has left the caller's set.
+
+    Only an id: a completed deletion has no visible state to transition into, so a tombstone can
+    signal only by disappearing (R-41(4)).
+    """
+
+    document_id: uuid.UUID
+
+
+class DocumentSnapshotFrame(SseFrame):
+    """The full set, sent on **every** connect — including a reconnect.
+
+    There is no `Last-Event-ID` replay by ruling (R-41(6)): a fresh snapshot is strictly more
+    correct than a delta stream with gaps in it.
+    """
+
+    event: Literal["snapshot"] = "snapshot"
+    data: list[DocumentEventResponse]
+
+
+class DocumentChangedFrame(SseFrame):
+    """One row whose state changed.
+
+    Emitted from **polling**, so it samples state rather than replaying every transition: a fast
+    ingestion was measured going `QUEUED → INDEXING → ACTIVE` inside one interval (T-210). A
+    client must render whatever arrives and never assume it will see each FR-ING-01 stage.
+    """
+
+    event: Literal["document"] = "document"
+    data: DocumentEventResponse
+
+
+class DocumentRemovedFrame(SseFrame):
+    """A document left the set — deleted, or moved out of the caller's scope."""
+
+    event: Literal["removed"] = "removed"
+    data: DocumentRemovedData
+
+
+#: What `GET /documents/events` streams (FR-KBM-09). Published as a named component so T-508's
+#: hand-rolled reader — `fetch` + `ReadableStream`, never `EventSource` (R-41(3)) — parses into a
+#: generated discriminated union rather than a hand-written one.
+type DocumentStreamFrame = Annotated[
+    DocumentSnapshotFrame | DocumentChangedFrame | DocumentRemovedFrame,
+    Field(discriminator="event"),
+]
+
+
+@dataclass(frozen=True, slots=True)
+class StreamScope:
+    """The resolved scope a document stream will report on."""
+
+    knowledge_base_id: uuid.UUID | None
+
+
+async def resolve_stream_scope(
+    user: CurrentUser,
+    session: DbSession,
+    scope: Annotated[UploadScope | None, Query()] = None,
+    conversation_id: Annotated[uuid.UUID | None, Query()] = None,
+) -> StreamScope:
+    """Resolve the scope before the stream starts, so a bad request is still a `400`/`404`.
+
+    A dependency rather than the first lines of the handler because the handler is now the SSE
+    generator itself (T-405): FastAPI creates the generator without running a statement, so a
+    check left in the body would fire after the `200` and the first byte, where there is no
+    status code left to fail with. The route's own docstring already required this ordering.
+
+    Filters and authorization are deliberately identical to `list_documents` — same parameter
+    spelling, same `400`/`404`, same caller scoping with no admin widening — so the stream and
+    the page it updates can never disagree about what the caller may see.
+    """
+    if scope is None:
+        return StreamScope(knowledge_base_id=None)
+    try:
+        knowledge_base_id = await documents_service.resolve_scope_kb_id(
+            session, user=user, scope=scope, conversation_id=conversation_id
+        )
+    except MissingConversationError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, _NO_CONVERSATION) from exc
+    except ConversationNotFoundError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, _CONVERSATION_NOT_FOUND) from exc
+    # A scope that resolves to no knowledge base yet (nothing uploaded to it) still gets a
+    # stream: the KB is created on demand by the first upload, and a client that opened the
+    # modal a moment early must not be left without the events describing it.
+    return StreamScope(knowledge_base_id=knowledge_base_id)
+
+
+async def hold_stream_slot(user: CurrentUser, settings: SettingsDep) -> AsyncIterator[None]:
+    """Take one of the caller's stream slots for the life of the response (`429` if full).
+
+    A **`yield` dependency**, which is what makes the release correct rather than merely
+    present: FastAPI closes the request-scoped exit stack *after* the streaming response
+    completes, so the slot is held for exactly the stream's lifetime. The previous shape — an
+    acquire in the handler and a release in the publisher's `finally` — leaked a slot whenever
+    anything between the two raised, and could only release on paths the generator reached.
+
+    `finally`, not "after the loop": the normal end of an SSE stream is the client vanishing,
+    which arrives as `GeneratorExit`/`CancelledError`. Releasing only on a clean exit would leak
+    a slot per closed tab until the user hit the cap and could open no more.
+    """
+    try:
+        document_events.registry.acquire(user.id, limit=settings.sse.max_streams_per_user)
+    except document_events.TooManyStreamsError as exc:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, _TOO_MANY_STREAMS) from exc
+    try:
+        yield None
+    finally:
+        document_events.registry.release(user.id)
+
+
 @router.get(
     "/events",
     summary="Live document-status stream (SSE)",
     response_class=EventSourceResponse,
     responses={
         status.HTTP_200_OK: {
+            # Declared rather than inferred — see `app/openapi.py::_repair_stream_media_types`
+            # for the FastAPI 0.139.2 defect that makes this necessary.
+            "model": DocumentStreamFrame,
             "description": (
                 "An SSE stream. `snapshot` carries the full set on connect, `document` one "
                 "changed row, `removed` a document id that has left the set."
             ),
-            "content": {"text/event-stream": {}},
         },
-        status.HTTP_400_BAD_REQUEST: {"description": "scope=chat without a conversation_id."},
-        status.HTTP_404_NOT_FOUND: {"description": "No such conversation for this caller."},
-        status.HTTP_429_TOO_MANY_REQUESTS: {"description": "Too many concurrent streams."},
+        **error_responses(
+            (400, "scope=chat without a conversation_id."),
+            (404, "No such conversation for this caller."),
+            (429, "Too many concurrent streams for this caller."),
+        ),
     },
 )
 async def stream_documents(
+    scope_: Annotated[StreamScope, Depends(resolve_stream_scope)],
+    _slot: Annotated[None, Depends(hold_stream_slot)],
     user: CurrentUser,
-    session: DbSession,
     sessionmaker: StreamSessionmaker,
     settings: SettingsDep,
-    scope: Annotated[UploadScope | None, Query()] = None,
-    conversation_id: Annotated[uuid.UUID | None, Query()] = None,
-) -> EventSourceResponse:
+) -> AsyncIterator[DocumentStreamFrame]:
     """FR-KBM-09's live surface (R-41).
 
     Filters, scope resolution and authorization are deliberately identical to
@@ -505,63 +647,33 @@ async def stream_documents(
     rejected: a raw token there is written to access logs, proxy logs, `Referer` headers
     and browser history, and stays valid in all of them long after the tab closes.
 
-    The `session` dependency resolves the scope **once, before streaming starts**, so a bad
-    request still fails as an ordinary `400`/`404` — once the `200` and the first byte are
-    out, there is no status code left to fail with. The loop itself uses `sessionmaker`.
+    Scope resolution and the stream-slot reservation are both **dependencies**
+    (`resolve_stream_scope`, `hold_stream_slot`), so a bad request still fails as an ordinary
+    `400`/`404`/`429` — once the `200` and the first byte are out, there is no status code left
+    to fail with, and a generator handler's body does not run until then (T-405). The loop
+    itself uses `sessionmaker`, never the request-scoped session, so a long-lived stream cannot
+    pin a pool slot.
     """
-    knowledge_base_id: uuid.UUID | None = None
-    if scope is not None:
-        try:
-            knowledge_base_id = await documents_service.resolve_scope_kb_id(
-                session, user=user, scope=scope, conversation_id=conversation_id
-            )
-        except MissingConversationError as exc:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, _NO_CONVERSATION) from exc
-        except ConversationNotFoundError as exc:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, _CONVERSATION_NOT_FOUND) from exc
-        # A scope that resolves to no knowledge base yet (nothing uploaded to it) still
-        # gets a stream: the KB is created on demand by the first upload, and a client that
-        # opened the modal a moment early must not be left without the events describing it.
-
-    try:
-        document_events.registry.acquire(user.id, limit=settings.sse.max_streams_per_user)
-    except document_events.TooManyStreamsError as exc:
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, _TOO_MANY_STREAMS) from exc
-
-    async def publish() -> AsyncIterator[dict[str, str]]:
-        try:
-            events = document_events.stream_document_events(
-                sessionmaker,
-                owner_id=user.id,
-                knowledge_base_id=knowledge_base_id,
-                poll_interval=settings.sse.poll_interval_seconds,
-                stall_after=settings.stall_after,
-            )
-            async for event in events:
-                yield _frame(event)
-        finally:
-            # `finally`, not after the loop: the normal end of an SSE stream is the client
-            # vanishing, which reaches this generator as `GeneratorExit`/`CancelledError`.
-            # Releasing only on a clean exit would leak a slot per closed tab until the
-            # user hit the cap and could open no more.
-            document_events.registry.release(user.id)
-
-    return EventSourceResponse(publish(), ping=int(settings.sse.ping_seconds))
+    events = document_events.stream_document_events(
+        sessionmaker,
+        owner_id=user.id,
+        knowledge_base_id=scope_.knowledge_base_id,
+        poll_interval=settings.sse.poll_interval_seconds,
+        stall_after=settings.stall_after,
+    )
+    async for event in events:
+        yield _frame(event).to_event()
 
 
-def _frame(event: document_events.DocumentEvent) -> dict[str, str]:
+def _frame(event: document_events.DocumentEvent) -> DocumentStreamFrame:
     """One SSE frame. `data` is JSON in every case, so the client has one parse path."""
     match event:
         case document_events.Snapshot(documents=documents):
-            payload = [_to_event_response(state).model_dump(mode="json") for state in documents]
-            return {"event": "snapshot", "data": json.dumps(payload)}
+            return DocumentSnapshotFrame(data=[_to_event_response(state) for state in documents])
         case document_events.DocumentChanged(state=state):
-            return {
-                "event": "document",
-                "data": _to_event_response(state).model_dump_json(),
-            }
+            return DocumentChangedFrame(data=_to_event_response(state))
         case document_events.DocumentRemoved(document_id=document_id):
-            return {"event": "removed", "data": json.dumps({"document_id": str(document_id)})}
+            return DocumentRemovedFrame(data=DocumentRemovedData(document_id=document_id))
         case _:  # pragma: no cover — exhaustive over the union; keeps mypy honest if it grows
             assert_never(event)
 
@@ -569,7 +681,7 @@ def _frame(event: document_events.DocumentEvent) -> dict[str, str]:
 @router.get(
     "/{document_id}",
     response_model=DocumentResponse,
-    responses={status.HTTP_404_NOT_FOUND: {"description": "No such document for this caller."}},
+    responses=error_responses((404, "No such document for this caller.")),
     summary="Get one document",
 )
 async def get_document(
@@ -599,7 +711,9 @@ async def get_document(
     responses={
         status.HTTP_200_OK: {"description": "Identical bytes — nothing queued."},
         status.HTTP_202_ACCEPTED: {"description": "Accepted; the new version is queued."},
-        status.HTTP_404_NOT_FOUND: {"description": "No such document for this caller."},
+        **error_responses((404, "No such document for this caller.")),
+        **_UPLOAD_FAILURES,
+        **RATE_LIMITED,
         status.HTTP_409_CONFLICT: {
             "description": (
                 "Not ACTIVE/FAILED, the bytes belong to another document, "

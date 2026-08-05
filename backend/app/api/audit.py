@@ -28,11 +28,19 @@ class AuditLogResponse(BaseModel):
     event_type: AuditEventType
     target_type: str | None
     target_id: str | None
+    #: Deliberately left open (T-405). The payload differs per `event_type` — R-43(7)'s
+    #: `details.action` for a chat denial, R-39's job ids elsewhere — and no GUI surface reads
+    #: it, so a model here would freeze a shape nothing consumes and every new audit event
+    #: would have to widen it.
     details: dict | None
     created_at: datetime.datetime
 
 
-@router.get("", response_model=list[AuditLogResponse])
+@router.get(
+    "",
+    response_model=list[AuditLogResponse],
+    summary="Read the audit trail",
+)
 async def list_audit_events(
     _admin: RequireAdmin,
     session: DbSession,

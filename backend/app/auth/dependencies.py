@@ -23,7 +23,14 @@ from app.db.models.users import User
 from app.db.repositories.users import UserRepository
 from app.db.session import get_session, get_stream_sessionmaker
 
-bearer_scheme = HTTPBearer(auto_error=False)
+#: `auto_error=False` so `get_principal` raises the 401 itself, with `WWW-Authenticate` and the
+#: FR-AUT copy. The consequence for the schema is that FastAPI never sees that 401 — which is
+#: why `app/openapi.py` derives 401/403 from the `security` block this scheme emits (T-405).
+bearer_scheme = HTTPBearer(
+    auto_error=False,
+    bearerFormat="JWT",
+    description="Realm-signed RS256 access token from `POST /api/v1/auth/login` (R-28).",
+)
 
 _UNAUTH_HEADERS = {"WWW-Authenticate": "Bearer"}
 

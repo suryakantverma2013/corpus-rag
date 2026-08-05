@@ -266,6 +266,24 @@ async def _reset_graph_and_checkpointer() -> AsyncIterator[None]:
     await close_chat_client()
 
 
+@pytest.fixture(scope="session")
+def openapi_document() -> dict[str, object]:
+    """The OpenAPI document, built with no database and no dependency overrides (T-405).
+
+    Deliberately **not** the `app` fixture below. That one depends on `session`/`db_connection`
+    and therefore *skips* when Postgres is unreachable — and a contract test that silently stops
+    running is worse than no contract test, because the suite still reports green. `create_app()`
+    opens no connection at import or at `openapi()` time (every client is built lazily on first
+    use, per the `lifespan` docstring), so this needs nothing but the process.
+
+    Session-scoped: generating the document walks every route and builds every model field, and
+    the result is immutable as far as its readers are concerned.
+    """
+    from app.main import create_app
+
+    return create_app().openapi()
+
+
 @pytest.fixture
 def app(session: AsyncSession, db_connection: AsyncConnection):  # noqa: ANN201 (FastAPI app)
     """App instance with the DB session overridden to the transactional test session."""

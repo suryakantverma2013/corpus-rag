@@ -163,11 +163,11 @@ async def check_worker() -> CheckResult:
             await client.aclose()
 
 
-async def run_readiness_checks() -> tuple[bool, dict[str, object]]:
+async def run_readiness_checks() -> tuple[bool, ReadinessResponse]:
     """Run every probe concurrently and aggregate.
 
     Returns ``(all_ok, payload)`` where ``payload`` is the JSON-serialisable body
-    ``{"status": "ok"|"degraded", "checks": {name: CheckResult, ...}}``. Overall
+    :class:`ReadinessResponse`. Overall
     status is ``ok`` only when every probe passed.
     """
     database, broker, object_storage = await asyncio.gather(
@@ -177,7 +177,7 @@ async def run_readiness_checks() -> tuple[bool, dict[str, object]]:
     return _aggregate(checks)
 
 
-async def run_worker_readiness_checks() -> tuple[bool, dict[str, object]]:
+async def run_worker_readiness_checks() -> tuple[bool, ReadinessResponse]:
     """Readiness for the ingestion worker deployable (T-207, R-38(2)).
 
     The worker's own dependency set — everything the API needs, because the ingestion task
@@ -209,10 +209,21 @@ async def _skipped(reason: str) -> CheckResult:
     return CheckResult(status="ok", error=f"not probed: {reason}")
 
 
-def _aggregate(checks: dict[str, CheckResult]) -> tuple[bool, dict[str, object]]:
+class ReadinessResponse(BaseModel):
+    """NFR-REL-02's readiness body, on both arms (T-405).
+
+    Typed so the `503` branch is expressible in the schema at all: the status code is set
+    imperatively on the response object, so FastAPI cannot infer it, and before T-405 the whole
+    body was an untyped `dict[str, object]`.
+    """
+
+    status: Literal["ok", "degraded"]
+    checks: dict[str, CheckResult]
+
+
+def _aggregate(checks: dict[str, CheckResult]) -> tuple[bool, ReadinessResponse]:
     all_ok = all(check.status == "ok" for check in checks.values())
-    payload: dict[str, object] = {
-        "status": "ok" if all_ok else "degraded",
-        "checks": {name: check.model_dump() for name, check in checks.items()},
-    }
-    return all_ok, payload
+    return all_ok, ReadinessResponse(
+        status="ok" if all_ok else "degraded",
+        checks=checks,
+    )

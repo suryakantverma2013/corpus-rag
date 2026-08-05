@@ -17,25 +17,47 @@ API out of the load balancer whenever ClamAV or the worker is down — while it 
 serve every chat and retrieval request. Both endpoints live on the API process because the
 worker runs no HTTP server; the worker arm answers "is a worker alive and are its
 dependencies up", which is what an orchestrator actually needs to know.
+
+Both readiness routes set their status code **imperatively** on the response, because the same
+body is served either way and only the code differs. FastAPI cannot infer a status it never
+sees, so the ``503`` is declared explicitly (T-405) — otherwise the one outcome an orchestrator
+acts on would be absent from the schema.
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Response, status
+from typing import Literal
 
-from app.services.health import run_readiness_checks, run_worker_readiness_checks
+from fastapi import APIRouter, Response, status
+from pydantic import BaseModel
+
+from app.services.health import ReadinessResponse, run_readiness_checks, run_worker_readiness_checks
 
 router = APIRouter(tags=["system"])
 
+#: Same body, different code. Declared on both readiness routes.
+_DEGRADED = {
+    status.HTTP_503_SERVICE_UNAVAILABLE: {
+        "model": ReadinessResponse,
+        "description": "At least one dependency failed its probe (NFR-REL-02).",
+    }
+}
 
-@router.get("/health")
-async def liveness() -> dict[str, str]:
+
+class LivenessResponse(BaseModel):
+    """Liveness is a constant: reaching the handler at all is the answer."""
+
+    status: Literal["ok"]
+
+
+@router.get("/health", summary="Liveness probe")
+async def liveness() -> LivenessResponse:
     """Liveness probe — the process is up (no dependency checks)."""
-    return {"status": "ok"}
+    return LivenessResponse(status="ok")
 
 
-@router.get("/health/ready")
-async def readiness(response: Response) -> dict[str, object]:
+@router.get("/health/ready", responses=_DEGRADED, summary="API readiness probe")
+async def readiness(response: Response) -> ReadinessResponse:
     """Readiness probe — every dependency the *API* serves requests from (NFR-REL-02)."""
     all_ok, payload = await run_readiness_checks()
     if not all_ok:
@@ -43,8 +65,8 @@ async def readiness(response: Response) -> dict[str, object]:
     return payload
 
 
-@router.get("/health/ready/worker")
-async def worker_readiness(response: Response) -> dict[str, object]:
+@router.get("/health/ready/worker", responses=_DEGRADED, summary="Worker readiness probe")
+async def worker_readiness(response: Response) -> ReadinessResponse:
     """Readiness probe for the ingestion worker deployable (T-207, R-38(2))."""
     all_ok, payload = await run_worker_readiness_checks()
     if not all_ok:

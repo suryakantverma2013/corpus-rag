@@ -37,7 +37,16 @@ all read this shape without wanting that.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import (
+    BaseModel,
+    Field,
+    SerializerFunctionWrapHandler,
+    TypeAdapter,
+    ValidationError,
+    model_serializer,
+)
 
 from app.rag.generation import AnswerSegment
 from app.rag.retrieval import RetrievedChunk
@@ -46,6 +55,11 @@ __all__ = [
     "SEGMENTS_KEY",
     "SOURCE_IDS_KEY",
     "CitationEnvelope",
+    "CitationLocator",
+    "CitationLocatorKind",
+    "CitationSegment",
+    "Segment",
+    "TextSegment",
     "build_citations",
     "envelope_segments",
     "plain_segments",
@@ -59,6 +73,111 @@ SOURCE_IDS_KEY = "source_ids"
 
 #: One envelope: ``{"segments": [...], "source_ids": [...]}``.
 type CitationEnvelope = dict[str, Any]
+
+
+# --- the FR-MSG-06 segment shapes (T-405, R-57) ---------------------------------------
+#
+# Declared here rather than in the API layer for the reason this whole module exists: these are
+# the shapes *this* module writes, so `_citation` constructs the model and drift between the
+# persisted payload and the published type is not merely tested for — it is unrepresentable.
+# `app/api/messages.py` reads them back through `envelope_segments`.
+#
+# They are also what makes the citation chip a *generated* TypeScript type. `segs` was
+# `list[dict[str, Any]]`, which reaches a client as `Record<string, never>[]`, so T-505 would
+# have had to hand-write the one shape the spec is most explicit about — which the frontend-dev
+# skill forbids outright.
+#
+# Field naming keeps `app/api/messages.py`'s deliberate seam: route fields are snake_case,
+# **segment** keys are camelCase, because FR-MSG-06 fixes that shape and it is the persisted
+# contract `workers/evaluate.py` reads.
+
+#: R-34's three locator kinds, restated rather than imported: `LocatorKind` lives in
+#: `app/ingestion/parsers/base.py`, and importing it pulls PyMuPDF, python-docx and markdown-it
+#: (451 modules) into every consumer of this module — including the API process, which
+#: `tests/test_parsers.py` asserts against outright. Guarded by a drift test instead.
+type CitationLocatorKind = Literal["page", "section", "rows"]
+
+
+class TextSegment(BaseModel):
+    """A plain run of the answer.
+
+    The persisted shape is exactly ``{"text": ...}`` and nothing may be added: this is also what
+    `plain_segments` writes for abstentions, blocked turns and any pre-T-402 row.
+    """
+
+    text: str
+
+
+class CitationLocator(BaseModel):
+    """R-34's structured address, beside the rendered label.
+
+    Every field is optional because `Locator.as_metadata()` drops the ones that do not apply to
+    the kind — a PDF citation carries `page`, a DOCX one `section_path`, a CSV one
+    `row_start`/`row_end`. FR-CIT-04 is explicit that clients read **these fields** and never
+    parse the label, which is why the structured copy is published at all.
+    """
+
+    kind: CitationLocatorKind | None = None
+    label: str | None = None
+    page: int | None = None
+    section_path: list[str] | None = None
+    section_index: int | None = None
+    row_start: int | None = None
+    row_end: int | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+
+
+class CitationSegment(BaseModel):
+    """A citation run — the FR-CIT-01 chip and the FR-CIT-03 hover card.
+
+    See :func:`_citation` for what each field carries and why `page` holds a label rather than a
+    number.
+    """
+
+    isCite: Literal[True] = True  # noqa: N815 — FR-MSG-06 fixes the spelling
+    doc: str
+    #: Both default to `None` so an **absent** key validates, not just a null one. `_citation`
+    #: always writes them, but this model also *reads* `messages.citations` back, and a stored
+    #: row that predates a key must not cost the whole envelope its citations — which is what
+    #: a required field would do, since a single invalid segment falls the list back to plain
+    #: text. Found by `test_list_returns_the_transcript_in_the_fr_msg_06_shape`.
+    page: str | None = None
+    locator: CitationLocator | None = None
+    quote: str
+    chunkId: str  # noqa: N815 — FR-MSG-06 fixes the spelling
+    score: float | None = Field(
+        default=None,
+        description=(
+            "The FR-CIT-04 rerank score. **Absent** — not null — when the reranker failed open "
+            "and published none (R-47(2)). Render the card with no number."
+        ),
+    )
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_score(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Drop `score` entirely when there is none, which is point (3) of this module.
+
+        Not `exclude_none`: `page` and `locator` are legitimately `null` and must keep their
+        keys. A plain optional field would serialise `"score": null`, and "no score" and "a
+        score of zero" are exactly what FR-CIT-04 needs a client to be able to tell apart.
+        """
+        data = handler(self)
+        if data.get("score") is None:
+            data.pop("score", None)
+        return data
+
+
+#: One run of the answer. **Not a tagged union**: `isCite` is *absent* on a text run and that is
+#: the persisted JSONB shape, so giving :class:`TextSegment` an ``isCite: Literal[False]`` would
+#: rewrite stored data to buy a discriminator it does not need. The two are unambiguous anyway —
+#: each requires a field the other lacks. TypeScript narrows on ``'isCite' in seg``.
+#:
+#: The citation arm is first so Pydantic's smart union tries the more specific shape first.
+type Segment = CitationSegment | TextSegment
+
+#: Reused rather than rebuilt per call — a `TypeAdapter` compiles its validator on construction.
+_SEGMENTS: TypeAdapter[list[Segment]] = TypeAdapter(list[Segment])
 
 
 def scores_by_chunk_id(source_ids: Sequence[str], scores: Sequence[float]) -> dict[str, float]:
@@ -155,41 +274,71 @@ def _citation(hit: RetrievedChunk, *, score: float | None) -> dict[str, Any]:
     `quote` is the chunk text verbatim — the denormalised copy R-36(6) sanctions, and the
     reason a replaced document's historical citation still renders after its chunk rows are
     gone.
+
+    Built as a :class:`CitationSegment` and dumped, rather than assembled as a dict beside a
+    model that describes it (T-405). A describing model drifts the first time someone edits the
+    literal, and the drift is invisible because the schema still validates. The `score` key is
+    still *absent* rather than null when the reranker published none — that rule now lives in
+    the model's serializer, so it holds for every producer of this shape rather than for this
+    function alone.
     """
     locator = hit.meta.get("locator")
-    segment: dict[str, Any] = {
-        "isCite": True,
-        "doc": hit.filename,
-        "page": hit.locator_label,
-        "locator": dict(locator) if isinstance(locator, Mapping) else None,
-        "quote": hit.chunk_text,
-        "chunkId": str(hit.chunk_id),
-    }
-    if score is not None:
-        # Present only when the reranker published one (R-47(2)). The key is *absent*, not
-        # null, so "no score" and "a score of zero" cannot be confused by a client reading it.
-        segment["score"] = score
-    return segment
+    segment = CitationSegment(
+        doc=hit.filename,
+        page=hit.locator_label,
+        locator=_locator(locator),
+        quote=hit.chunk_text,
+        chunkId=str(hit.chunk_id),
+        score=score,
+    )
+    return segment.model_dump(mode="json")
 
 
-def plain_segments(content: str) -> list[dict[str, Any]]:
+def _locator(raw: object) -> CitationLocator | None:
+    """Coerce the stored locator payload, degrading to `None` rather than failing.
+
+    A locator this build cannot parse costs the citation its structured fields; refusing the
+    whole citation would cost the user a chip over metadata FR-CIT-04 treats as an enrichment
+    of the `page` label it sits beside.
+    """
+    if not isinstance(raw, Mapping):
+        return None
+    try:
+        return CitationLocator.model_validate(dict(raw))
+    except ValidationError:
+        return None
+
+
+def plain_segments(content: str) -> list[Segment]:
     """The envelope for an answer with no resolved citations.
 
     Used for abstentions, blocked turns and any pre-T-402 row: FR-MSG-06's `segs` is never
     empty for a message that has text, so the fallback is one text run rather than `[]`.
     """
-    return [{"text": content}]
+    return [TextSegment(text=content)]
 
 
-def envelope_segments(envelope: object, *, content: str) -> list[dict[str, Any]]:
+def envelope_segments(envelope: object, *, content: str) -> list[Segment]:
     """Read `segs` back out for the API DTO, tolerating anything that is not one.
 
     Defensive because this reads a JSONB column: a row written by an older build, or by a
     future one, must render as *the answer text* rather than as an error — the transcript is
     the user's own, and refusing to display it is the worst available outcome.
+
+    **T-405 typed the return without narrowing that promise.** Validation moved *into* this
+    function precisely so it could not move into the DTO, where a `ResponseValidationError`
+    would turn a legacy row into a `500`. The tolerance is in fact wider than before: a Mapping
+    that was not a valid segment previously sailed through as an untyped dict and broke the
+    renderer at display time, and now falls back to the answer text here — which is what the
+    paragraph above always promised.
     """
     if isinstance(envelope, Mapping):
-        segments = envelope.get(SEGMENTS_KEY)
-        if isinstance(segments, list) and segments:
-            return [dict(s) for s in segments if isinstance(s, Mapping)] or plain_segments(content)
+        raw = envelope.get(SEGMENTS_KEY)
+        if isinstance(raw, list) and raw:
+            try:
+                segments = _SEGMENTS.validate_python(raw)
+            except ValidationError:
+                return plain_segments(content)
+            if segments:
+                return segments
     return plain_segments(content)

@@ -320,9 +320,11 @@ class SseSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SSE_", env_file=".env", extra="ignore")
 
     poll_interval_seconds: float = Field(default=1.5)  # TBD(§8.4)
-    # Keepalive. `EventSourceResponse` sends a comment frame on this interval so idle
-    # proxies do not sever a stream that is simply watching an idle knowledge base.
-    ping_seconds: float = Field(default=15.0)  # TBD(§8.4)
+    # `SSE_PING_SECONDS` was retired at T-405. The keepalive is now FastAPI's own
+    # (`fastapi.routing._PING_INTERVAL`), a module constant fixed at 15.0 — which is exactly
+    # what this setting defaulted to, so nothing about the wire changed. Keeping the knob
+    # would have left a documented setting wired to nothing, which is the fault
+    # `EVAL_MAX_CONCURRENCY` and `EVAL_BACKEND` were both removed for.
     # None = derive from WORKER_JOB_TIMEOUT_SECONDS; see the class docstring.
     stall_after_seconds: float | None = Field(default=None)  # TBD(§8.4)
     max_streams_per_user: int = Field(default=4)  # TBD(§8.4)
@@ -331,8 +333,6 @@ class SseSettings(BaseSettings):
     def _coherent(self) -> SseSettings:
         if self.poll_interval_seconds <= 0:
             raise ValueError("SSE_POLL_INTERVAL_SECONDS must be > 0")
-        if self.ping_seconds <= 0:
-            raise ValueError("SSE_PING_SECONDS must be > 0")
         if self.stall_after_seconds is not None and self.stall_after_seconds <= 0:
             raise ValueError("SSE_STALL_AFTER_SECONDS must be > 0 when set")
         if self.max_streams_per_user < 1:

@@ -25,23 +25,32 @@ citation and the user's.
 
 from __future__ import annotations
 
-import json
 import uuid
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, HTTPException, Request, Response, status
-from pydantic import BaseModel, Field, field_validator
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.sse import EventSourceResponse
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
-from sse_starlette.sse import EventSourceResponse
 
+from app.api.errors import (
+    ChatConflictResponse,
+    ContextWindowExceededDetail,
+    ContextWindowExceededResponse,
+    NotLatestAnswerDetail,
+    error_responses,
+)
+from app.api.events import SseFrame, TurnOutcome, TurnStage
 from app.auth.dependencies import CurrentUser, DbSession, SettingsDep, StreamSessionmaker
 from app.db.enums import Feedback, MessageRole
 from app.db.models.conversation import Conversation
 from app.db.models.message import Message
 from app.db.repositories.conversations import ConversationRepository
 from app.db.repositories.messages import MessageRepository
-from app.rag.citations import envelope_segments
+from app.rag.citations import Segment, TextSegment, envelope_segments
 from app.rag.errors import (
     CONTEXT_WINDOW_EXCEEDED,
     CONTEXT_WINDOW_EXCEEDED_CODE,
@@ -53,7 +62,7 @@ from app.services import chat as chat_service
 from app.services.chat import ContextWindowExceededError, MessageEvent, StageEvent, TurnResult
 from app.services.jobs import JobQueueDep
 
-__all__ = ["MessageResponse", "message_router", "router"]
+__all__ = ["ChatStreamFrame", "MessageResponse", "message_router", "router"]
 
 router = APIRouter(prefix="/conversations", tags=["messages"])
 
@@ -112,6 +121,43 @@ class FeedbackRequest(BaseModel):
     feedback: Feedback | None
 
 
+class EvaluationResponse(BaseModel):
+    """The FR-EVL-02 chips — **exactly two** metrics (R-50(1)).
+
+    The other two FR-EVL-01 metrics are reference-based and cannot run on a live turn, which is
+    why they belong to the offline harness (T-312) and their FR-ANL-04 cells read `—`
+    permanently.
+
+    Either field may be `None`: the evaluation path **fails open** (R-50(3)) and metrics are
+    guarded independently, so a partial result is written rather than discarded. The whole
+    object is `None` until the FR-EVL-01 job lands and stays `None` for ever if the judge never
+    answers — a correct end state, not an error.
+
+    `groundedness` is deliberately absent: the T-308 gate's structural number is not this chip
+    (R-49(1), OI-34 as R-50(6) closed it), and a human thumb is not a judge score either
+    (R-55(5)).
+    """
+
+    relevancy: float | None = None
+    faithfulness: float | None = None
+
+
+def _evaluation(raw: object) -> EvaluationResponse | None:
+    """Read `messages.evaluation` back out, tolerating anything that is not one.
+
+    `envelope_segments`' reasoning at a second JSONB column: a row written by an older or newer
+    build must still render, and losing the chips is a far better failure than refusing to
+    display the user's own transcript. An unreadable payload is indistinguishable from "never
+    scored", which the GUI already handles because the evaluation path fails open.
+    """
+    if raw is None:
+        return None
+    try:
+        return EvaluationResponse.model_validate(raw)
+    except ValidationError:
+        return None
+
+
 class MessageResponse(BaseModel):
     """One message, in the FR-MSG-06 shape.
 
@@ -120,16 +166,16 @@ class MessageResponse(BaseModel):
     content is deliberately not exposed — a client rendering it would show the markers, which
     is precisely what the segmentation exists to prevent.
 
-    `evaluation` carries **two** keys at most, `{relevancy, faithfulness}` (R-50(1)) — the
-    other two FR-EVL-01 metrics are reference-based and cannot run on a live turn. It is
-    `None` until the FR-EVL-01 job lands, and stays `None` for ever if the judge never
-    answers, which is a correct end state (the evaluation path fails open).
+    Both JSONB-backed fields are typed as of T-405 — `list[dict[str, Any]]` reached a generated
+    client as `Record<string, never>[]`, so the FR-CIT-01 chip and FR-CIT-03 hover card would
+    have been hand-written types. Neither typing can fail a read: both go through a tolerant
+    coercion (`envelope_segments`, :func:`_evaluation`) that falls back rather than raising.
     """
 
     id: uuid.UUID
     role: MessageRole
-    segs: list[dict[str, Any]]
-    evaluation: dict[str, Any] | None = None
+    segs: list[Segment]
+    evaluation: EvaluationResponse | None = None
     feedback: Feedback | None = None
     model_name: str | None = None
     prompt_tokens: int | None = None
@@ -143,7 +189,7 @@ def _to_response(message: Message) -> MessageResponse:
         id=message.id,
         role=message.role,
         segs=envelope_segments(message.citations, content=message.content),
-        evaluation=message.evaluation,
+        evaluation=_evaluation(message.evaluation),
         feedback=message.feedback,
         model_name=message.model_name,
         prompt_tokens=message.prompt_tokens,
@@ -151,6 +197,91 @@ def _to_response(message: Message) -> MessageResponse:
         latency_ms=message.latency_ms,
         created_at=message.created_at,
     )
+
+
+# --- the chat stream's frames (T-405, R-57) -------------------------------------------
+
+
+class StageData(BaseModel):
+    """R-43(5) made structural: this payload **cannot** carry text.
+
+    One field, so the "progress frames carry no content" rule of R-54(2) is a property of the
+    type rather than a discipline at the yield site.
+    """
+
+    stage: TurnStage
+
+
+class DegradedMessage(BaseModel):
+    """The served-but-unstored branch: an FR-ORC-05 failure or an FR-ORC-02 denial.
+
+    R-54(3) keeps those turns out of `messages`, so there is no row and nothing to rate or
+    regenerate — the intended consequence of not persisting a failed turn.
+
+    **`id` is the one place a regenerate diverges from a send** (T-404), and only here: a send
+    has no row so it is `null`, while a regenerate carries the *target's* id, because the client
+    already has that bubble on screen and a null id would leave it unable to say which answer
+    the error belongs to. `segs` is always exactly one text run.
+    """
+
+    id: uuid.UUID | None
+    role: Literal["ai"] = "ai"
+    segs: list[TextSegment]
+
+
+class MessageFrameData(BaseModel):
+    """The completed turn: one verified answer, or the copy that replaces it."""
+
+    outcome: TurnOutcome | None = None
+    error_code: str | None = Field(
+        default=None,
+        description=(
+            "An FR-ORC-05 `FailureClass`. Absent on `abstained` and injection-`blocked` turns, "
+            "which are decisions rather than failures and carry their own copy (R-44(5))."
+        ),
+    )
+    message: MessageResponse | DegradedMessage
+
+
+class DoneData(BaseModel):
+    """Closes the turn. Carries the outcome again so a client that dropped the `message`
+    frame still learns how it ended."""
+
+    outcome: TurnOutcome | None = None
+
+
+class ChatStageFrame(SseFrame):
+    """Coarse progress. Emitted only when the stage *changes*."""
+
+    event: Literal["stage"] = "stage"
+    data: StageData
+
+
+class ChatMessageFrame(SseFrame):
+    """The whole verified answer, in one frame.
+
+    There is no token streaming and that is a ruling, not an omission: R-48(1)/R-49(3) put the
+    FR-CIT-06 gate between generation and the client, so nothing of the answer exists to send
+    until it has passed (R-54(2)).
+    """
+
+    event: Literal["message"] = "message"
+    data: MessageFrameData
+
+
+class ChatDoneFrame(SseFrame):
+    """End of turn."""
+
+    event: Literal["done"] = "done"
+    data: DoneData
+
+
+#: What `POST /conversations/{id}/messages` and `POST /messages/{id}/regenerate` stream.
+#: Published as a named component, so T-505 imports a discriminated union rather than writing
+#: one. Regenerate is identical in shape to a send — that is what R-56 means by "the same shape".
+type ChatStreamFrame = Annotated[
+    ChatStageFrame | ChatMessageFrame | ChatDoneFrame, Field(discriminator="event")
+]
 
 
 def _budget_conflict(exc: ContextWindowExceededError) -> HTTPException:
@@ -164,17 +295,19 @@ def _budget_conflict(exc: ContextWindowExceededError) -> HTTPException:
     `used_tokens` is the conversation's **real** usage on both paths, never the adjusted
     projection a regenerate checks against — it feeds the FR-ANL-03 card, and a card showing a
     number the meter never displays would read as a bug in the meter.
+
+    The detail is built as :class:`ContextWindowExceededDetail` rather than as a dict literal
+    (T-405): the model is what the OpenAPI document publishes, so constructing it here is what
+    makes the declared shape and the wire shape one fact instead of two that agree today.
     """
-    return HTTPException(
-        status.HTTP_409_CONFLICT,
-        {
-            "error_code": CONTEXT_WINDOW_EXCEEDED_CODE,
-            "message": CONTEXT_WINDOW_EXCEEDED,
-            "used_tokens": exc.check.usage.used_tokens,
-            "limit_tokens": exc.check.usage.limit_tokens,
-            "overflow_tokens": exc.check.overflow_tokens,
-        },
+    detail = ContextWindowExceededDetail(
+        error_code=CONTEXT_WINDOW_EXCEEDED_CODE,
+        message=CONTEXT_WINDOW_EXCEEDED,
+        used_tokens=exc.check.usage.used_tokens,
+        limit_tokens=exc.check.usage.limit_tokens,
+        overflow_tokens=exc.check.overflow_tokens,
     )
+    return HTTPException(status.HTTP_409_CONFLICT, detail.model_dump(mode="json"))
 
 
 async def _owned_or_404(
@@ -187,6 +320,121 @@ async def _owned_or_404(
     if conversation is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, _NOT_FOUND)
     return conversation
+
+
+# --- admission (T-405) ----------------------------------------------------------------
+#
+# Both chat routes are now SSE **generators** (`fastapi.sse`), and FastAPI creates a generator
+# by calling it — which runs no statement in its body. So anything left inside the handler would
+# execute *after* the status line is on the wire, where no HTTP status can carry a refusal. That
+# is exactly the invariant both docstrings already stated ("everything that can refuse the turn
+# happens before the response starts"); it just has to be expressed as a dependency now, because
+# dependencies are resolved before the generator exists.
+#
+# The rate limit moves for a sharper reason still — see `_chat_rate_limit`.
+
+
+@limiter.shared_limit(chat_limit, scope=_CHAT_BUCKET, key_func=principal_or_ip_key)
+async def _chat_rate_limit(request: Request, response: Response) -> None:
+    """NFR-SEC-07 for both chat routes, as a dependency rather than a route decorator.
+
+    **Not a style choice.** slowapi's decorator wraps the endpoint in an ordinary coroutine
+    function, so `inspect.isasyncgenfunction` becomes `False` — and FastAPI decides a route is a
+    stream with `is_generator and issubclass(response_class, EventSourceResponse)`. Decorating
+    the handler would therefore make both routes silently stop being SSE streams, with every
+    test still green. `test_the_chat_routes_are_sse_streams` is the guard.
+
+    Applied here it is also a better expression of T-404's rule: send and regenerate share **one**
+    per-user bucket, and now they share it by sharing the dependency rather than by two
+    decorators agreeing on a scope string. The `request`/`response` parameters are slowapi's —
+    it reads the caller off the first and writes `X-RateLimit-*` onto the second, which FastAPI
+    propagates to the streaming response.
+    """
+    return None
+
+
+ChatRateLimit = Annotated[None, Depends(_chat_rate_limit)]
+
+
+@dataclass(frozen=True, slots=True)
+class SendAdmission:
+    """What survives the checks a send must pass before its first byte."""
+
+    conversation: Conversation
+    question: Message
+    turn_index: int
+
+
+async def admit_send(
+    conversation_id: uuid.UUID,
+    body: SendMessageRequest,
+    user: CurrentUser,
+    session: DbSession,
+    settings: SettingsDep,
+    _rate_limit: ChatRateLimit,
+) -> SendAdmission:
+    """Ownership (R-54), then the FR-STA-04 budget, and only then the question becomes a row.
+
+    The order is load-bearing and unchanged from T-402: R-51's binding is that the budget check
+    precedes the user's `messages` row, or a blocked turn leaves an unanswered question
+    permanently inflating the meter that blocked it.
+    """
+    conversation = await _owned_or_404(session, conversation_id, user.id)
+    try:
+        question, turn_index = await chat_service.record_question(
+            session, conversation=conversation, query=body.query, settings=settings
+        )
+    except ContextWindowExceededError as exc:
+        raise _budget_conflict(exc) from exc
+    return SendAdmission(conversation=conversation, question=question, turn_index=turn_index)
+
+
+@dataclass(frozen=True, slots=True)
+class RegenerationAdmission:
+    """What survives the checks a regenerate must pass before its first byte."""
+
+    conversation: Conversation
+    answer: Message
+    target: chat_service.RegenerationTarget
+    #: Passed to the evaluation key so a *byte-identical* regeneration is still a new job. The
+    #: content hash alone would make it a duplicate, and since the UPDATE cleared `evaluation`
+    #: the message would stay unscored for ever (T-404; see `evaluation_idempotency_key`).
+    nonce: str
+
+
+async def admit_regeneration(
+    message_id: uuid.UUID,
+    user: CurrentUser,
+    session: DbSession,
+    settings: SettingsDep,
+    _rate_limit: ChatRateLimit,
+) -> RegenerationAdmission:
+    """R-56's two refusals, in order: the single `404`, then `NOT_LATEST_ANSWER`/the budget."""
+    repository = MessageRepository(session)
+    answer = await repository.get_owned(message_id, owner_id=user.id)
+    if answer is None or answer.role is not MessageRole.AI:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, _MESSAGE_NOT_FOUND)
+
+    try:
+        target = await chat_service.resolve_regeneration(
+            session,
+            conversation_id=answer.conversation_id,
+            answer=answer,
+            settings=settings,
+        )
+    except chat_service.NotLatestAnswerError as exc:
+        detail = NotLatestAnswerDetail(error_code=NOT_LATEST_ANSWER_CODE, message=NOT_LATEST_ANSWER)
+        raise HTTPException(status.HTTP_409_CONFLICT, detail.model_dump(mode="json")) from exc
+    except ContextWindowExceededError as exc:
+        raise _budget_conflict(exc) from exc
+
+    conversation = await _owned_or_404(session, answer.conversation_id, user.id)
+    return RegenerationAdmission(
+        conversation=conversation,
+        answer=answer,
+        target=target,
+        nonce=uuid.uuid4().hex[:8],
+    )
 
 
 @router.get(
@@ -222,82 +470,79 @@ async def list_messages(
     response_class=EventSourceResponse,
     responses={
         status.HTTP_200_OK: {
+            # The union is declared rather than left to FastAPI's own stream typing: in 0.139.2
+            # `RouteContext` forwards `is_sse_stream` but **not** `stream_item_field`, so a route
+            # reached through `include_router` — which is every route here — emits an untyped
+            # `itemSchema`. `app/openapi.py` folds this schema back into that `itemSchema`.
+            "model": ChatStreamFrame,
             "description": (
                 "An SSE stream. `stage` reports coarse progress and carries no content, "
                 "`message` the completed and verified answer, `done` closes the turn."
-            )
+            ),
         },
         status.HTTP_404_NOT_FOUND: {"description": "No such chat for this caller."},
         status.HTTP_409_CONFLICT: {
-            "description": "FR-STA-04 — the conversation's token budget is exhausted."
+            "model": ContextWindowExceededResponse,
+            "description": "FR-STA-04 — the conversation's token budget is exhausted.",
         },
+        **error_responses((429, "NFR-SEC-07 — shares the regenerate route's chat budget.")),
     },
     summary="Ask a question (SSE)",
 )
-@limiter.shared_limit(chat_limit, scope=_CHAT_BUCKET, key_func=principal_or_ip_key)
 async def send_message(
-    request: Request,
-    # Unused by the handler, but slowapi writes its `X-RateLimit-*` headers onto it and
-    # raises if the endpoint does not declare one.
-    response: Response,
-    conversation_id: uuid.UUID,
+    admission: Annotated[SendAdmission, Depends(admit_send)],
     body: SendMessageRequest,
     user: CurrentUser,
-    session: DbSession,
     sessionmaker: StreamSessionmaker,
     queue: JobQueueDep,
     settings: SettingsDep,
-) -> EventSourceResponse:
+) -> AsyncIterator[ChatStreamFrame]:
     """Run one FR-ORC-01 turn and stream its progress.
 
     Everything that can refuse the turn happens **before** the response starts: once a `200`
     and the first SSE frame are on the wire, a failure can only be reported inside the stream,
-    where no HTTP status can carry it. So ownership (R-54) and the FR-STA-04 admission check
-    are both resolved here, in that order, and only then does the question become a row.
+    where no HTTP status can carry it. So ownership (R-54), the FR-STA-04 admission check and
+    the rate limit all live in `admit_send` — this body runs only once the turn is admitted,
+    because FastAPI creates a generator without executing a statement of it (T-405).
+
+    The annotation declares the **schema**; what is yielded is `frame.to_event()`, a
+    `ServerSentEvent`, so the frames keep their named `event:` line — R-41 and T-508 are written
+    against those names. FastAPI supports exactly this (it skips `stream_item_field` validation
+    for a `ServerSentEvent` and still takes the published union from the annotation), and the
+    cost — that the union is not enforced at runtime — is covered by
+    `test_every_chat_frame_builder_returns_a_declared_frame`.
     """
-    conversation = await _owned_or_404(session, conversation_id, user.id)
-
-    try:
-        question, turn_index = await chat_service.record_question(
-            session, conversation=conversation, query=body.query, settings=settings
-        )
-    except ContextWindowExceededError as exc:
-        raise _budget_conflict(exc) from exc
-
     result = TurnResult()
+    served: Message | None = None
 
-    async def publish() -> Any:
-        served: Message | None = None
-        async for event in chat_service.run_turn(
-            conversation=conversation,
-            owner_id=user.id,
-            query=body.query,
-            user_message_id=question.id,
-            turn_index=turn_index,
-            mentioned_document_ids=body.document_ids,
-            sessionmaker=sessionmaker,
-            settings=settings,
-            result=result,
-        ):
-            match event:
-                case StageEvent(stage=stage):
-                    yield {"event": "stage", "data": json.dumps({"stage": stage})}
-                case MessageEvent():
-                    served = event.message
-                    yield {"event": "message", "data": json.dumps(_message_frame(event))}
+    async for event in chat_service.run_turn(
+        conversation=admission.conversation,
+        owner_id=user.id,
+        query=body.query,
+        user_message_id=admission.question.id,
+        turn_index=admission.turn_index,
+        mentioned_document_ids=body.document_ids,
+        sessionmaker=sessionmaker,
+        settings=settings,
+        result=result,
+    ):
+        match event:
+            case StageEvent(stage=stage):
+                yield ChatStageFrame(data=StageData(stage=stage)).to_event()
+            case MessageEvent():
+                served = event.message
+                yield ChatMessageFrame(data=_message_data(event)).to_event()
 
-        if served is not None and result.outcome == "answered":
-            # After the row committed (`finalize` did that) and after the user was served.
-            # Before `done` rather than after, so a client that disconnects the moment it has
-            # its answer does not cost the message its scores.
-            await chat_service.enqueue_evaluation(queue, served)
+    if served is not None and result.outcome == "answered":
+        # After the row committed (`finalize` did that) and after the user was served.
+        # Before `done` rather than after, so a client that disconnects the moment it has
+        # its answer does not cost the message its scores.
+        await chat_service.enqueue_evaluation(queue, served)
 
-        yield {"event": "done", "data": json.dumps({"outcome": result.outcome})}
-
-    return EventSourceResponse(publish(), ping=int(settings.sse.ping_seconds))
+    yield ChatDoneFrame(data=DoneData(outcome=result.outcome)).to_event()
 
 
-def _message_frame(event: MessageEvent, *, fallback_id: uuid.UUID | None = None) -> dict[str, Any]:
+def _message_data(event: MessageEvent, *, fallback_id: uuid.UUID | None = None) -> MessageFrameData:
     """The `message` frame.
 
     An outcome that was served but not stored — an FR-ORC-05 failure, or an FR-ORC-02 denial —
@@ -311,16 +556,12 @@ def _message_frame(event: MessageEvent, *, fallback_id: uuid.UUID | None = None)
     re-render the **surviving** answer non-destructively. The event *sequence* is identical,
     which is what "the same shape as a send" means.
     """
-    frame: dict[str, Any] = {"outcome": event.outcome, "error_code": event.error_code}
+    message: MessageResponse | DegradedMessage
     if event.message is not None:
-        frame["message"] = _to_response(event.message).model_dump(mode="json")
+        message = _to_response(event.message)
     else:
-        frame["message"] = {
-            "id": str(fallback_id) if fallback_id is not None else None,
-            "role": MessageRole.AI.value,
-            "segs": [{"text": event.text}],
-        }
-    return frame
+        message = DegradedMessage(id=fallback_id, segs=[TextSegment(text=event.text)])
+    return MessageFrameData(outcome=event.outcome, error_code=event.error_code, message=message)
 
 
 @message_router.post(
@@ -328,40 +569,33 @@ def _message_frame(event: MessageEvent, *, fallback_id: uuid.UUID | None = None)
     response_class=EventSourceResponse,
     responses={
         status.HTTP_200_OK: {
+            "model": ChatStreamFrame,  # see `send_message` for why this is declared
             "description": (
                 "An SSE stream, identical in shape to a send: `stage` frames carrying no "
                 "content, one `message` frame with the replacement, then `done`. The `message` "
                 "frame always carries the target's id — on failure it carries the *unchanged* "
                 "answer plus `error_code`."
-            )
+            ),
         },
         status.HTTP_404_NOT_FOUND: {"description": "No AI message with this id for this caller."},
         status.HTTP_409_CONFLICT: {
+            "model": ChatConflictResponse,
             "description": (
                 "`NOT_LATEST_ANSWER` — a later turn has landed; or "
                 "`CONTEXT_WINDOW_EXCEEDED` — FR-STA-04's budget. Branch on `error_code`."
-            )
+            ),
         },
-        status.HTTP_429_TOO_MANY_REQUESTS: {
-            "description": "NFR-SEC-07 — shares the send route's per-user chat budget."
-        },
+        **error_responses((429, "NFR-SEC-07 — shares the send route's per-user chat budget.")),
     },
     summary="Regenerate an answer (SSE)",
 )
-@limiter.shared_limit(chat_limit, scope=_CHAT_BUCKET, key_func=principal_or_ip_key)
 async def regenerate_message(
-    request: Request,
-    # slowapi writes its `X-RateLimit-*` headers onto this and raises without it — see
-    # `send_message`. A regenerate is a full turn on the same models at the same cost, so it
-    # shares that route's bucket rather than getting a second one.
-    response: Response,
-    message_id: uuid.UUID,
+    admission: Annotated[RegenerationAdmission, Depends(admit_regeneration)],
     user: CurrentUser,
-    session: DbSession,
     sessionmaker: StreamSessionmaker,
     queue: JobQueueDep,
     settings: SettingsDep,
-) -> EventSourceResponse:
+) -> AsyncIterator[ChatStreamFrame]:
     """FR-MSG-08's Regenerate — re-run the question and **replace** the answer (T-404, R-56).
 
     Addressed by message id like its sibling `feedback` route, and refused the same way: absent,
@@ -393,71 +627,45 @@ async def regenerate_message(
     R-43(2) names "Regenerate over a live turn" as the case its token-matched release exists to
     make compose. Two concurrent regenerates of one row are last-write-wins and benign: there is
     no read-modify-write, so either order commits a complete, internally consistent answer.
+
+    Its refusals — the single `404` and the two `409`s — live in `admit_regeneration`, because
+    a generator handler's body runs after the `200` (see `send_message`, T-405).
     """
-    repository = MessageRepository(session)
-    answer = await repository.get_owned(message_id, owner_id=user.id)
-    if answer is None or answer.role is not MessageRole.AI:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, _MESSAGE_NOT_FOUND)
-
-    try:
-        target = await chat_service.resolve_regeneration(
-            session,
-            conversation_id=answer.conversation_id,
-            answer=answer,
-            settings=settings,
-        )
-    except chat_service.NotLatestAnswerError as exc:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            {"error_code": NOT_LATEST_ANSWER_CODE, "message": NOT_LATEST_ANSWER},
-        ) from exc
-    except ContextWindowExceededError as exc:
-        raise _budget_conflict(exc) from exc
-
-    conversation = await _owned_or_404(session, answer.conversation_id, user.id)
+    target = admission.target
+    answer = admission.answer
     result = TurnResult()
-    # Passed to the evaluation key so a *byte-identical* regeneration is still a new job. The
-    # content hash alone would make it a duplicate, and since the UPDATE cleared `evaluation`
-    # the message would stay unscored for ever (T-404; see `evaluation_idempotency_key`).
-    nonce = uuid.uuid4().hex[:8]
+    served: Message | None = None
 
-    async def publish() -> Any:
-        served: Message | None = None
-        async for event in chat_service.run_turn(
-            conversation=conversation,
+    async for event in chat_service.run_turn(
+        conversation=admission.conversation,
+        owner_id=user.id,
+        query=target.question.content,
+        user_message_id=target.question.id,
+        turn_index=target.turn_index,
+        regenerate_message_id=answer.id,
+        sessionmaker=sessionmaker,
+        settings=settings,
+        result=result,
+    ):
+        match event:
+            case StageEvent(stage=stage):
+                yield ChatStageFrame(data=StageData(stage=stage)).to_event()
+            case MessageEvent():
+                served = event.message
+                yield ChatMessageFrame(data=_message_data(event, fallback_id=answer.id)).to_event()
+
+    if served is not None:
+        chat_service.record_regeneration(
+            message_id=served.id,
+            conversation_id=served.conversation_id,
             owner_id=user.id,
-            query=target.question.content,
-            user_message_id=target.question.id,
             turn_index=target.turn_index,
-            regenerate_message_id=answer.id,
-            sessionmaker=sessionmaker,
-            settings=settings,
-            result=result,
-        ):
-            match event:
-                case StageEvent(stage=stage):
-                    yield {"event": "stage", "data": json.dumps({"stage": stage})}
-                case MessageEvent():
-                    served = event.message
-                    yield {
-                        "event": "message",
-                        "data": json.dumps(_message_frame(event, fallback_id=answer.id)),
-                    }
+            outcome=result.outcome,
+        )
+        if result.outcome == "answered":
+            await chat_service.enqueue_evaluation(queue, served, nonce=admission.nonce)
 
-        if served is not None:
-            chat_service.record_regeneration(
-                message_id=served.id,
-                conversation_id=served.conversation_id,
-                owner_id=user.id,
-                turn_index=target.turn_index,
-                outcome=result.outcome,
-            )
-            if result.outcome == "answered":
-                await chat_service.enqueue_evaluation(queue, served, nonce=nonce)
-
-        yield {"event": "done", "data": json.dumps({"outcome": result.outcome})}
-
-    return EventSourceResponse(publish(), ping=int(settings.sse.ping_seconds))
+    yield ChatDoneFrame(data=DoneData(outcome=result.outcome)).to_event()
 
 
 @message_router.post(

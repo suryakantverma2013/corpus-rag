@@ -3,6 +3,28 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      Pre-paint theme application (FR-THM-02 persistence, R-58(1)). Parser-blocking and
+      placed first on purpose: the module script is deferred, so without this a user whose
+      stored preference is `light` gets a painted dark frame — on the §4.17 login screen,
+      the first thing they see — until React mounts.
+
+      It duplicates readStoredTheme() from src/theme/theme.ts, which cannot be imported
+      here. The duplication is bounded: `data-theme="dark"` on <html> below remains the
+      fallback if this throws or JS is off, the script only ever NARROWS to a valid value,
+      and theme.test.ts pins THEME_STORAGE_KEY so the key cannot drift silently.
+      The try/catch is required — localStorage throws SecurityError when site data is blocked.
+    -->
+    <script>
+      try {
+        const stored = localStorage.getItem('corpus.theme');
+        if (stored === 'light' || stored === 'dark') {
+          document.documentElement.dataset.theme = stored;
+        }
+      } catch {
+        /* storage unavailable — the dark default on <html> stands (NFR-USE-01) */
+      }
+    </script>
     <!-- Fonts from Google Fonts (NFR-VIS-03) — weights match the prototype exactly. -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />

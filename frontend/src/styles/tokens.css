@@ -5,10 +5,10 @@
    MUST match that prototype byte-for-byte for the color/motion/scrollbar values.
    The prototype is the pixel-perfect authority (NFR-VIS-01).
 
-   Scope note (T-004): this file lays down the STATIC token sets for both themes.
-   Runtime behavior is deferred:
-     - the data-theme toggle handler + accent-prop `applyAccent()` override → T-501
-     - the three-column shell + showStats/brandName props               → T-502
+   Scope note: this file lays down the STATIC token sets for both themes. The runtime
+   half — writing `data-theme`, persisting it, and applying the `accent` prop override —
+   lives in `src/theme/` (T-501, ruling R-58). The three-column shell and the
+   showStats/brandName props are still T-502's.
    ════════════════════════════════════════════════════════════════════════ */
 
 /* ── Color tokens — DARK theme (default) — NFR-VIS-02 ───────────────────── */
@@ -22,16 +22,64 @@
   --muted: #8a91a6;
   --muted2: #5c6377;
   --accent: #7c86f8;
+  /* Kept as the NFR-VIS-02 literal, NOT derived from --accent. Measured in Chromium 149:
+     any computed colour (color-mix, or rgb(from …)) composites 1/255 away from a legacy
+     rgba() literal on this background, because the two take different precision paths in
+     the compositor. Imperceptible, but NFR-VIS-01 is a pixel-fidelity requirement and the
+     no-accent-prop case is the only one that exists in the product — so it stays exact,
+     and `--accent-soft` is re-derived at runtime ONLY when the FR-THM-03 override is
+     supplied. See ThemeProvider and R-58(2). */
   --accent-soft: rgba(124, 134, 248, 0.14);
+  /* The alpha half of that derivation, per theme, so the override can be written as ONE
+     theme-independent declaration and the two numbers never leave this file. */
+  --accent-soft-alpha: 14%;
   --bubble: #1d2333;
   --shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+}
 
+/* ── Color tokens — LIGHT theme — NFR-VIS-02 ────────────────────────────── */
+/* R-58(2) closed the FR-THM-03 (D): the `accent` prop, WHEN SUPPLIED, applies to both
+   themes and does clobber the #5B66E8 below — it is a brand property, and a brand colour
+   that changes when the user flips theme is not one. When the prop is absent nothing is
+   written to the root element, so this default stands. R-58(1) closed the FR-THM-02 (D):
+   the theme persists in localStorage['corpus.theme']. Both live in `src/theme/`. */
+:root[data-theme='light'] {
+  --bg: #f3f4f8;
+  --panel: #ffffff;
+  --panel2: #eceef5;
+  --line: rgba(20, 24, 40, 0.1);
+  --text: #1b1e2b;
+  --muted: #5d6478;
+  --muted2: #9aa0b4;
+  --accent: #5b66e8;
+  --accent-soft: rgba(91, 102, 232, 0.1);
+  /* 10% here against the dark theme's 14% — the reason the alpha is a token rather than a
+     constant baked into the override string. */
+  --accent-soft-alpha: 10%;
+  --bubble: #e9ebf6;
+  --shadow: 0 16px 48px rgba(25, 30, 60, 0.18);
+}
+
+/* ── Theme-INDEPENDENT tokens ───────────────────────────────────────────── */
+/* Declared on a bare `:root`, deliberately, and AFTER both theme blocks.
+   These used to live inside the dark-theme rule above, which was a latent trap: that
+   selector list includes `:root[data-theme='dark']` at specificity (0,2,0), and **a media
+   query adds no specificity**, so a later `@media { :root { … } }` override could never
+   win. It cost the reduced-motion block at the foot of this file a silent no-op — the
+   durations stayed at 0.2s/0.5s with every test green — and it would have cost any future
+   override of a radius or a layout dimension the same way. Anything that is one value in
+   both themes belongs here; anything that differs belongs in a theme block above. */
+:root {
   /* Overlay + eval status hues are literals in the prototype (not themed);
      promoted to tokens here for reuse by later component tasks. */
   --overlay: rgba(5, 7, 12, 0.55);
   --eval-good: #4ec3a6; /* score >= 0.90  (FR-EVL-03) */
   --eval-warn: #e8a34c; /* 0.80–0.89 */
   --eval-bad: #e86a8a; /* < 0.80 */
+
+  /* Scrollbar thumb — NFR-USE-05. One value in both themes (prototype).
+     Tokenized so T-505/T-507/T-508 do not re-hardcode it in their scroll containers. */
+  --scrollbar-thumb: rgba(128, 136, 160, 0.25);
 
   /* Radii scale — NFR-VIS-04 (values from the prototype inventory). */
   --radius-chip: 4px; /* mini chips / type badges (4–5px) */
@@ -49,31 +97,22 @@
   --stats-w: 272px;
   --app-min-h: 640px;
 
-  /* Motion durations — NFR-VIS-05 (prototype uses inline literals; named here). */
+  /* Motion durations — NFR-VIS-05 (prototype uses inline literals; named here).
+     Components MUST use these rather than inline literals: the reduced-motion block at the
+     foot of this file zeroes them, which is how NFR-A11Y-01 reaches a component that has
+     not thought about it. */
   --motion-fast: 0.15s;
   --motion: 0.2s;
   --motion-slow: 0.25s;
   --motion-bar: 0.5s; /* meter/bar width transitions */
-}
 
-/* ── Color tokens — LIGHT theme — NFR-VIS-02 ────────────────────────────── */
-/* TBD(§8.4): FR-THM-03 — the accent-prop override writes --accent on :root and
-   will clobber this theme's distinct default (#5B66E8); per-theme accents
-   unconfirmed. Toggling between the two blocks (FR-THM-02) is wired in T-501;
-   theme persistence across sessions is unspecified. */
-:root[data-theme='light'] {
-  --bg: #f3f4f8;
-  --panel: #ffffff;
-  --panel2: #eceef5;
-  --line: rgba(20, 24, 40, 0.1);
-  --text: #1b1e2b;
-  --muted: #5d6478;
-  --muted2: #9aa0b4;
-  --accent: #5b66e8;
-  --accent-soft: rgba(91, 102, 232, 0.1);
-  --bubble: #e9ebf6;
-  --shadow: 0 16px 48px rgba(25, 30, 60, 0.18);
-  --overlay: rgba(5, 7, 12, 0.55);
+  /* Focus ring — NFR-A11Y-02 (R-59). The prototype has no focus styling at all, so this is
+     spec-authored. `--accent` is not a guess: measured against every surface in both themes
+     it ranges 3.92–6.00 : 1, clearing WCAG 1.4.11's 3:1 for a non-text indicator everywhere,
+     so the ring needs no colour of its own. Width/offset are tokens because a control inside
+     a tight scroll container may need a smaller offset without redefining the ring. */
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
 }
 
 /* ── Base element styles — NFR-VIS-03 (typography) ──────────────────────── */
@@ -81,7 +120,12 @@ html,
 body {
   margin: 0;
   height: 100%;
-  background: #0d1017; /* raw dark fallback before variables resolve (prototype) */
+  /* The prototype hard-codes #0D1017 here, described as a "fallback before variables
+     resolve" — a case that cannot arise, since the variables are declared in this same
+     file. Kept literal it is a live defect: `:root` (0,1,0) outranks `html` (0,0,1) so the
+     html element is fine, but BODY would keep the dark colour under the light theme, and
+     it shows through on overscroll and behind the full-viewport §4.17 login screen. */
+  background: var(--bg);
 }
 
 :root {
@@ -108,6 +152,17 @@ a:hover {
   font-family: 'JetBrains Mono', monospace;
 }
 
+/* ── Keyboard focus — NFR-A11Y-02 (R-59) ────────────────────────────────── */
+/* Declared once, globally, rather than per component: the prototype styles no focus state
+   anywhere, so any component that forgets would simply have none, and a keyboard user would
+   lose their place with no visible symptom for a sighted mouse tester to notice.
+   `:focus-visible` (not `:focus`) means this never appears on a mouse click — which is also
+   why it cannot disturb T-510's screenshots. Do not replace it with `outline: none`. */
+:focus-visible {
+  outline: var(--focus-ring-width) solid var(--accent);
+  outline-offset: var(--focus-ring-offset);
+}
+
 /* ── Motion keyframes — NFR-VIS-05 ──────────────────────────────────────── */
 @keyframes dotPulse {
   0%,
@@ -131,15 +186,91 @@ a:hover {
   }
 }
 
-/* ── Scrollbars — NFR-USE-05 (WebKit; TBD(§8.4) to-confirm) ─────────────── */
+/* ── Reduced motion — NFR-A11Y-01 (R-59) ────────────────────────────────── */
+/* Per animation, never blanket, and the keyframes are REDEFINED rather than switched off.
+   The reason is measured, not stylistic. `dotPulse` is a state indicator, not decoration:
+   it is the typing indicator (§4.3) and the FR-AUT-03 sign-in spinner, i.e. the only signal
+   that something is happening. Both the usual blanket rule (`animation-duration: .01ms`)
+   and a plain `animation: none` end the animation and fall back to the element's BASE
+   style — so whether the dots stay visible depends entirely on how the component authored
+   its resting state. Measured in Chromium: with no base opacity they land at 1.0, but with
+   `.dot { opacity: .25 }` — a perfectly natural way to express the resting state — they
+   land at 0.25 and the indicator is effectively invisible. Redefining the keyframe holds
+   opacity 1 under BOTH authoring styles, so T-505 cannot get this wrong by accident.
+   Zeroing the duration tokens covers fadeUp and every meter/bar transition that uses them,
+   which is why components must not hard-code durations. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0s;
+    --motion: 0s;
+    --motion-slow: 0s;
+    --motion-bar: 0s;
+  }
+
+  /* Hold the dots fully visible and still — present, not pulsing. */
+  @keyframes dotPulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+  }
+
+  /* Arrive in place: no travel, no fade. Belt-and-braces with the zeroed durations, since
+     a component may legitimately name its own duration for a one-off entrance. */
+  @keyframes fadeUp {
+    0%,
+    100% {
+      opacity: 1;
+      transform: none;
+    }
+  }
+}
+
+/* ── Scrollbars — NFR-USE-05, confirmed by R-58(3) ──────────────────────── */
+/* The prototype's WebKit rules are the acceptance baseline: 8px, 4px radius, translucent
+   thumb, transparent track, identical in both themes. */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(128, 136, 160, 0.25);
+  background: var(--scrollbar-thumb);
   border-radius: 4px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* Firefox support, and THE @supports GATE IS LOAD-BEARING — do not "simplify" it away.
+   Chrome 121+ ignores every ::-webkit-scrollbar rule on any element that also sets
+   `scrollbar-width` or `scrollbar-color`, so declaring these unconditionally would replace
+   the styled bar above with Chrome's native thin one — an NFR-VIS-01 regression in the very
+   browser the prototype was authored in. The gate keeps WebKit/Blink on the prototype's bar
+   and gives Gecko the closest standard equivalent.
+
+   IT MUST BE `-thumb`, NOT the bare `::-webkit-scrollbar` — measured, not assumed.
+   Firefox whitelists the bare `::-webkit-scrollbar` selector for web compatibility (so a
+   site's whole rule does not get dropped), while styling nothing with it, so
+   `CSS.supports('selector(::-webkit-scrollbar)')` is **true in Firefox 153 as well as
+   Chromium** and the negation was false everywhere — this block reached no engine at all.
+   The sub-part pseudos are not whitelisted: `::-webkit-scrollbar-thumb` is true in Chromium
+   and false in Firefox, which makes it a real capability test ("can this engine style the
+   parts of a scrollbar?") rather than a vendor sniff, and keeps working if some other engine
+   ever implements them. Verified in both engines.
+
+   THE TWO PROPERTIES ARE SPLIT ON PURPOSE. `scrollbar-color` **inherits**;
+   `scrollbar-width` **does not**. Declaring both on `:root` measured `thin` on the root and
+   `auto` on the actual scroll container — a 17px default bar wearing our thumb colour,
+   against the prototype's 8px. So width goes on `*`, which is inert on anything that does
+   not scroll and means T-505/T-507/T-508 get the right bar without having to know this.
+   (Measured headed on Firefox 153/Windows: `thin` = 8px, exactly the prototype's width.
+   NB: headless Firefox renders no scrollbars at all — every width measures 0 — so this can
+   only be verified in a headed browser.) */
+@supports not selector(::-webkit-scrollbar-thumb) {
+  * {
+    scrollbar-width: thin;
+  }
+  :root {
+    scrollbar-color: var(--scrollbar-thumb) transparent;
+  }
 }

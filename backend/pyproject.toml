@@ -26,7 +26,6 @@ dependencies = [
     "redis>=5.3.1",
     "slowapi>=0.1.10",
     "sqlalchemy[asyncio]>=2.0.51",
-    "sse-starlette>=3.4.6",
     "structlog>=26.1.0",
     "uvicorn[standard]>=0.51.0",
 ]
