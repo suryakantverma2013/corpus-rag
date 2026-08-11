@@ -378,6 +378,56 @@ async def test_realm_artifact_imports_and_works() -> None:
                 "Keycloak refuses client-initiated account linking with `not_allowed` (T-214)"
             )
 
+            # --- what Keycloak APPLIED, not what the file says (T-216) --------------------
+            #
+            # `test_account_linking.py` asserts every one of these against the JSON, which is
+            # a check on our own text. **Keycloak silently ignores import content it does not
+            # act on** — `addReadTokenRoleOnCreate` is the proof: it imports, it reads as
+            # correct, and it is inert under `linkOnly: true`. So the properties whose loss is
+            # worst are read back from a realm Keycloak actually built.
+            #
+            # Each of these fails differently and none of them fails loudly:
+            #   storeToken off          → the broker endpoint answers 200 with no token
+            #   linkOnly off            → brokering becomes a signup route past FR-USR-02/03
+            #   drive.readonly missing  → every import 403s at Google
+            #   enabled off             → linking silently unavailable
+            applied = (
+                await http.get(
+                    f"{base}/admin/realms/{realm}/identity-provider/instances/google",
+                    headers=adm,
+                )
+            ).json()
+            assert applied["storeToken"] is True, applied
+            assert applied["linkOnly"] is True, "brokering must never create a Corpus account"
+            assert applied["enabled"] is True, applied
+            assert "drive.readonly" in applied["config"]["defaultScope"], applied["config"]
+
+            # R-28's ROPC-only stance and R-63(2)'s separation, as Keycloak holds them rather
+            # than as the artifact spells them.
+            backend_applied = (
+                await http.get(
+                    f"{base}/admin/realms/{realm}/clients/{client['id']}", headers=adm
+                )
+            ).json()
+            assert backend_applied["standardFlowEnabled"] is False, (
+                "corpus-backend must keep the browser flow disabled (R-28)"
+            )
+            assert backend_applied["directAccessGrantsEnabled"] is True, "ROPC login (R-28)"
+
+            linking_applied = (
+                await http.get(
+                    f"{base}/admin/realms/{realm}/clients/{linking['id']}", headers=adm
+                )
+            ).json()
+            assert linking_applied["standardFlowEnabled"] is True, "the linking redirect (R-63(2))"
+            assert linking_applied["directAccessGrantsEnabled"] is False, (
+                "the linking client must never be a login path"
+            )
+            assert linking_applied["publicClient"] is True, linking_applied
+            assert linking_applied["attributes"].get("pkce.code.challenge.method") == "S256", (
+                "PKCE is required on the public linking client"
+            )
+
             profile = (
                 await http.get(f"{base}/admin/realms/{realm}/users/profile", headers=adm)
             ).json()

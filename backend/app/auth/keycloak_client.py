@@ -352,13 +352,44 @@ class KeycloakClient:
         return resp.json()
 
     async def admin_get_role_users(
-        self, *, role_name: str, admin_token: str
+        self, *, role_name: str, admin_token: str, page_size: int = 100
     ) -> list[dict[str, Any]]:
-        """Users holding a realm role — one call resolves admin membership for a list."""
-        resp = await self._admin(
-            "GET", f"/roles/{role_name}/users", admin_token=admin_token, expected=(200,)
-        )
-        return resp.json()
+        """**Every** user holding a realm role, following Keycloak's pagination.
+
+        `list_users` uses this to resolve admin membership for a whole page in one pass, and
+        it is the *complete* set that makes that safe. The call used to send no `first`/`max`
+        and take whatever Keycloak's default page was — while `GET /api/v1/users` accepts a
+        `limit` of up to **500**. On a realm with more administrators than that default, every
+        admin past it was rendered **as a non-administrator**: a security-relevant answer, and
+        a silent one, since a short list is indistinguishable from a complete one.
+
+        Paginating explicitly is correct regardless of what the server's default happens to be
+        — which is the point, because that default is not ours to pin.
+
+        Same family as `admin_get_client_uuid`'s empty-list guard: **a collection response is
+        not evidence of the collection's size.** There the risk is "no permission" reading as
+        "does not exist"; here it is "page one" reading as "all of them".
+        """
+        users: list[dict[str, Any]] = []
+        first = 0
+        # A bound, not a limit: at `page_size` 100 this admits 100k role holders, far past any
+        # realistic realm, and stops a server that always returns a full page from spinning
+        # this loop forever.
+        for _ in range(1000):
+            resp = await self._admin(
+                "GET",
+                f"/roles/{role_name}/users",
+                admin_token=admin_token,
+                params={"first": first, "max": page_size},
+                expected=(200,),
+            )
+            page = resp.json()
+            users.extend(page)
+            if len(page) < page_size:
+                return users
+            first += page_size
+        log.error("keycloak.role_users_page_limit", role=role_name, collected=len(users))
+        return users
 
     async def admin_get_user_realm_roles(
         self, *, sub: str, admin_token: str

@@ -201,6 +201,54 @@ async def test_list_users_maps_roles(
     assert rows[str(user_id)]["is_active"] is False
 
 
+async def test_admin_membership_is_resolved_past_the_first_page(
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    make_token: Callable[..., str],
+    respx_mock,
+) -> None:
+    """An administrator beyond Keycloak's first page must not render as a non-administrator.
+
+    `GET /roles/{name}/users` used to be called with **no `first`/`max`**, so it returned
+    whatever page Keycloak chose while `GET /api/v1/users` accepts a `limit` of up to 500. On
+    a realm with more admins than that page, everyone past it was reported with the plain
+    `user` role — wrong about permissions, and silent, because a short list and a complete one
+    look identical.
+
+    The stub answers a **full** page followed by a short one, which is the only shape that
+    distinguishes a paginating caller from one that reads page 1 and stops: the target admin
+    is on page 2, so a non-paginating implementation cannot see it.
+    """
+    kc = get_settings().keycloak
+    _, headers = await _admin_headers(session, make_token)
+    late_admin = uuid.uuid4()
+    page_size = 100
+
+    respx_mock.post(kc.token_endpoint).respond(json=_SVC_TOKEN)
+    respx_mock.get(f"{kc.admin_url}/users").respond(
+        json=[_rep(late_admin, email="late@corpus.local")]
+    )
+
+    pages = [
+        [{"id": str(uuid.uuid4())} for _ in range(page_size)],  # full → there is more
+        [{"id": str(late_admin)}],  # short → the end
+    ]
+    calls: list[str | None] = []
+
+    def _role_users(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.params.get("first"))
+        return httpx.Response(200, json=pages[len(calls) - 1] if len(calls) <= len(pages) else [])
+
+    respx_mock.get(f"{kc.admin_url}/roles/admin/users").mock(side_effect=_role_users)
+
+    resp = await client.get("/api/v1/users", headers=headers)
+
+    assert resp.status_code == 200
+    assert calls == ["0", str(page_size)], "the second page was never requested"
+    rows = {r["id"]: r for r in resp.json()}
+    assert rows[str(late_admin)]["roles"] == ["admin", "user"]
+
+
 # ---- Patch -------------------------------------------------------------------
 
 
