@@ -237,6 +237,36 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/documents/import': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Import a document from a linked cloud drive
+     * @description FR-KBM-10's one-time copy.
+     *
+     *     **It is the same route as upload in every way that matters** — the response model, the
+     *     duplicate `200`, `413`/`415`/`507`, the R-24 processing lock and the rate limit are all
+     *     literally the upload route's, because the bytes are handed to `upload_document` itself
+     *     (R-63: an imported document is thereafter indistinguishable from an uploaded one). The
+     *     only additions are the two failures that can happen *before* there are any bytes: the
+     *     account is not linked, and the provider refused.
+     *
+     *     It is a **copy, not a live link**: a later change to the file in Drive does not re-ingest,
+     *     and no query ever reaches Google. The user re-imports or uses Replace (FR-KBM-07).
+     */
+    post: operations['import_document'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/documents/{document_id}': {
     parameters: {
       query?: never;
@@ -331,6 +361,88 @@ export interface paths {
      * @description FR-KBM-07's Replace (R-40(1)): new bytes at version n+1, old version keeps serving.
      */
     post: operations['replace_document'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/cloud/links/{provider}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Whether the caller has linked a cloud provider
+     * @description FR-AUT-11's "report linked state" — what T-508 renders the FR-KBM-06 button against.
+     */
+    get: operations['get_link_status'];
+    put?: never;
+    post?: never;
+    /**
+     * Unlink a cloud account
+     * @description FR-AUT-11's unlink. Idempotent, and documents already imported are untouched — they are
+     *     copies (FR-KBM-10), so unlinking revokes future import and nothing else.
+     */
+    delete: operations['delete_link'];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/cloud/links/{provider}/start': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Begin linking a cloud account
+     * @description Mint leg 1's authorize URL (FR-AUT-11).
+     *
+     *     No provider call happens here — the URL is built and signed locally — so this cannot fail
+     *     on Keycloak or Google being down, and the user learns about an outage at the point they
+     *     can see it rather than behind a button that silently does nothing.
+     */
+    post: operations['start_link'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/cloud/{provider}/files': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List the caller's importable cloud-drive files
+     * @description FR-KBM-10's selection surface: a searchable **flat** list of the caller's importable files.
+     *
+     *     Flat, and filtered to the four FR-ING-02 formats *at the provider*, both by requirement —
+     *     with only four ingestible formats a folder tree would mostly show files the user cannot
+     *     pick, and a client-side filter would page through their whole Drive to render a handful of
+     *     rows.
+     *
+     *     **The brokered token never leaves this process.** That is the property that makes the
+     *     selection surface ours rather than a provider widget (R-63(4)): the response carries file
+     *     metadata and an opaque id, and the bytes are fetched server-side at import.
+     *
+     *     Not rate-limited by `upload_limit` — this is a read — but it is the one read in this API
+     *     that spends a *third party's* quota, so it carries the same per-caller limit rather than
+     *     the "no read route is limited" convention, which was reasoned about a purely local read.
+     */
+    get: operations['list_cloud_files'];
+    put?: never;
+    post?: never;
     delete?: never;
     options?: never;
     head?: never;
@@ -740,6 +852,54 @@ export interface components {
       score?: number | null;
     };
     /**
+     * CloudLinkRequiredDetail
+     * @description The caller's cloud drive needs attention before an import can run (T-214, FR-AUT-11).
+     *
+     *     Two codes, one status, because the *cause* differs and the GUI's copy must too, while the
+     *     action is the same one button:
+     *
+     *     - ``ACCOUNT_NOT_LINKED`` — no link exists. The ordinary state of every user who has never
+     *       asked for Drive, which is why FR-AUT-11 makes it a "link your account" affordance and
+     *       never a 5xx.
+     *     - ``CLOUD_ACCESS_REVOKED`` — a link exists and the *provider* refused the brokered token,
+     *       typically because the user withdrew the grant at Google. Reporting this as "not linked"
+     *       would be false, and would send the user to a status surface that says they are linked.
+     *
+     *     `409` on the R-51(5) precedent: a refusal about the caller's state, not a failure, so it
+     *     carries no `FailureClass`. Not `403` — the caller is permitted to import, they have simply
+     *     not connected an account yet.
+     */
+    CloudLinkRequiredDetail: {
+      /**
+       * Error Code
+       * @enum {string}
+       */
+      error_code: 'ACCOUNT_NOT_LINKED' | 'CLOUD_ACCESS_REVOKED';
+      /** Message */
+      message: string;
+      /** Provider */
+      provider: string;
+    };
+    /**
+     * CloudLinkRequiredResponse
+     * @description The wire body for FR-AUT-11's refusal.
+     */
+    CloudLinkRequiredResponse: {
+      detail: components['schemas']['CloudLinkRequiredDetail'];
+    };
+    /**
+     * CloudProvider
+     * @description Providers a user may link.
+     *
+     *     One member, and NFR-CMP-02 says exactly that: v1 commits to Google Drive, and the
+     *     *mechanism* is what is provider-agnostic — Keycloak brokers the token, so a second
+     *     provider is a realm identity provider plus a file-listing adapter. Modelling it as an
+     *     enum keeps the provider a validated path segment rather than free text reaching a URL,
+     *     which is the R-63(6)(1) discipline applied one level up from the file id.
+     * @enum {string}
+     */
+    CloudProvider: 'google';
+    /**
      * ContextWindowExceededDetail
      * @description FR-STA-04's refusal (R-51(5)), on both `send` and `regenerate`.
      *
@@ -1147,6 +1307,36 @@ export interface components {
       outcome?: components['schemas']['TurnOutcome'] | null;
     };
     /**
+     * DriveFileResponse
+     * @description One row of the FR-KBM-10 selection surface.
+     *
+     *     Metadata only, on `DocumentResponse`'s principle: no URL, no download link, nothing that
+     *     points at bytes. The client sends `file_id` back to the import route and the backend
+     *     resolves it against the provider's fixed host (R-63(6)(1)).
+     */
+    DriveFileResponse: {
+      /** File Id */
+      file_id: string;
+      /** Name */
+      name: string;
+      /** Mime Type */
+      mime_type: string;
+      /** Size Bytes */
+      size_bytes: number | null;
+      /** Modified Time */
+      modified_time: string | null;
+    };
+    /**
+     * DriveListResponse
+     * @description A page of the flat list. `next_page_token` is the provider's, opaque, and echoed back.
+     */
+    DriveListResponse: {
+      /** Files */
+      files: components['schemas']['DriveFileResponse'][];
+      /** Next Page Token */
+      next_page_token?: string | null;
+    };
+    /**
      * ErrorResponse
      * @description The ordinary error body: ``{"detail": "..."}``.
      *
@@ -1216,6 +1406,30 @@ export interface components {
       detail?: components['schemas']['ValidationError'][];
     };
     /**
+     * ImportRequest
+     * @description Import one cloud-drive file into a knowledge base.
+     *
+     *     `scope`/`conversation_id` are spelled exactly as the upload *form* spells them, so the KB
+     *     modal uses one vocabulary whichever way a document arrives.
+     *
+     *     JSON rather than multipart because there is no file part: the client sends an id it got
+     *     from `GET /cloud/{provider}/files`, and the backend fetches the bytes from the provider's
+     *     fixed host (R-63(6)(1)). A client-supplied URL here is exactly what the ruling forbids.
+     */
+    ImportRequest: {
+      provider: components['schemas']['CloudProvider'];
+      /** File Id */
+      file_id: string;
+      /**
+       * Scope
+       * @default global
+       * @enum {string}
+       */
+      scope: 'global' | 'chat';
+      /** Conversation Id */
+      conversation_id?: string | null;
+    };
+    /**
      * JobResponse
      * @description FR-ING-06's job view.
      *
@@ -1267,6 +1481,33 @@ export interface components {
      * @enum {string}
      */
     JobType: 'INGEST' | 'DELETE';
+    /**
+     * LinkStartResponse
+     * @description Where to send the browser to begin linking.
+     *
+     *     A URL the client *navigates to*, not one it fetches: the flow is a redirect chain through
+     *     Keycloak's login page and Google's consent screen, neither of which can be satisfied by
+     *     an XHR. Returned as JSON rather than as a `302` so the caller — an authenticated fetch
+     *     from the KB modal — can open it deliberately.
+     */
+    LinkStartResponse: {
+      /** Authorize Url */
+      authorize_url: string;
+    };
+    /**
+     * LinkStatusResponse
+     * @description Whether the caller has linked this provider (FR-AUT-11).
+     *
+     *     `account` is the provider-side address, so the GUI can say *which* Google account it will
+     *     import from. It is metadata, never a credential and never a provider user id.
+     */
+    LinkStatusResponse: {
+      provider: components['schemas']['CloudProvider'];
+      /** Linked */
+      linked: boolean;
+      /** Account */
+      account?: string | null;
+    };
     /**
      * LivenessResponse
      * @description Liveness is a constant: reaching the handler at all is the answer.
@@ -2550,6 +2791,136 @@ export interface operations {
       };
     };
   };
+  import_document: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['ImportRequest'];
+      };
+    };
+    responses: {
+      /** @description Duplicate checksum — not re-ingested. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Accepted; ingestion queued. */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['UploadResponse'];
+        };
+      };
+      /** @description Empty file, or scope=chat without a conversation_id. */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description Missing, malformed or expired bearer token, or no local user record. */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description The account is deactivated, or the operation is administrator-only (NFR-SEC-01). */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description No such file for this caller, or scope=chat naming no conversation of theirs. */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description No cloud account is linked, the provider revoked access, or a response is generating. */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['CloudLinkRequiredResponse'];
+        };
+      };
+      /** @description The upload exceeds the per-file size ceiling. */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description Not a supported document format (FR-KBM-02). */
+      415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+      /** @description NFR-SEC-07 — too many attempts. `Retry-After` carries the cooldown. */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description Object storage is unreachable. */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description FR-ERR-02 — the caller's storage quota is exhausted. */
+      507: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+    };
+  };
   get_document: {
     parameters: {
       query?: never;
@@ -2965,6 +3336,285 @@ export interface operations {
       };
       /** @description FR-ERR-02 — the caller's storage quota is exhausted. */
       507: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+    };
+  };
+  get_link_status: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        provider: components['schemas']['CloudProvider'];
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['LinkStatusResponse'];
+        };
+      };
+      /** @description Missing, malformed or expired bearer token, or no local user record. */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description The account is deactivated, or the operation is administrator-only (NFR-SEC-01). */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+      /** @description Server-side identity configuration error. Check the server logs. */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description The identity provider is unreachable (R-28). */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+    };
+  };
+  delete_link: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        provider: components['schemas']['CloudProvider'];
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Missing, malformed or expired bearer token, or no local user record. */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description The account is deactivated, or the operation is administrator-only (NFR-SEC-01). */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+      /** @description Server-side identity configuration error. Check the server logs. */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description The identity provider is unreachable (R-28). */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+    };
+  };
+  start_link: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        provider: components['schemas']['CloudProvider'];
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['LinkStartResponse'];
+        };
+      };
+      /** @description Missing, malformed or expired bearer token, or no local user record. */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description The account is deactivated, or the operation is administrator-only (NFR-SEC-01). */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+      /** @description NFR-SEC-07 — too many attempts. `Retry-After` carries the cooldown. */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+    };
+  };
+  list_cloud_files: {
+    parameters: {
+      query?: {
+        search?: string | null;
+        page_token?: string | null;
+        page_size?: number | null;
+      };
+      header?: never;
+      path: {
+        provider: components['schemas']['CloudProvider'];
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['DriveListResponse'];
+        };
+      };
+      /** @description Missing, malformed or expired bearer token, or no local user record. */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description The account is deactivated, or the operation is administrator-only (NFR-SEC-01). */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description No cloud account is linked, or the provider revoked access. */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['CloudLinkRequiredResponse'];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+      /** @description NFR-SEC-07 — too many attempts. `Retry-After` carries the cooldown. */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description Server-side identity configuration error. Check the server logs. */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description The identity provider is unreachable (R-28). */
+      503: {
         headers: {
           [name: string]: unknown;
         };

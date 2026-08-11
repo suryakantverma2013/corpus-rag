@@ -39,7 +39,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 __all__ = [
+    "ACCESS_REVOKED_COPY",
     "MISCONFIGURED",
+    "NOT_LINKED_COPY",
     "PROCESSING_LOCKED",
     "QUOTA_EXCEEDED",
     "RATE_LIMITED",
@@ -48,11 +50,14 @@ __all__ = [
     "UNSUPPORTED_TYPE",
     "UPSTREAM_DOWN",
     "ChatConflictResponse",
+    "CloudLinkRequiredDetail",
+    "CloudLinkRequiredResponse",
     "ContextWindowExceededDetail",
     "ContextWindowExceededResponse",
     "ErrorResponse",
     "NotLatestAnswerDetail",
     "NotLatestAnswerResponse",
+    "cloud_link_required",
     "error_responses",
 ]
 
@@ -104,6 +109,35 @@ class NotLatestAnswerDetail(BaseModel):
 
     error_code: Literal["NOT_LATEST_ANSWER"]
     message: str
+
+
+class CloudLinkRequiredDetail(BaseModel):
+    """The caller's cloud drive needs attention before an import can run (T-214, FR-AUT-11).
+
+    Two codes, one status, because the *cause* differs and the GUI's copy must too, while the
+    action is the same one button:
+
+    - ``ACCOUNT_NOT_LINKED`` — no link exists. The ordinary state of every user who has never
+      asked for Drive, which is why FR-AUT-11 makes it a "link your account" affordance and
+      never a 5xx.
+    - ``CLOUD_ACCESS_REVOKED`` — a link exists and the *provider* refused the brokered token,
+      typically because the user withdrew the grant at Google. Reporting this as "not linked"
+      would be false, and would send the user to a status surface that says they are linked.
+
+    `409` on the R-51(5) precedent: a refusal about the caller's state, not a failure, so it
+    carries no `FailureClass`. Not `403` — the caller is permitted to import, they have simply
+    not connected an account yet.
+    """
+
+    error_code: Literal["ACCOUNT_NOT_LINKED", "CLOUD_ACCESS_REVOKED"]
+    message: str
+    provider: str
+
+
+class CloudLinkRequiredResponse(BaseModel):
+    """The wire body for FR-AUT-11's refusal."""
+
+    detail: CloudLinkRequiredDetail
 
 
 class ContextWindowExceededResponse(BaseModel):
@@ -171,3 +205,31 @@ QUOTA_EXCEEDED = error_responses((507, "FR-ERR-02 — the caller's storage quota
 PROCESSING_LOCKED = error_responses(
     (409, "R-24 — another file action is in flight for this caller.")
 )
+
+# --- FR-AUT-11 / FR-KBM-10 (T-214) ----------------------------------------------------
+#
+# The copy and the constructor live here, not in either router, because **two** routers raise
+# this — `GET /cloud/{provider}/files` and `POST /documents/import` — and they are the same
+# refusal about the same state. Two copies would drift, and the drift is invisible: both would
+# still validate, and the user would see one wording listing files and another importing one.
+
+NOT_LINKED_COPY = (  # TBD(§8.4) — FR-AUT-11
+    "Your Google account is not linked. Link it to import files from Drive."
+)
+ACCESS_REVOKED_COPY = (  # TBD(§8.4) — FR-AUT-11
+    "Google refused access to your Drive. Re-link your account and try again."
+)
+
+
+def cloud_link_required(
+    provider: str, error_code: Literal["ACCOUNT_NOT_LINKED", "CLOUD_ACCESS_REVOKED"], message: str
+) -> Any:
+    """Build FR-AUT-11's `409` detail payload.
+
+    Returns the *detail*, so the caller writes the `HTTPException` and the status stays visible
+    at the raise site. Constructed from the model rather than a dict literal — `errors.py`'s
+    own rule, three paragraphs up.
+    """
+    return CloudLinkRequiredDetail(
+        error_code=error_code, message=message, provider=provider
+    ).model_dump()

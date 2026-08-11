@@ -81,8 +81,16 @@ class AccountNotLinkedError(KeycloakError):
 
     Keycloak answers 400 or 403 for this, and 403 is also what it returns when the user
     lacks the `broker` `read-token` role — a realm-configuration fault. The two are not
-    distinguishable from the status alone, which is why the IdP sets
-    `addReadTokenRoleOnCreate`: with the role granted at link time, a 403 means unlinked.
+    distinguishable from the status alone.
+
+    **That ambiguity bit for real on 2026-08-11, and the mitigation this docstring used to
+    claim does not work.** It said the IdP's `addReadTokenRoleOnCreate` grants the role at
+    link time, so a 403 must mean unlinked. It does not: that setting fires only when
+    brokering *creates* an account, and the provider is `linkOnly: true` precisely to forbid
+    that — **the two settings are mutually exclusive in effect**. After a fully successful
+    link (federated identity present, Google token stored), this error was raised anyway and
+    named the wrong cause. The realm now grants `read-token` explicitly; if this is ever seen
+    against a user you know is linked, check the role before believing the message.
     """
 
 
@@ -151,9 +159,13 @@ class KeycloakClient:
         revocation. We ask; we do not manage.
 
         Authenticated with the **end user's** access token, not the service account — the
-        token being fetched is that user's, and the `broker` `read-token` role is granted to
-        them at link time. Passing the service-account token here would ask for a token the
-        service account does not have and get a 403 that looks like a misconfiguration.
+        token being fetched is that user's, and the `broker` `read-token` role is held by
+        them. Passing the service-account token here would ask for a token the service
+        account does not have and get a 403 that looks like a misconfiguration.
+
+        That role is granted by `app.services.cloud_links.grant_read_token` when the link
+        completes, **not** by the IdP's `addReadTokenRoleOnCreate` — see
+        :class:`AccountNotLinkedError` for why the difference cost a live debugging session.
 
         The response shape is the provider's own token response, so callers must read
         ``access_token`` and must not assume a refresh token is present.
@@ -178,6 +190,115 @@ class KeycloakClient:
             # Our caller's token was rejected — the user's session, not the link.
             raise InvalidCredentialsError("user token rejected by the broker endpoint")
         raise KeycloakUnavailableError(f"broker/{alias} returned {resp.status_code}")
+
+    async def exchange_linking_code(
+        self, *, code: str, redirect_uri: str, verifier: str
+    ) -> dict[str, Any]:
+        """Redeem leg 1's authorization code on the **linking** client (T-214, FR-AUT-11).
+
+        `corpus-linking`, never `client_id`/`client_secret`: that client is public, carries
+        `standardFlow` and nothing else, and grants no API access of its own
+        (`fullScopeAllowed: false`). Sending the ROPC client's credentials here would both
+        fail — it has no browser flow — and blur the separation R-63(2) exists to keep.
+
+        The response is wanted for two things and only two: the ``id_token``, whose ``sub``
+        proves *who* authenticated in that browser, and ``session_state``, which leg 2's
+        link hash is computed over. No token from here is ever stored or returned to a
+        client.
+        """
+        return await self._token(
+            {
+                "client_id": self._kc.linking_client_id,
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": redirect_uri,
+                "code_verifier": verifier,
+            }
+        )
+
+    async def admin_list_federated_identities(
+        self, *, sub: str, admin_token: str
+    ) -> list[dict[str, Any]]:
+        """The user's linked identity providers (FR-AUT-11's "report linked state").
+
+        The authoritative answer, and deliberately not "does `broker_token()` succeed?" —
+        that call conflates an absent link with a missing `read-token` role, which is the
+        exact ambiguity :class:`AccountNotLinkedError` documents and T-214 was bitten by.
+        """
+        resp = await self._admin(
+            "GET", f"/users/{sub}/federated-identity", admin_token=admin_token, expected=(200,)
+        )
+        return resp.json()
+
+    async def admin_remove_federated_identity(
+        self, *, sub: str, alias: str, admin_token: str
+    ) -> None:
+        """Unlink a provider (FR-AUT-11). Idempotent: an absent link is not an error.
+
+        Keycloak answers 404 for "there was no such link", which `_admin` raises as
+        `UserNotFoundError` — swallowed here, because the caller asked for the link to be
+        gone and it is. Documents already imported are untouched by design: FR-KBM-10 makes
+        them copies, so unlinking revokes *future* import and nothing else.
+        """
+        try:
+            await self._admin(
+                "DELETE",
+                f"/users/{sub}/federated-identity/{alias}",
+                admin_token=admin_token,
+                expected=(204,),
+            )
+        except UserNotFoundError:
+            log.info("keycloak.unlink_noop", alias=alias)
+
+    async def admin_get_client_uuid(self, *, client_id: str, admin_token: str) -> str:
+        """Resolve a client's *internal* uuid from its `clientId` (T-214).
+
+        Needed because role-mapping paths are keyed on the uuid, not the name.
+
+        **This call needs `view-clients`, and the near-miss is worth naming**: with
+        `query-clients` instead, Keycloak answers **`200 []`** rather than `403` — a
+        permission gap that reads as "the `broker` client does not exist" (measured, T-214).
+        Hence the empty list is raised as a misconfiguration rather than returned as absence.
+        """
+        resp = await self._admin(
+            "GET",
+            "/clients",
+            admin_token=admin_token,
+            params={"clientId": client_id},
+            expected=(200,),
+        )
+        clients = resp.json()
+        if not clients:
+            raise KeycloakForbiddenError(
+                f"no client named {client_id!r} was visible to the backend's service account "
+                "— grant it realm-management `view-clients` (`query-clients` answers 200 with "
+                "an empty list, which is indistinguishable from the client not existing); "
+                "see deployment/keycloak/README.md"
+            )
+        return str(clients[0]["id"])
+
+    async def admin_get_client_role(
+        self, *, client_uuid: str, role_name: str, admin_token: str
+    ) -> dict[str, Any]:
+        resp = await self._admin(
+            "GET",
+            f"/clients/{client_uuid}/roles/{role_name}",
+            admin_token=admin_token,
+            expected=(200,),
+        )
+        return resp.json()
+
+    async def admin_add_client_roles(
+        self, *, sub: str, client_uuid: str, roles: list[dict[str, Any]], admin_token: str
+    ) -> None:
+        """Assign client roles to a user. Idempotent — re-adding an existing mapping is a 204."""
+        await self._admin(
+            "POST",
+            f"/users/{sub}/role-mappings/clients/{client_uuid}",
+            admin_token=admin_token,
+            json=roles,
+            expected=(204,),
+        )
 
     async def admin_reset_password(self, *, sub: str, new_password: str, admin_token: str) -> None:
         """Set a user's password via the Admin API (FR-USR-05, FR-USR-09). The

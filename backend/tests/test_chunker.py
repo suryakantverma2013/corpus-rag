@@ -426,7 +426,8 @@ def test_rows_default_to_the_placeholder_tenant() -> None:
         document_version=1,
         knowledge_base_id=uuid.uuid4(),
     )
-    assert rows[0].tenant_id == uuid.UUID("00000000-0000-0000-0000-000000000000")  # single-org (OI-21)
+    # single-org sentinel (OI-21, settled by R-62(4))
+    assert rows[0].tenant_id == uuid.UUID("00000000-0000-0000-0000-000000000000")
 
 
 def test_row_metadata_matches_the_chunk_metadata() -> None:

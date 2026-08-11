@@ -80,12 +80,35 @@ async def require_admin(
     return principal
 
 
+async def get_access_token(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+    _principal: Annotated[Principal, Depends(get_principal)],
+) -> str:
+    """The caller's **raw** access token, for the one thing that genuinely needs it (T-214).
+
+    Keycloak's broker endpoint returns *this user's* provider token and authenticates with
+    *this user's* token — the service account cannot stand in, because the token being fetched
+    is not the service account's (see `KeycloakClient.broker_token`). So FR-AUT-11 import is
+    the only caller; nothing else in the API should reach for this.
+
+    It depends on `get_principal` rather than reading the header alone, so the string handed
+    out has already been validated as a live realm-signed token. Without that this would be a
+    way to forward an arbitrary header value to Keycloak.
+    """
+    # `get_principal` has already rejected the None/empty case, so this is narrowing for the
+    # type checker rather than a second check.
+    if credentials is None:  # pragma: no cover - unreachable via get_principal
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not authenticated", _UNAUTH_HEADERS)
+    return credentials.credentials
+
+
 def get_keycloak_client(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> KeycloakClient:
     return KeycloakClient(settings.keycloak)
 
 
+CurrentAccessToken = Annotated[str, Depends(get_access_token)]
 CurrentPrincipal = Annotated[Principal, Depends(get_principal)]
 CurrentUser = Annotated[User, Depends(get_current_user)]
 RequireAdmin = Annotated[Principal, Depends(require_admin)]

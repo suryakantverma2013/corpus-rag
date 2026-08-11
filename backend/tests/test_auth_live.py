@@ -338,6 +338,45 @@ async def test_realm_artifact_imports_and_works() -> None:
                 ).json()
             }
             assert {"manage-users", "view-realm", "view-users", "query-users"} <= granted, granted
+            # T-214: without `view-clients` the backend cannot resolve the `broker` client, so
+            # it cannot grant `read-token` and every completed link is inert. The near-miss is
+            # what makes this worth a live assertion: `query-clients` answers the same lookup
+            # with `200 []`, which reads as "no such client" rather than "no permission".
+            assert "view-clients" in granted, granted
+
+            # T-214, and this one is checked **against a freshly imported realm on purpose**.
+            # Keycloak ignores realm-import keys it does not recognise *silently*, so a
+            # `clientScopeMappings` block with the wrong shape would import cleanly and leave
+            # linking broken — which is exactly how it presented: the account-link endpoint
+            # answered `link_error=not_allowed`, naming neither the client nor the role.
+            linking = (
+                await http.get(
+                    f"{base}/admin/realms/{realm}/clients",
+                    headers=adm,
+                    params={"clientId": "corpus-linking"},
+                )
+            ).json()[0]
+            account = (
+                await http.get(
+                    f"{base}/admin/realms/{realm}/clients",
+                    headers=adm,
+                    params={"clientId": "account"},
+                )
+            ).json()[0]
+            scoped = {
+                role["name"]
+                for role in (
+                    await http.get(
+                        f"{base}/admin/realms/{realm}/clients/{linking['id']}"
+                        f"/scope-mappings/clients/{account['id']}",
+                        headers=adm,
+                    )
+                ).json()
+            }
+            assert "manage-account-links" in scoped, (
+                "corpus-linking has `fullScopeAllowed: false`, so without this scope mapping "
+                "Keycloak refuses client-initiated account linking with `not_allowed` (T-214)"
+            )
 
             profile = (
                 await http.get(f"{base}/admin/realms/{realm}/users/profile", headers=adm)

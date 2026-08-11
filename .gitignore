@@ -61,6 +61,15 @@ Nexus_AI_Detailed_Specification.md
 CLAUDE.md
 .claude/
 
+# ---- Third-party OAuth credentials (NEVER commit) ----
+# Google Cloud Console hands you a `client_secret_*.json` containing a live
+# `GOCSPX-` secret. Corpus needs it in **Keycloak only** (R-63: the backend stores no
+# third-party credential), so the file has no business in this tree at all — this is a
+# backstop for the window between downloading it and moving it somewhere safe.
+client_secret_*.json
+*client_secret*.json
+credentials.json
+
 # ---- OS / editor ----
 .DS_Store
 Thumbs.db

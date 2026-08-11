@@ -200,6 +200,133 @@ def test_the_realm_carries_placeholder_google_credentials_only() -> None:
     assert cfg["clientSecret"].startswith("CHANGE_ME_")
 
 
+def test_google_idp_cannot_be_used_to_log_in() -> None:
+    """FR-AUT-11 / R-63(3): brokering must never create a Corpus account.
+
+    **This is the test that should have shipped with the provider, and did not.** The realm
+    was committed with `linkOnly: false` while three documents — the ruling, FR-AUT-11 and
+    `deployment/keycloak/README.md` — all said link-only. Nothing failed, because every
+    other realm assertion covered a *different* field.
+
+    `linkOnly` is the enforced half. With it false the provider is offered as a login
+    method, and the stock `first broker login` flow runs `idp-create-user-if-unique` as its
+    first alternative: a Google identity whose email matches no Corpus user gets one
+    **created silently**. That is the self-service signup route FR-USR-02/03 does not have.
+    Existing users were unaffected, which is exactly why it looked correct.
+
+    With `linkOnly: true` the provider is hidden from the login page and is reachable only
+    from an already-authenticated session, so the identity is linked to *that* user and
+    there is no unique-user branch to take.
+    """
+    idp = next(i for i in _REALM["identityProviders"] if i["alias"] == "google")
+    assert idp["linkOnly"] is True, (
+        "the Google provider must not be a login method — see FR-AUT-11 and R-63(3)"
+    )
+
+
+def test_the_first_broker_login_flow_exists() -> None:
+    """A flow alias naming nothing is an import-time failure, not a runtime one.
+
+    The realm currently names Keycloak's built-in flow. Should it ever name a custom
+    link-only flow (the defence-in-depth hardening T-214 still owes), that flow has to be
+    defined in this same artifact or the import breaks for everyone.
+    """
+    idp = next(i for i in _REALM["identityProviders"] if i["alias"] == "google")
+    alias = idp["firstBrokerLoginFlowAlias"]
+    builtin = {"first broker login"}
+    defined = {f["alias"] for f in _REALM.get("authenticationFlows", [])}
+    assert alias in builtin | defined, f"{alias!r} is neither built-in nor defined in the realm"
+
+
+def test_the_seeded_admin_holds_the_broker_read_token_role() -> None:
+    """`addReadTokenRoleOnCreate` is INERT under `linkOnly: true` — proved live 2026-08-11.
+
+    R-63, FR-AUT-11 and the Keycloak README all said the `broker` `read-token` role is
+    "granted at link time by `addReadTokenRoleOnCreate`". **It is not.** That setting fires
+    only when brokering *creates* an account, and `linkOnly: true` exists precisely to
+    forbid that — so the two are mutually exclusive in effect and the role is never granted.
+
+    The consequence was total and silent: after a completely successful link (federated
+    identity present, consent granted, Google token stored), `broker_token()` raised
+    `AccountNotLinkedError` — **misreporting the cause**, because Keycloak answers 403 both
+    for "not linked" and for "missing read-token", which `AccountNotLinkedError`'s own
+    docstring notes are indistinguishable. Every user would have hit this forever.
+
+    No mocked test could have found it: the double supplies the very behaviour under test.
+    Only a real consent round-trip does.
+
+    `read-token` is safe to hold unconditionally — it permits reading *your own* brokered
+    token and yields nothing at all without a federated link.
+
+    **Do not try to grant this through the realm's default roles — it was tried and it does
+    not work.** Making our `user` role a composite carrying `client: {broker: [read-token]}`
+    fails the realm import outright with a bare `500`, because realm roles are created
+    *before* Keycloak's built-in clients (`broker`, `account`) exist, so the composite
+    reference cannot resolve. Per-user `clientRoles` works only because users are imported
+    *after* clients. That is why this grant is per-user here, and why granting it to **every**
+    user is T-214's job in the linking endpoint (after a successful link, via the service
+    account) rather than a line of realm configuration.
+    """
+    admin = next(u for u in _REALM["users"] if u["username"] == "admin@corpus.local")
+    assert admin.get("clientRoles", {}).get("broker") == ["read-token"], (
+        "the seeded admin must hold `broker` read-token — addReadTokenRoleOnCreate cannot "
+        "grant it while the provider is linkOnly"
+    )
+
+
+def test_the_seeded_admin_can_use_the_account_console() -> None:
+    """The seeded admin must not be silently unlike every other user.
+
+    A user's `realmRoles` in a realm import **replaces** the defaults rather than adding to
+    them, so declaring `['admin', 'user']` cost the seeded admin `default-roles-<realm>` —
+    and with it `view-profile` and `manage-account`. Users created through Corpus's own
+    `POST /api/v1/users` get that composite from Keycloak automatically, so the *seeded*
+    admin was the only user in the realm without it. It surfaced as the Keycloak account
+    console failing with a bare "Something went wrong", which names nothing.
+
+    **Granted through the `account` client rather than the composite, deliberately.**
+    `default-roles-<realm>` embeds the realm's name, and `test_realm_artifact_imports_and_works`
+    imports this artifact into a *renamed* throwaway realm — so a hardcoded composite name
+    resolves to nothing there, trading a live defect for a CI one. The `account` client
+    exists in every realm under a fixed id, so this form is portable; verified by importing
+    into a renamed realm and reading the effective roles back.
+
+    `manage-account` carries `manage-account-links` as a composite, which is what actually
+    permits identity-provider linking.
+
+    Not restored: `offline_access` and `uma_authorization`. Both are unused by Corpus —
+    offline tokens are never requested and authorization services are not enabled — so they
+    are deliberately out of scope rather than overlooked.
+    """
+    admin = next(u for u in _REALM["users"] if u["username"] == "admin@corpus.local")
+    account_roles = set(admin.get("clientRoles", {}).get("account", []))
+    assert {"view-profile", "manage-account"} <= account_roles, (
+        "the seeded admin cannot use the account console without view-profile/manage-account"
+    )
+
+
+def test_the_service_account_can_resolve_the_broker_client() -> None:
+    """`view-clients`, without which the linking flow cannot grant `read-token` (T-214).
+
+    The grant needs the `broker` client's internal uuid, and resolving it is
+    `GET /clients?clientId=broker`. **The near-miss is the reason this is pinned:** the
+    lighter `query-clients` role answers that call with **`200 []`** rather than `403`
+    (measured against the running realm), so a realm short of `view-clients` would report the
+    `broker` client as *not existing* — and the linking flow would fail with a message about a
+    missing client rather than a missing permission.
+
+    `KeycloakClient.admin_get_client_uuid` therefore raises on the empty list instead of
+    treating it as absence, and this test keeps the role that makes the list non-empty.
+    """
+    account = next(
+        u for u in _REALM["users"] if u["username"] == "service-account-corpus-backend"
+    )
+    assert "view-clients" in account["clientRoles"]["realm-management"], (
+        "the backend's service account cannot resolve the `broker` client, so it cannot grant "
+        "`read-token` and every link would be inert — see T-214"
+    )
+
+
 def test_settings_defaults_match_the_committed_realm() -> None:
     """The alias is a path segment in the broker URL, so a mismatch is a 404 at runtime."""
     s = get_settings().keycloak

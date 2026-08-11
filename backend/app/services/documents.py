@@ -36,7 +36,7 @@ import asyncio
 import hashlib
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import Literal, Protocol
 
 import structlog
 from sqlalchemy.exc import IntegrityError
@@ -67,12 +67,33 @@ from app.services.object_storage import (
     original_key,
 )
 
-if TYPE_CHECKING:
-    from fastapi import UploadFile
-
 log = structlog.get_logger(__name__)
 
 UploadScope = Literal["global", "chat"]
+
+
+class ByteSource(Protocol):
+    """What this module actually needs from an upload: a name and an async read.
+
+    Widened from `fastapi.UploadFile` for T-214 (FR-KBM-10, R-63): a cloud-drive import is a
+    **one-time copy through this same path**, so it is handed to `upload_document` rather than
+    given a parallel one — which is what makes dedup, quota, the size ceiling, format
+    validation and R-32 scanning apply to an imported document *by construction* instead of by
+    a second implementation that has to be kept in step.
+
+    A Protocol rather than a union, because the alternative shapes are not enumerable: the
+    ingestion path never cared whether the bytes arrived as multipart, and pinning it to the
+    two classes that exist today would make the third one a change to this module.
+
+    `filename` is read-only here on purpose — a mutable attribute would be invariant, and
+    `UploadFile`'s `str | None` and a Drive download's `str` would then be incompatible for a
+    difference nothing in this module can observe.
+    """
+
+    @property
+    def filename(self) -> str | None: ...
+
+    async def read(self, size: int = -1) -> bytes: ...
 
 
 class _Enqueue(Protocol):
@@ -356,7 +377,7 @@ class _ReadResult:
         self.checksum = checksum
 
 
-async def _read_and_hash(upload: UploadFile, settings: Settings) -> _ReadResult:
+async def _read_and_hash(upload: ByteSource, settings: Settings) -> _ReadResult:
     """Single pass: measure, hash, and fail fast on size or an obvious binary.
 
     The size ceiling trips here — before any storage call — which is R-31(3)'s pre-storage
@@ -391,7 +412,7 @@ async def _read_and_hash(upload: UploadFile, settings: Settings) -> _ReadResult:
 
 async def upload_document(
     *,
-    upload: UploadFile,
+    upload: ByteSource,
     scope: UploadScope,
     conversation_id: uuid.UUID | None,
     user: User,
@@ -800,7 +821,7 @@ async def _supersede_open_ingests(jobs: KnowledgeJobRepository, document_id: uui
 async def replace_document(
     *,
     document_id: uuid.UUID,
-    upload: UploadFile,
+    upload: ByteSource,
     user: User,
     is_admin: bool,
     session: AsyncSession,
@@ -986,6 +1007,7 @@ async def replace_document(
 
 
 __all__ = [
+    "ByteSource",
     "ConversationNotFoundError",
     "DeletionOutcome",
     "DocumentNotFoundError",

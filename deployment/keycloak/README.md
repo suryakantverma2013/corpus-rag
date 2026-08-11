@@ -104,7 +104,20 @@ as `corpus-backend`'s secret is a placeholder. In the admin console → Identity
 
 - **Store tokens** is ON — without it the broker endpoint returns 200 with no token, and
   the backend raises a configuration error rather than pretending it is an outage.
-- **Stored tokens readable** / `read-token` is granted on link (`addReadTokenRoleOnCreate`).
+- **Stored tokens readable.** ⚠ **`addReadTokenRoleOnCreate` does NOT grant the role here —
+  proved live 2026-08-11.** It fires only when brokering *creates* an account, and
+  `linkOnly: true` exists to forbid exactly that, so **the two settings are mutually
+  exclusive in effect**. After a fully successful link the user held no `broker` roles and
+  `broker_token()` raised `AccountNotLinkedError`, misreporting the cause — Keycloak answers
+  403 both for "not linked" and for "missing read-token". **Every user would have hit this
+  permanently.** The seeded admin now carries `clientRoles: {broker: [read-token]}` in the
+  artifact. **Granting it to every user is settled: the backend does it after a successful
+  link, in T-214's linking endpoint.** The realm-default-roles route was *tried and rejected
+  on evidence* — making the `user` role a composite carrying `client: {broker: [read-token]}`
+  fails the whole realm import with a bare `500`, because realm roles are created **before**
+  Keycloak's built-in clients (`broker`, `account`) exist, so the reference cannot resolve.
+  Per-user `clientRoles` works only because users are imported *after* clients. `read-token`
+  is safe to hold: it reads *your own* brokered token and yields nothing without a link.
 - **Scopes** include `https://www.googleapis.com/auth/drive.readonly`.
 
 ### 3. What the user sees, and the one wart
@@ -127,6 +140,94 @@ exists, and token exchange can *read* a brokered token but cannot *create* the l
 `google` must stay **link-only**: Keycloak must never create a Corpus account from a Google
 identity. FR-USR-02/03 make account creation administrator-only, so an auto-creating first
 broker login flow would silently add self-service signup to a product that does not have it.
+
+**The enforced mechanism is `"linkOnly": true` on the identity provider.** With it, Keycloak
+hides the provider from the login page and it can be reached only from an
+already-authenticated session — so the Google identity is linked to *that* user and the
+unique-user branch is never taken.
+
+**This was wrong in the committed realm until 2026-08-11.** The file shipped
+`"linkOnly": false` while this section, FR-AUT-11 and R-63(3) all said link-only; the flow
+alias still names Keycloak's built-in `first broker login`, whose first alternative is
+`idp-create-user-if-unique`. So a Google identity whose email matched **no** Corpus user
+would have had an account created for it. Existing users were unaffected, which is precisely
+why it read as correct. It is now pinned by `backend/tests/test_account_linking.py`.
+
+**Still owed:** a *custom* link-only first-broker-login flow (the built-in one with
+`idp-create-user-if-unique` removed) as defence in depth, so the guard does not rest on one
+boolean. Deliberately not committed unverified — a malformed `authenticationFlows` entry
+breaks realm import for everyone, and there is no in-repo precedent for its exact JSON shape.
+Build it against a running Keycloak, export, and let `test_auth_live.py` prove the import.
+
+### 5. The seeded admin needs its roles granted explicitly
+
+A user's `realmRoles` in a realm import **replaces** the defaults rather than adding to them.
+Declaring `['admin', 'user']` therefore cost `admin@corpus.local` the `default-roles-<realm>`
+composite — and with it `view-profile` and `manage-account`, so the Keycloak **account console
+failed with a bare "Something went wrong"**. Every user created through Corpus's own
+`POST /api/v1/users` gets that composite automatically, so the seeded admin was the only user
+in the realm without it.
+
+The artifact now grants them through the **`account` client** (`view-profile`,
+`manage-account`) rather than by naming the composite: `default-roles-<realm>` embeds the realm
+name, and `test_realm_artifact_imports_and_works` imports this file into a *renamed* throwaway
+realm, where a hardcoded name resolves to nothing. The `account` client exists in every realm
+under a fixed id, so the grant is portable — verified by importing into a renamed realm and
+reading the effective roles back. `manage-account` carries `manage-account-links`, which is
+what permits identity-provider linking.
+
+Not restored, deliberately: `offline_access` and `uma_authorization`. Corpus requests no
+offline tokens and enables no authorization services.
+
+### 6. The linking flow is two legs, and both realm grants below are load-bearing
+
+Built and verified live in T-214. The flow the backend drives is:
+
+```
+leg 1  GET  {issuer}/protocol/openid-connect/auth?client_id=corpus-linking&prompt=login…
+       → Keycloak renders the password form → returns ?code=…&state=…&session_state=…
+       → the backend exchanges the code and checks the authenticated `sub` matches
+leg 2  GET  {issuer}/broker/google/link?client_id=corpus-linking&nonce=…&hash=…
+       → Google consent → back to the backend → grant `read-token` → back to the GUI
+```
+
+**Why two legs, measured not assumed.** `/broker/{provider}/link` needs a browser SSO session;
+with none it redirects straight back with `link_error=not_logged_in` (probed against this
+realm). ROPC creates no browser session, so leg 1 exists to make one. The hash is
+`base64url(sha256(nonce + session_state + client_id + provider))`, unpadded — a wrong order or
+padded encoding returns `link_error=invalid_hash` and nothing else.
+
+Two realm grants are required and **neither is discoverable from an error message**:
+
+- **`view-clients`** on the backend's service account (`realm-management`). The `read-token`
+  grant needs the `broker` client's internal uuid, and resolving it is
+  `GET /clients?clientId=broker`. ⚠ The lighter **`query-clients` answers that call with
+  `200 []` rather than `403`** — so an under-provisioned realm reports the `broker` client as
+  *not existing*. `KeycloakClient.admin_get_client_uuid` raises on the empty list for exactly
+  this reason.
+- **`manage-account-links` in `corpus-linking`'s scope** (top-level `clientScopeMappings` in
+  the artifact). The client ships `fullScopeAllowed: false`, which is deliberate — it grants no
+  API access of its own — but that also strips the `account` role Keycloak requires for
+  client-initiated linking. Without the mapping, leg 2 answers **`link_error=not_allowed`**,
+  naming neither the client nor the role. Holding `manage-account` as a *user* is not enough;
+  the **client** needs it in scope.
+
+  ⚠ **Keycloak ignores realm-import keys it does not recognise, silently.** A
+  `clientScopeMappings` block with the wrong shape imports cleanly and leaves linking broken,
+  so `test_realm_artifact_imports_and_works` imports the artifact into a throwaway realm and
+  **reads the mapping back** rather than trusting a `201`.
+
+**Google's authorized redirect URI stays Keycloak's** broker endpoint (step 1) — Corpus's own
+callbacks are `corpus-linking` redirect URIs, not Google ones:
+
+```
+http://localhost:8000/api/v1/cloud/links/google/callback     # leg 1 returns here
+http://localhost:8000/api/v1/cloud/links/google/complete     # leg 2 returns here
+```
+
+Both must match a `redirectUris` entry on `corpus-linking` (`http://localhost:8000/*` covers
+them) and the origin must match `CLOUD_CALLBACK_BASE_URL`. `CLOUD_RETURN_URL` is where the
+browser finally lands, with `?link=linked|failed|denied`.
 
 ## The ROPC constraint — read before changing realm config (T-110)
 

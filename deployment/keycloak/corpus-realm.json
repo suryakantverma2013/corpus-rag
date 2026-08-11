@@ -94,7 +94,16 @@
       "realmRoles": [
         "admin",
         "user"
-      ]
+      ],
+      "clientRoles": {
+        "account": [
+          "view-profile",
+          "manage-account"
+        ],
+        "broker": [
+          "read-token"
+        ]
+      }
     },
     {
       "username": "service-account-corpus-backend",
@@ -104,6 +113,7 @@
         "realm-management": [
           "manage-users",
           "query-users",
+          "view-clients",
           "view-realm",
           "view-users"
         ]
@@ -134,7 +144,7 @@
       "addReadTokenRoleOnCreate": true,
       "trustEmail": false,
       "firstBrokerLoginFlowAlias": "first broker login",
-      "linkOnly": false,
+      "linkOnly": true,
       "config": {
         "clientId": "CHANGE_ME_google-oauth-client-id",
         "clientSecret": "CHANGE_ME_google-oauth-client-secret",
@@ -144,5 +154,15 @@
         "syncMode": "IMPORT"
       }
     }
-  ]
+  ],
+  "clientScopeMappings": {
+    "account": [
+      {
+        "client": "corpus-linking",
+        "roles": [
+          "manage-account-links"
+        ]
+      }
+    ]
+  }
 }

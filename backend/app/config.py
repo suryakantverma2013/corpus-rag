@@ -1206,11 +1206,79 @@ class KeycloakSettings(BaseSettings):
     def broker_token_endpoint(self, alias: str) -> str:
         """Where the *provider's* access token is read from, per FR-AUT-11.
 
-        Requires the caller's Keycloak access token as Bearer and the `broker`
-        client's `read-token` role on the user — granted at link time by the IdP's
-        `addReadTokenRoleOnCreate`.
+        Requires the caller's Keycloak access token as Bearer and the `broker` client's
+        `read-token` role on the user.
+
+        **That role is granted by us, not by the realm** — an earlier version of this
+        docstring claimed `addReadTokenRoleOnCreate` supplied it, which is false: that
+        setting fires only when brokering *creates* an account, and the provider is
+        `linkOnly: true` precisely to forbid that (T-214, proved live 2026-08-11). The
+        linking flow grants it explicitly after a successful link — see
+        `app.services.cloud_links.grant_read_token`.
         """
         return f"{self.issuer}/broker/{alias}/token"
+
+    def authorization_endpoint(self) -> str:
+        """The browser leg of FR-AUT-11's linking flow, on the `corpus-linking` client.
+
+        Never used for login: `corpus-backend` ships `standardFlowEnabled: false` and R-28's
+        ROPC grant is the only login path (R-63(2)).
+        """
+        return f"{self.issuer}/protocol/openid-connect/auth"
+
+    def account_link_endpoint(self, alias: str) -> str:
+        """Keycloak's *client-initiated account linking* endpoint.
+
+        Requires a browser SSO session — with none it redirects straight back carrying
+        ``link_error=not_logged_in`` (measured, T-214), which is the whole reason linking is
+        two legs rather than one: leg 1 authenticates the browser, leg 2 links.
+        """
+        return f"{self.issuer}/broker/{alias}/link"
+
+
+class CloudDriveSettings(BaseSettings):
+    """Cloud-drive import — the provider-facing knobs (T-214, FR-KBM-10, R-63).
+
+    Deliberately small, and that is the design showing through rather than an omission:
+    Keycloak owns the OAuth client, the scope, the token storage and the refresh (R-63(1)),
+    so there is no client id, no secret, no token TTL and no encryption choice here. What
+    remains is where we call, where the browser comes back to, and how much we will read.
+
+    ``api_base`` is **normative, not tuning** (R-63(6)(1)): the backend fetches from a fixed
+    provider host with a validated file id, never a client-supplied URL, which is what keeps
+    this from being an SSRF surface. It is a setting only so a test can point it at a local
+    double — never so a request can move it.
+
+    ``return_url`` is likewise server-side by construction. It is where the browser lands
+    when linking finishes, and taking it from the request would be an open redirect wearing
+    a feature's clothes.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="CLOUD_", env_file=".env", extra="ignore")
+
+    #: The provider's fixed API host (R-63(6)(1)). Not a per-request value, ever.
+    api_base: str = Field(default="https://www.googleapis.com")
+
+    #: This backend's externally reachable origin — Keycloak redirects the browser here, so
+    #: it must match a `redirectUris` entry on the `corpus-linking` client.
+    callback_base_url: str = Field(default="http://localhost:8000")  # TBD(§8.4)
+
+    #: Where the browser lands once linking finishes, success or failure. The GUI reads the
+    #: outcome from the query string this flow appends.
+    return_url: str = Field(default="http://localhost:5173/")  # TBD(§8.4)
+
+    #: How long a linking flow may sit half-finished. Long enough for a Google consent
+    #: screen and a Keycloak password prompt, short enough that a leaked `state` in browser
+    #: history is worthless.
+    link_state_ttl_seconds: int = Field(default=600)  # TBD(§8.4)
+
+    #: Files per page in the FR-KBM-10 selection surface, and the ceiling a client may ask
+    #: for. Drive itself caps `pageSize` at 1000; this is a product bound, not that one.
+    list_page_size: int = Field(default=50)  # TBD(§8.4)
+    max_list_page_size: int = Field(default=200)  # TBD(§8.4)
+
+    #: Timeout for one provider call. The metadata and download calls share it.
+    timeout_seconds: float = Field(default=30.0)  # TBD(§8.4)
 
 
 class Settings(BaseSettings):
@@ -1257,6 +1325,7 @@ class Settings(BaseSettings):
     checkpointer: CheckpointerSettings = Field(default_factory=CheckpointerSettings)
     graph: GraphSettings = Field(default_factory=GraphSettings)
     keycloak: KeycloakSettings = Field(default_factory=KeycloakSettings)
+    cloud: CloudDriveSettings = Field(default_factory=CloudDriveSettings)
 
     @model_validator(mode="after")
     def _coherent(self) -> Settings:

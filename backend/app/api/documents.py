@@ -37,28 +37,40 @@ from fastapi.sse import EventSourceResponse
 from pydantic import BaseModel, Field
 
 from app.api.errors import (
+    ACCESS_REVOKED_COPY,
+    NOT_LINKED_COPY,
     PROCESSING_LOCKED,
     QUOTA_EXCEEDED,
     RATE_LIMITED,
     STORAGE_DOWN,
     TOO_LARGE,
     UNSUPPORTED_TYPE,
+    CloudLinkRequiredResponse,
+    cloud_link_required,
     error_responses,
 )
 from app.api.events import SseFrame
 from app.auth.dependencies import (
+    CurrentAccessToken,
     CurrentPrincipal,
     CurrentUser,
     DbSession,
+    Keycloak,
     SettingsDep,
     StreamSessionmaker,
+)
+from app.auth.keycloak_client import (
+    KeycloakForbiddenError,
+    KeycloakRejectedError,
+    KeycloakUnavailableError,
 )
 from app.db.enums import DocumentStatus, KBVisibility
 from app.db.repositories.documents import DocumentListing, DocumentRepository
 from app.security.content_validation import UnsupportedFileTypeError
 from app.security.rate_limit import limiter, principal_or_ip_key, upload_limit
-from app.services import document_events
+from app.services import cloud_import, document_events, drive
 from app.services import documents as documents_service
+from app.services.cloud_links import CloudProvider
 from app.services.document_events import DocumentState
 from app.services.documents import (
     ConversationNotFoundError,
@@ -94,6 +106,14 @@ _NOT_REPLACEABLE = "Only an active or failed document can be replaced."  # TBD(�
 _DUPLICATE_CHECKSUM = (  # TBD(§8.4) copy
     "That file is already in your knowledge base as a different document."
 )
+_CLOUD_FILE_NOT_FOUND = "That cloud-drive file was not found."  # TBD(§8.4) copy — FR-KBM-10
+_DRIVE_DOWN = "The cloud drive is unavailable — please try again."  # TBD(§8.4) copy
+_UPSTREAM_DOWN = "Authentication service unavailable."
+_CLOUD_MISCONFIGURED = (  # TBD(§8.4) copy
+    "Cloud import is not configured correctly on the server. Check the server logs for details."
+)
+_NOT_LINKED = NOT_LINKED_COPY
+_DRIVE_FORBIDDEN = ACCESS_REVOKED_COPY
 _PROCESSING_LOCKED = (  # TBD(§8.4) copy — FR-STA-02 / FR-ORC-04, R-43
     "Knowledge-base actions are paused while a response is being generated. "
     "Try again once the answer finishes."
@@ -179,6 +199,142 @@ async def upload_document(
         # 507 (RFC 4918) is the precise "cannot store the representation" semantic, and
         # keeps the per-user quota distinguishable from the per-file 413 without the
         # client having to parse copy.
+        raise HTTPException(status.HTTP_507_INSUFFICIENT_STORAGE, _QUOTA) from exc
+    except EmptyFileError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, _EMPTY) from exc
+    except MissingConversationError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, _NO_CONVERSATION) from exc
+    except ConversationNotFoundError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, _CONVERSATION_NOT_FOUND) from exc
+    except ObjectStorageError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, _STORAGE_DOWN) from exc
+
+    if outcome.duplicate:
+        response.status_code = status.HTTP_200_OK
+    return UploadResponse(
+        document_id=outcome.document_id,
+        job_id=outcome.job_id,
+        status=outcome.status,
+        duplicate=outcome.duplicate,
+    )
+
+
+# --- cloud-drive import (T-214, FR-KBM-10, R-63) ------------------------------
+
+
+def _link_required(provider: CloudProvider, code: str, message: str) -> HTTPException:
+    """FR-AUT-11's `409`. The detail model and copy are shared with `app/api/cloud.py`."""
+    return HTTPException(
+        status.HTTP_409_CONFLICT,
+        cloud_link_required(provider.value, code, message),  # type: ignore[arg-type]
+    )
+
+
+class ImportRequest(BaseModel):
+    """Import one cloud-drive file into a knowledge base.
+
+    `scope`/`conversation_id` are spelled exactly as the upload *form* spells them, so the KB
+    modal uses one vocabulary whichever way a document arrives.
+
+    JSON rather than multipart because there is no file part: the client sends an id it got
+    from `GET /cloud/{provider}/files`, and the backend fetches the bytes from the provider's
+    fixed host (R-63(6)(1)). A client-supplied URL here is exactly what the ruling forbids.
+    """
+
+    provider: CloudProvider
+    file_id: str = Field(max_length=256)
+    scope: UploadScope = "global"
+    conversation_id: uuid.UUID | None = None
+
+
+@router.post(
+    "/import",
+    response_model=UploadResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        status.HTTP_200_OK: {"description": "Duplicate checksum — not re-ingested."},
+        status.HTTP_202_ACCEPTED: {"description": "Accepted; ingestion queued."},
+        status.HTTP_409_CONFLICT: {
+            "model": CloudLinkRequiredResponse,
+            "description": (
+                "No cloud account is linked, the provider revoked access, "
+                "or a response is generating."
+            ),
+        },
+        **error_responses(
+            (404, "No such file for this caller, or scope=chat naming no conversation of theirs."),
+            (503, "The cloud drive is unreachable."),
+        ),
+        **_UPLOAD_FAILURES,
+        **RATE_LIMITED,
+    },
+    summary="Import a document from a linked cloud drive",
+)
+@limiter.limit(upload_limit, key_func=principal_or_ip_key)
+async def import_document(
+    request: Request,
+    response: Response,
+    body: ImportRequest,
+    user: CurrentUser,
+    access_token: CurrentAccessToken,
+    kc: Keycloak,
+    session: DbSession,
+    storage: ObjectStorageDep,
+    queue: JobQueueDep,
+    settings: SettingsDep,
+) -> UploadResponse:
+    """FR-KBM-10's one-time copy.
+
+    **It is the same route as upload in every way that matters** — the response model, the
+    duplicate `200`, `413`/`415`/`507`, the R-24 processing lock and the rate limit are all
+    literally the upload route's, because the bytes are handed to `upload_document` itself
+    (R-63: an imported document is thereafter indistinguishable from an uploaded one). The
+    only additions are the two failures that can happen *before* there are any bytes: the
+    account is not linked, and the provider refused.
+
+    It is a **copy, not a live link**: a later change to the file in Drive does not re-ingest,
+    and no query ever reaches Google. The user re-imports or uses Replace (FR-KBM-07).
+    """
+    try:
+        outcome = await cloud_import.import_document(
+            provider=body.provider,
+            file_id=body.file_id,
+            scope=body.scope,
+            conversation_id=body.conversation_id,
+            user=user,
+            access_token=access_token,
+            kc=kc,
+            session=session,
+            storage=storage,
+            queue=queue,
+            settings=settings,
+        )
+    except cloud_import.AccountNotLinkedError as exc:
+        raise _link_required(body.provider, "ACCOUNT_NOT_LINKED", _NOT_LINKED) from exc
+    except drive.DriveForbiddenError as exc:
+        raise _link_required(body.provider, "CLOUD_ACCESS_REVOKED", _DRIVE_FORBIDDEN) from exc
+    except (drive.DriveFileNotFoundError, drive.InvalidFileIdError) as exc:
+        # An unparseable id and an id belonging to someone else answer identically. Telling
+        # them apart makes the route a probe for which Drive files exist (NFR-SEC-02's
+        # reasoning, applied to a provider's namespace).
+        raise HTTPException(status.HTTP_404_NOT_FOUND, _CLOUD_FILE_NOT_FOUND) from exc
+    except drive.UnsupportedDriveFileError as exc:
+        raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, _UNSUPPORTED) from exc
+    except drive.DriveFileTooLargeError as exc:
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, _TOO_LARGE) from exc
+    except (KeycloakForbiddenError, KeycloakRejectedError) as exc:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, _CLOUD_MISCONFIGURED) from exc
+    except KeycloakUnavailableError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, _UPSTREAM_DOWN) from exc
+    except drive.DriveError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, _DRIVE_DOWN) from exc
+    except ProcessingLockedError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, _PROCESSING_LOCKED) from exc
+    except (FileTooLargeError, ObjectTooLargeError) as exc:
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, _TOO_LARGE) from exc
+    except UnsupportedFileTypeError as exc:
+        raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, _UNSUPPORTED) from exc
+    except QuotaExceededError as exc:
         raise HTTPException(status.HTTP_507_INSUFFICIENT_STORAGE, _QUOTA) from exc
     except EmptyFileError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, _EMPTY) from exc
