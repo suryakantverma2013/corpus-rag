@@ -288,9 +288,11 @@ def _budget_conflict(exc: ContextWindowExceededError) -> HTTPException:
     """FR-STA-04's refusal, shared by send and regenerate (R-51(5), T-404).
 
     A refusal, not an FR-ORC-05 failure: nothing was attempted. `409` on the R-24 processing
-    lock's precedent — a state the caller resolves by acting. The **code** is stable and is what
-    a client branches on; the copy is provisional while OI-26(c) (the escape path) belongs to
-    T-505.
+    lock's precedent — a state the caller resolves by acting, and R-67(1) fixes the action:
+    **New chat is the only escape**, the conversation being frozen rather than broken. The
+    **code** is stable and is what a client branches on; the copy is FR-STA-04's (adopted by
+    R-67(2)), so T-505/T-506's composer derives from the requirement, not from this response —
+    it blocks before a request exists and never sees this `message`.
 
     `used_tokens` is the conversation's **real** usage on both paths, never the adjusted
     projection a regenerate checks against — it feeds the FR-ANL-03 card, and a card showing a

@@ -53,7 +53,7 @@ class DocumentChunk(CreatedAtMixin, Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         nullable=False,
-        server_default=text("'00000000-0000-0000-0000-000000000000'"),  # TBD(OI-21)
+        server_default=text("'00000000-0000-0000-0000-000000000000'"),  # single-org (OI-21)
     )
     knowledge_base_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("knowledge_bases.id"), nullable=False

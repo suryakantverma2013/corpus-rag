@@ -939,6 +939,17 @@ class ContextSettings(BaseSettings):
     There is deliberately **no `CONTEXT_ENABLED`**: its off state is "let a conversation grow
     without limit", which removes FR-STA-04 rather than degrading it — the `GATE_ENABLED`
     test, not the `EVAL_ENABLED` one.
+
+    **History compression is out of scope, and `window_tokens` is the lever to reach for
+    first** (R-67(3)/(4), spec §8.50, closing OI-26(d)). A rolling window or rolling summary
+    is not a feature beside FR-STA-04 — it *removes* it, since the projected total could then
+    never exceed the budget — and it redefines FR-ANL-03's meter, which R-30/R-51(1) fix as
+    *conversation length*. It would also reopen what R-51(4) closed by construction: usage is
+    derived from `messages`, and a summary is not a `messages` row. Because 10.4K is a
+    **product** budget an order of magnitude below the model window, the answer to "chats hit
+    the wall too often" is to raise this number — the meter's denominator follows it honestly
+    — and compression becomes the right instrument only once it sits at the model's ceiling.
+    Note the value is NFR-CAP-01's and §9's literal, so raising it is an author's change.
     """
 
     model_config = SettingsConfigDict(env_prefix="CONTEXT_", env_file=".env", extra="ignore")

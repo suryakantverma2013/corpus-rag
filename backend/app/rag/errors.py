@@ -77,16 +77,26 @@ BLOCKED_INJECTION = (  # TBD(§8.4)
 #: should *do*, and nothing here failed — the request was never attempted. It is the same
 #: shape as the R-24 processing lock's `409`: a state the caller resolves by acting.
 #:
-#: The code is separate from the copy because the two have different owners. **`OI-26 (c)`
-#: is open** — the escape path and the blocked-chat wording are GUI questions belonging to
-#: T-505 — so this string is provisional and deliberately minimal, while the code is stable
-#: and is what T-402's response and the GUI branch on. Copy may be rewritten without
-#: touching a client; the code may not.
+#: The code is separate from the copy because the two have different owners: the code is
+#: stable and is what T-402's response and the GUI branch on; copy may be rewritten without
+#: touching a client.
+#:
+#: **OI-26(c) is closed — R-67(2), spec §8.50, Rev 0.34 — and this string is its answer.**
+#: It was written as provisional pending that issue and turned out to settle it, so the
+#: ruling adopted it rather than replacing it. Two things it has to do, both deliberate:
+#: it **names the escape** (New chat, the only one — the accumulated history is not
+#: user-reducible), and it says the conversation is **frozen, not broken**, because a user
+#: who believes a full chat is a lost chat will delete it.
+#:
+#: **The normative source is FR-STA-04, not this constant.** The composer blocks *before* a
+#: request exists (R-51(6)), so it can never receive this `message` and must carry its own
+#: copy; both sides derive from the requirement so the two cannot drift. Wording remains
+#: author-confirmable in §8.4 — the *design* question is not open.
 #:
 #: Names no number: the limit is a `# TBD(§8.4)` knob, and a user cannot act on "10,400"
 #: any more than on the groundedness score `ABSTAIN_LOW_GROUNDEDNESS` withholds.
 CONTEXT_WINDOW_EXCEEDED_CODE = "CONTEXT_WINDOW_EXCEEDED"
-CONTEXT_WINDOW_EXCEEDED = (  # TBD(§8.4) — copy owned by T-505 via OI-26(c)
+CONTEXT_WINDOW_EXCEEDED = (  # TBD(§8.4) — wording only; adopted by R-67(2) into FR-STA-04
     "This conversation has reached its length limit. Start a new chat to keep going — your "
     "documents and their answers stay where they are."
 )

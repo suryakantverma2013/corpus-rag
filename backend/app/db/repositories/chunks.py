@@ -137,7 +137,7 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
         document_id: uuid.UUID,
         document_version: int,
         knowledge_base_id: uuid.UUID,
-        tenant_id: uuid.UUID = DEFAULT_TENANT_ID,  # TBD(OI-21)
+        tenant_id: uuid.UUID = DEFAULT_TENANT_ID,  # single-org (OI-21)
     ) -> int:
         """R-36(2): insert reused rows carrying an older version's vector, database-side.
 

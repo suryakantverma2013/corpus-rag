@@ -45,8 +45,9 @@ async def create_conversation(
 ) -> Conversation:
     """Start a new chat (FR-SBR-02). Flushes; the caller commits.
 
-    `tenant_id` takes the `DEFAULT_TENANT_ID` placeholder every other scoped table uses
-    (`# TBD(OI-21)`); there is no tenant on `users` to derive one from yet.
+    `tenant_id` takes the `DEFAULT_TENANT_ID` sentinel every other scoped table uses
+    (single-org, settled by R-62(4) under OI-21); there is no tenant on `users` to derive one
+    from yet.
 
     No title is generated from anything: FR-SBR-04 renames on the GUI's terms and nothing in
     the spec asks the backend to summarise a first message into a title. `None` renders as

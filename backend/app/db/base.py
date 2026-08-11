@@ -20,9 +20,13 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 # the cosine index is built on a halfvec(3072) cast (see the initial migration).
 EMBEDDING_DIM = 3072  # text-embedding-3-large # TBD(§8.4)
 
-# Provisional single-tenant id carried on scoped rows until OI-21 resolves whether
-# true multi-tenant isolation is a goal. FR-RET-04 already filters by tenant/owner.
-DEFAULT_TENANT_ID = uuid.UUID("00000000-0000-0000-0000-000000000000")  # TBD(OI-21)
+# Single-tenant sentinel carried on every scoped row. **Not provisional — decided.**
+# R-62(4) dispositioned OI-21: the product is single-org for MVP, and `tenant_id` is
+# *retained and enforced* in every access predicate (FR-RET-04 / NFR-SEC-06) against this
+# sentinel precisely because that costs nothing now and makes multi-tenancy later a **data**
+# change rather than a schema-and-query rewrite. Revisit when a second organisation is
+# onboarded — a product decision, not an engineering one.
+DEFAULT_TENANT_ID = uuid.UUID("00000000-0000-0000-0000-000000000000")  # single-org (OI-21)
 
 # Stable naming templates — keeps Alembic diffs clean across revisions.
 NAMING_CONVENTION = {

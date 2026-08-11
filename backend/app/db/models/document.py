@@ -63,7 +63,7 @@ class Document(TimestampMixin, Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         nullable=False,
-        server_default=text("'00000000-0000-0000-0000-000000000000'"),  # TBD(OI-21)
+        server_default=text("'00000000-0000-0000-0000-000000000000'"),  # single-org (OI-21)
     )
     owner_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False

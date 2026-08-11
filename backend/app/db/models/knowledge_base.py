@@ -1,7 +1,8 @@
 """`knowledge_bases` — R-25 two-scope model mapped to a first-class entity.
 
 GLOBAL ↔ the user's default KB; CONVERSATION ↔ an implicit per-chat KB. `tenant_id`
-is carried for the FR-RET-04 data-layer access filter (# TBD(OI-21)).
+is carried for the FR-RET-04 data-layer access filter, on the single-org sentinel R-62(4)
+settled under OI-21 — enforced now so multi-tenancy is later a data change, not a rewrite.
 
 `conversation_id` is the link that makes the CONVERSATION half real (added by T-202,
 R-33): set only on CONVERSATION-visibility rows, null on the GLOBAL default, and unique
@@ -27,7 +28,7 @@ class KnowledgeBase(TimestampMixin, Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         nullable=False,
-        server_default=text("'00000000-0000-0000-0000-000000000000'"),  # TBD(OI-21)
+        server_default=text("'00000000-0000-0000-0000-000000000000'"),  # single-org (OI-21)
     )
     owner_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False

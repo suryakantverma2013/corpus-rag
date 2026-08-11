@@ -436,7 +436,7 @@ def build_chunk_rows(
     document_id: uuid.UUID,
     document_version: int,
     knowledge_base_id: uuid.UUID,
-    tenant_id: uuid.UUID = DEFAULT_TENANT_ID,  # TBD(OI-21)
+    tenant_id: uuid.UUID = DEFAULT_TENANT_ID,  # single-org (OI-21)
 ) -> list[DocumentChunk]:
     """Build unsaved `document_chunks` rows carrying the FR-RET-04 access scope.
 
