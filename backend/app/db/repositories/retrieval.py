@@ -160,8 +160,6 @@ def _access_predicates(filters: RetrievalFilter) -> list[ColumnElement[bool]]:
         Document.deleted_at.is_(None),
         DocumentChunk.document_version == Document.current_version,
     ]
-    if filters.active_only:
-        predicates.append(DocumentChunk.is_active.is_(True))
     if filters.conversation_id is not None:
         ambient = select(KnowledgeBase.id).where(
             KnowledgeBase.tenant_id == filters.tenant_id,

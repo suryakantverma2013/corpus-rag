@@ -415,7 +415,6 @@ def test_rows_are_active_and_unembedded() -> None:
         document_version=1,
         knowledge_base_id=uuid.uuid4(),
     )
-    assert rows[0].is_active is True
     assert rows[0].embedding is None  # T-205 fills it
     assert rows[0].token_count == estimate_token_count(rows[0].chunk_text)
 

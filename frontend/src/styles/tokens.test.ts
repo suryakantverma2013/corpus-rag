@@ -5,33 +5,20 @@
  * cascade, so the *behaviour* of these rules is verified in a real browser (and will be
  * locked in by T-511's automated accessibility pass). What they defend against is the rule
  * being deleted or "simplified" by someone who does not know why it is shaped this way,
- * which is exactly what happened to each of the three cases below during design.
+ * which is exactly what happened to each of the cases below during design.
+ *
+ * The `readSource`/`stripBlockComments`/`blockAfter` helpers were written here and moved to
+ * `src/test/css-source.ts` in T-502, so the six component stylesheets that follow do not each
+ * carry their own copy.
  */
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { blockAfter, readSource, stripBlockComments } from '../test/css-source';
 
-// Read from disk rather than importing: `import.meta.url` is not a file URL after Vite's
-// transform, and `?raw` hands back the CSS pipeline's output rather than the source. The
-// point of these guards is to assert what is *written in the file*.
-const TOKENS = resolve(process.cwd(), 'src/styles/tokens.css');
-const css = readFileSync(TOKENS, 'utf8');
+const css = readSource('src/styles/tokens.css');
 
 /** Declarations only. The comments in this file *discuss* the rules they warn against
  *  ("do not replace it with `outline: none`"), so negative assertions must not see them. */
-const code = css.replace(/\/\*[\s\S]*?\*\//g, '');
-
-/** The body of an at-rule beginning at `header`, matched by brace balance. */
-function blockAfter(header: string): string {
-  const start = css.indexOf(header);
-  expect(start, `${header} not found in tokens.css`).toBeGreaterThan(-1);
-  let depth = 0;
-  for (let i = css.indexOf('{', start); i < css.length; i++) {
-    if (css[i] === '{') depth++;
-    else if (css[i] === '}' && --depth === 0) return css.slice(start, i + 1);
-  }
-  throw new Error(`unbalanced braces after ${header}`);
-}
+const code = stripBlockComments(css);
 
 describe('token block structure', () => {
   it('declares the motion tokens on a BARE :root, not inside a theme selector list', () => {
@@ -49,8 +36,64 @@ describe('token block structure', () => {
   });
 });
 
+describe('layout dimensions (§9, FR-LAY-01)', () => {
+  // The positive half of a pair: this is where the §9 literals live, and
+  // `shell/AppShell.css.test.ts` asserts the shell reads them through `var()` rather than
+  // repeating them. Either guard alone lets the two drift.
+  it.each([
+    ['--sidebar-w', '264px'],
+    ['--stats-w', '272px'],
+    ['--app-min-h', '640px'],
+  ])('declares %s as %s', (token, value) => {
+    expect(code).toMatch(new RegExp(`${token}:\\s*${value}\\s*;`));
+  });
+});
+
+describe('stacking order (FR-LAY-03)', () => {
+  const zIndex = (token: string) => {
+    const match = code.match(new RegExp(`${token}:\\s*(\\d+)\\s*;`));
+    expect(match, `${token} not declared in tokens.css`).not.toBeNull();
+    return Number(match![1]);
+  };
+
+  it('promotes the prototype’s three literals, in its order', () => {
+    // 30 / 50 / 60 are the prototype's own numbers. The hover card above the modal is its
+    // order too, and is harmless — the card is pointer-events:none and a citation chip cannot
+    // be hovered while the modal covers it.
+    expect(zIndex('--z-menu')).toBe(30);
+    expect(zIndex('--z-modal')).toBe(50);
+    expect(zIndex('--z-hovercard')).toBe(60);
+  });
+
+  it('keeps the scale strictly increasing', () => {
+    expect(zIndex('--z-menu')).toBeLessThan(zIndex('--z-modal'));
+    expect(zIndex('--z-modal')).toBeLessThan(zIndex('--z-hovercard'));
+  });
+});
+
+describe('visually hidden (NFR-A11Y-03)', () => {
+  const block = blockAfter(css, '.visually-hidden {');
+
+  it('hides the element from sight without removing it from the accessibility tree', () => {
+    // `display: none` and `visibility: hidden` both remove it from the accessibility tree,
+    // which is the one thing this class exists to prevent — the page would render identically
+    // and every test would stay green while the document silently lost its <h1>.
+    expect(block).not.toMatch(/display:\s*none/);
+    expect(block).not.toMatch(/visibility:\s*hidden/);
+    expect(block).toMatch(/clip-path:\s*inset\(50%\)/);
+    expect(block).toMatch(/width:\s*1px/);
+    expect(block).toMatch(/height:\s*1px/);
+  });
+
+  it('takes the element out of flow', () => {
+    // Load-bearing beyond hiding: the shell's <h1> is a child of the FR-LAY-01 flex row, and
+    // a statically positioned "hidden" element would become a fourth flex item.
+    expect(block).toMatch(/position:\s*absolute/);
+  });
+});
+
 describe('reduced motion (NFR-A11Y-01, R-59)', () => {
-  const block = blockAfter('@media (prefers-reduced-motion: reduce)');
+  const block = blockAfter(css, '@media (prefers-reduced-motion: reduce)');
 
   it('redefines dotPulse to hold full opacity rather than switching it off', () => {
     // `animation: none` and the blanket `animation-duration: .01ms` both fall back to the
@@ -87,7 +130,7 @@ describe('focus ring (NFR-A11Y-02, R-59)', () => {
   });
 
   it('uses --accent, measured at 3.92–6.00 : 1 on every surface in both themes', () => {
-    const ring = blockAfter(':focus-visible');
+    const ring = blockAfter(css, ':focus-visible');
     expect(ring).toContain('var(--accent)');
     expect(ring).toContain('outline');
   });
@@ -111,10 +154,10 @@ describe('scrollbar gate (NFR-USE-05, R-58(3), corrected by R-60)', () => {
   it('keeps the standard properties behind the @supports negation', () => {
     // Chrome 121+ discards every ::-webkit-scrollbar rule on an element that also sets
     // scrollbar-width/scrollbar-color, so ungating these replaces the specified bar.
-    const gate = blockAfter('@supports not selector(::-webkit-scrollbar-thumb)');
+    const gate = blockAfter(css, '@supports not selector(::-webkit-scrollbar-thumb)');
     expect(gate).toContain('scrollbar-width');
     expect(gate).toContain('scrollbar-color');
-    const outside = code.replace(gate.replace(/\/\*[\s\S]*?\*\//g, ''), '');
+    const outside = code.replace(stripBlockComments(gate), '');
     expect(outside).not.toContain('scrollbar-width');
     expect(outside).not.toContain('scrollbar-color');
   });

@@ -68,8 +68,22 @@ def test_the_health_check_key_matches_arqs_own_default() -> None:
 
 def test_the_sweeper_is_scheduled() -> None:
     # arq prefixes cron function names with `cron:` to keep them out of the task namespace.
-    assert [job.name for job in ArqWorkerSettings.cron_jobs] == ["cron:sweep_undispatched_jobs"]
+    names = [job.name for job in ArqWorkerSettings.cron_jobs]
+    assert names == ["cron:sweep_undispatched_jobs", "cron:prune_checkpoint_history"]
     assert ArqWorkerSettings.cron_jobs[0].run_at_startup is True
+
+
+def test_retention_does_not_run_at_startup() -> None:
+    """The two crons differ deliberately (R-65).
+
+    The sweeper rescues work stranded by a broker outage, so it must run the moment a worker
+    comes up. Retention only reclaims disk — running it at startup would make a worker
+    restart loop re-run a table-wide delete on every boot, for no gain.
+    """
+    retention = ArqWorkerSettings.cron_jobs[1]
+    assert retention.run_at_startup is False
+    # Off the sweeper's :00 so a shared minute does not put both on the same connection burst.
+    assert retention.second == 30
 
 
 @pytest.mark.parametrize(

@@ -71,6 +71,21 @@ class KeycloakRejectedError(KeycloakError):
     """
 
 
+class AccountNotLinkedError(KeycloakError):
+    """The user has not linked this identity provider, so no brokered token exists.
+
+    Distinct from every other error here because it is **the caller's to fix and the fix is
+    a UI affordance**, not an outage and not a bug: FR-AUT-11 linking is opt-in, so "not
+    linked" is the ordinary state of every user who has never asked for Drive. It maps to a
+    "link your account" response, never to a 5xx.
+
+    Keycloak answers 400 or 403 for this, and 403 is also what it returns when the user
+    lacks the `broker` `read-token` role — a realm-configuration fault. The two are not
+    distinguishable from the status alone, which is why the IdP sets
+    `addReadTokenRoleOnCreate`: with the role granted at link time, a 403 means unlinked.
+    """
+
+
 class UserNotFoundError(KeycloakError):
     """Admin API targeted a user id that does not exist → 404."""
 
@@ -126,6 +141,43 @@ class KeycloakClient:
         if not token:
             raise KeycloakUnavailableError("client_credentials returned no access_token")
         return token
+
+    async def broker_token(self, *, alias: str, user_token: str) -> dict[str, Any]:
+        """The **provider's** current access token for this user (FR-AUT-11, R-63(1)).
+
+        This is the whole reason cloud import costs so little: Keycloak performed the OAuth
+        exchange, stores the provider's tokens (`storeToken`) and refreshes them, so Corpus
+        holds no third-party credential, needs no token table, and inherits Keycloak's
+        revocation. We ask; we do not manage.
+
+        Authenticated with the **end user's** access token, not the service account — the
+        token being fetched is that user's, and the `broker` `read-token` role is granted to
+        them at link time. Passing the service-account token here would ask for a token the
+        service account does not have and get a 403 that looks like a misconfiguration.
+
+        The response shape is the provider's own token response, so callers must read
+        ``access_token`` and must not assume a refresh token is present.
+        """
+        url = self._kc.broker_token_endpoint(alias)
+        try:
+            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                resp = await client.get(url, headers={"Authorization": f"Bearer {user_token}"})
+        except httpx.HTTPError as exc:
+            raise KeycloakUnavailableError(str(exc)) from exc
+
+        if resp.status_code == 200:
+            data = resp.json()
+            if not data.get("access_token"):
+                # A 200 with no token means the link exists but Keycloak stored nothing —
+                # `storeToken` off on the IdP. A configuration fault, not an outage.
+                raise KeycloakRejectedError(f"broker/{alias} returned no access_token")
+            return data
+        if resp.status_code in (400, 403):
+            raise AccountNotLinkedError(alias)
+        if resp.status_code == 401:
+            # Our caller's token was rejected — the user's session, not the link.
+            raise InvalidCredentialsError("user token rejected by the broker endpoint")
+        raise KeycloakUnavailableError(f"broker/{alias} returned {resp.status_code}")
 
     async def admin_reset_password(self, *, sub: str, new_password: str, admin_token: str) -> None:
         """Set a user's password via the Admin API (FR-USR-05, FR-USR-09). The

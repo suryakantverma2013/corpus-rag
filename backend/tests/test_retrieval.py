@@ -99,7 +99,6 @@ async def _make_chunk(
     index: int,
     text_: str,
     embedding: list[float] | None = None,
-    is_active: bool = True,
     document_version: int = 1,
     block_order: int | None = None,
     block_chunk_index: int | None = None,
@@ -117,7 +116,6 @@ async def _make_chunk(
         tenant_id=DEFAULT_TENANT_ID,
         chunk_text=text_,
         embedding=embedding,
-        is_active=is_active,
         meta=meta,
     )
     session.add(chunk)
@@ -280,16 +278,6 @@ async def test_a_soft_deleted_document_is_invisible(session: AsyncSession) -> No
     kb = await _make_kb(session, user)
     doc = await _make_document(session, user, kb, deleted_at=datetime.now(UTC))
     await _make_chunk(session, doc, kb, index=0, text_=RARE_TOKEN, embedding=_onehot(1))
-    assert await _search_all(session, user.id) == []
-
-
-async def test_an_inactive_chunk_is_invisible(session: AsyncSession) -> None:
-    user = await _make_user(session)
-    kb = await _make_kb(session, user)
-    doc = await _make_document(session, user, kb)
-    await _make_chunk(
-        session, doc, kb, index=0, text_=RARE_TOKEN, embedding=_onehot(1), is_active=False
-    )
     assert await _search_all(session, user.id) == []
 
 

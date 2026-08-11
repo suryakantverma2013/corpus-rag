@@ -172,7 +172,6 @@ async def _seed_corpus(session: AsyncSession, *, owner_id: uuid.UUID) -> None:
             tenant_id=DEFAULT_TENANT_ID,
             chunk_text=_PASSAGE,
             embedding=list(vector),
-            is_active=True,
             meta={"locator": {"kind": "page", "page": 1, "label": "p. 1"}},
         )
     )

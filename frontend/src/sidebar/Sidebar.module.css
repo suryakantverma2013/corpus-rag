@@ -1,0 +1,187 @@
+/* FR-SBR-01/02/05/06 — the sidebar's contents.
+   Transcribed from the prototype (lines 27-35, 53-62). The 264px column box, its right border
+   and its --panel fill are T-502's, on the <nav> itself.
+
+   One raw colour appears below — `#fff` on the accent brand mark — and it is the prototype's
+   own literal, not a lapse. It is also a recorded NFR-A11Y-06 exception (3.17:1 in dark), and
+   R-58 already logged it: changing it is a palette decision, not an implementation one. The
+   CSS guard permits `#fff` and nothing else. */
+
+/* ── FR-SBR-01 brand row ────────────────────────────────────────────────── */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 18px 18px 14px;
+}
+
+.brandMark {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-btn);
+  background: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.brandName {
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: -0.01em;
+}
+
+.brandBadge {
+  margin-left: auto;
+  padding: 2px 5px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-chip);
+  font-size: 10px;
+  color: var(--muted2);
+}
+
+/* ── FR-SBR-02 new chat ─────────────────────────────────────────────────── */
+.newChatRow {
+  padding: 0 14px 12px;
+}
+
+.newChat {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 9px 0;
+  border-radius: var(--radius-btn);
+  border: 1px solid var(--line);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter var(--motion-fast) ease;
+}
+
+/* The prototype's hover treatment exactly. `filter` on a button is harmless — the FR-LAY-03
+   containing-block prohibition applies to boxes that ANCESTOR a `position: fixed` element, and
+   nothing fixed lives inside this button. */
+.newChat:hover {
+  filter: brightness(1.15);
+}
+
+.newChatPlus {
+  font-size: 15px;
+  line-height: 1;
+}
+
+/* ── Footer: FR-SBR-05 knowledge base + FR-SBR-06 user row ──────────────── */
+.footer {
+  border-top: 1px solid var(--line);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.kbButton {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 10px;
+  border-radius: var(--radius-btn);
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--motion-fast) ease;
+}
+
+.kbButton:hover {
+  background: var(--panel2);
+}
+
+.kbBullet {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--accent);
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.kbCount {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.userRow {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 2px;
+  /* Reset, because the interactive variant is a <button> and this rule is shared. `font`, not
+     `font-family` — a button inherits neither size nor colour. */
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  /* No `width: 100%`: box-sizing is content-box here (the prototype declares no reset), so
+     100% plus the 4px padding measured 240 against the footer's 236 and overflowed. As a flex
+     item of the column footer it stretches to the right width on its own. */
+}
+
+/* FR-SBR-06's Rev 0.6 amendment — interactive only once T-509 supplies the FR-AUT-08 popover.
+   The negative margin is what keeps this honest against T-510: the hover surface grows into
+   the footer's padding, while the row's CONTENT stays at exactly the coordinates the
+   prototype's non-interactive version puts it at. The 8px/-6px pairing is not a typo — the
+   base rule already insets content by 2px, and 8 - 6 reproduces it. */
+.userRowInteractive {
+  padding: 5px 8px;
+  margin: -5px -6px;
+  border-radius: var(--radius-btn);
+  cursor: pointer;
+  transition: background var(--motion-fast) ease;
+}
+
+.userRowInteractive:hover {
+  background: var(--panel2);
+}
+
+.avatar {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: var(--radius-avatar);
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.userName {
+  font-size: 12.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.version {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--muted2);
+}

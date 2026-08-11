@@ -1,0 +1,98 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   App shell — FR-LAY-01/02 geometry (T-502).
+
+   Transcribed from the prototype's root, sidebar, chat-column and stats-panel inline styles
+   (`RAG Chatbot GUI Design/design_handoff_rag_chatbot/RAG Chatbot.dc.html`), which is the
+   pixel authority under NFR-VIS-01. Every §9 dimension is a token from `tokens.css`, never a
+   literal — `AppShell.css.test.ts` asserts both halves of that.
+
+   The first CSS Module in the codebase, and the precedent for T-503..T-509. Scoped class
+   names are the point: eight component tasks will each want `.row`, `.card`, `.label` and
+   `.title`, and under global CSS the failure mode is one task silently restyling another's
+   component, caught only by T-510's pixel pass at the end of the phase.
+
+   ⚠ NOTHING in this file may set `transform`, `filter`, `backdrop-filter`, `perspective`,
+   `will-change` or `contain` on a layout box. Each of those makes the element the containing
+   block for its `position: fixed` descendants, which would break FR-LAY-03's overlays: the
+   FR-CIT-03 hover card's viewport coordinates would resolve against the wrong box, and the
+   FR-KBM-01 modal's `inset: 0` would cover the chat column instead of the viewport. Both fail
+   *only in a real browser* — jsdom computes no layout — so the per-block guard in
+   `AppShell.css.test.ts` is the only thing standing between that mistake and a green suite.
+   (`overflow: hidden` below is harmless: it does not clip fixed descendants.)
+   ════════════════════════════════════════════════════════════════════════ */
+
+/* §3: "Full-viewport horizontal flex, height: 100vh, min-height: 640px."
+   The root does not scroll — each region owns its own `overflow-y: auto` (the sidebar list in
+   T-503, the message list in T-505, and `.stats` below). A viewport shorter than
+   `--app-min-h` is therefore clipped with no scrollbar; that is the prototype's and §3's
+   specified behaviour, and the spec has no responsive behaviour and no breakpoints. */
+.root {
+  display: flex;
+  height: 100vh;
+  min-height: var(--app-min-h);
+  overflow: hidden;
+}
+
+/* No padding or gap at column level, matching the prototype: every block inside the sidebar
+   pads itself, so T-503 gets a clean canvas. */
+.sidebar {
+  width: var(--sidebar-w);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+}
+
+/* `min-width: 0` is normative under FR-LAY-01's "exact widths, borders, and flex behavior",
+   not incidental: a flex item's default `min-width: auto` refuses to shrink below its content,
+   so FR-HDR-01's long conversation title and FR-CIT-01's inline chips would push this track
+   past its share and squeeze the 272px stats panel off-screen. */
+.chat {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* The whole prototype rule, including padding and gap — see AppShellProps.stats for why they
+   are not T-507's. */
+.stats {
+  width: var(--stats-w);
+  flex-shrink: 0;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+}
+
+/* NFR-A11Y-04 bypass. Not a WCAG 2.4.1 obligation (one page, and screen readers already have
+   landmark navigation) — it is for the sighted keyboard-only user, who otherwise tabs through
+   the whole conversation list and its FR-SBR-07 per-row affordances before reaching the
+   composer.
+
+   `position: fixed` is doing two jobs: it keeps the link out of the root's flex flow (it must
+   not become a fourth flex item), and it parks it off-screen until focused, so it can never
+   appear in T-510's screenshots — the same argument that licensed the NFR-A11Y-02 focus ring.
+   Plain `:focus`, not `:focus-visible`: the link is unreachable by pointer, so every focus it
+   receives is a keyboard focus that must reveal it. The global ring still applies; do not add
+   `outline: none`. */
+.skipLink {
+  position: fixed;
+  top: -100vh;
+  left: 8px;
+  z-index: var(--z-hovercard);
+  background: var(--panel);
+  color: var(--accent);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-btn);
+  padding: 8px 14px;
+  font-weight: 600;
+}
+
+.skipLink:focus {
+  top: 8px;
+}

@@ -1,0 +1,49 @@
+/* FR-HDR-03 — the Dark/Light segmented control.
+   Transcribed from the prototype's inline styles (`RAG Chatbot.dc.html` lines 71-77) and the
+   handoff README §2: "bordered pill, two 4px/11px segments; active segment `--panel2` bg
+   `--text`, inactive `--muted2`".
+
+   The prototype's markup is a `<div onClick>` wrapping two `<span>`s. Here each segment is a
+   real `<button>` (NFR-A11Y-03), which is why the reset below exists at all — a button inherits
+   neither font-size, nor font-weight, nor font-family from its parent. The declared values are
+   the prototype's, so the rendering is identical. */
+
+.group {
+  display: flex;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  /* Clips the active segment's `--panel2` fill to the pill's rounded ends. It is also why the
+     segments below carry a negative focus-ring offset — see there. */
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.segment {
+  padding: 4px 11px;
+  border: 0;
+  background: transparent;
+  color: var(--muted2);
+  /* The reset. `font-family` explicitly rather than the shorthand `font: inherit`, because the
+     size and weight are declared once on `.group` above and inheriting them is the point. */
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  cursor: pointer;
+
+  /* NFR-A11Y-02: the ring is NOT removed, it is pulled inside the border box. `.group` sets
+     `overflow: hidden`, which clips a descendant's outline — so at the global `+2px` offset the
+     focus ring would be invisible on both segments, in a real browser only (jsdom computes no
+     layout and paints nothing). Overriding the offset token is exactly the case `tokens.css`
+     documents it for; `outline: none` is prohibited. */
+  --focus-ring-offset: -2px;
+}
+
+/* The active segment. Colour is deliberately NOT the only carrier of this state — `aria-pressed`
+   in `ThemeToggle.tsx` carries it too, which NFR-A11Y-06 requires and which matters more here
+   than anywhere: the inactive segment's `--muted2` is one of the contrast pairs that
+   requirement enumerates as an accepted palette exception (2.19-3.18:1). */
+.segmentActive {
+  background: var(--panel2);
+  color: var(--text);
+}

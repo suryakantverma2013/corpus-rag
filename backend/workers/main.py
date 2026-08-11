@@ -52,6 +52,7 @@ from app.services.object_storage import close_object_storage, get_object_storage
 from workers.delete import delete_document
 from workers.evaluate import evaluate_message
 from workers.ingest import ingest_document
+from workers.retention import prune_checkpoint_history
 from workers.sweeper import sweep_undispatched_jobs
 
 log = structlog.get_logger(__name__)
@@ -150,7 +151,27 @@ class WorkerSettings:
             run_at_startup=True,
             # `unique` keeps a multi-worker deployment from sweeping the same rows N times.
             unique=True,
-        )
+        ),
+        # Checkpoint retention (OI-30, R-65). LangGraph keeps every superstep's checkpoint
+        # and only the latest is ever read, so the store grows without bound.
+        # `run_at_startup` is deliberately **False**, unlike the sweeper above: that one
+        # rescues stranded work and is urgent after an outage, while this only reclaims
+        # disk — and a worker restart loop would otherwise re-run a table-wide delete every
+        # boot. `_settings.checkpointer.retention_interval_seconds <= 0` disables it, so
+        # the job is only registered when it is wanted.
+        *(
+            [
+                cron(
+                    prune_checkpoint_history,
+                    minute=_sweep_minutes(_settings.checkpointer.retention_interval_seconds),
+                    second=30,  # off the sweeper's :00, so the two never contend
+                    run_at_startup=False,
+                    unique=True,
+                )
+            ]
+            if _settings.checkpointer.retention_interval_seconds > 0
+            else []
+        ),
     ]
 
     redis_settings = ArqRedisSettings.from_dsn(_settings.redis.url)

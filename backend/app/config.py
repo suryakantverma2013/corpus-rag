@@ -995,6 +995,28 @@ class CheckpointerSettings(BaseSettings):
     pool_timeout_seconds: float = Field(default=10.0)  # TBD(§8.4)
     connect_timeout_seconds: int = Field(default=5)  # TBD(§8.4) — psycopg wants whole seconds
 
+    # --- Retention (OI-30, R-65) ----------------------------------------------
+    # LangGraph writes one checkpoint per superstep and keeps every one, while only the
+    # latest is ever read (nothing calls `aget_state_history`). Left alone the store grows
+    # without bound: 43 MB across 547 threads on the dev box before this shipped.
+
+    #: How many checkpoints to keep per thread. 1 is functionally sufficient — resume reads
+    #: the latest — so everything above it is deliberate margin for a run whose supersteps
+    #: are landing while the pruner is mid-pass.
+    retention_keep: int = Field(default=3, ge=1)  # TBD(§8.4)
+
+    #: Nothing younger than this is touched, whatever `retention_keep` says. This, not
+    #: `keep`, is what makes the job safe beside a live turn.
+    retention_min_age_seconds: float = Field(default=3600.0, ge=0)  # TBD(§8.4)
+
+    #: Orphaned threads removed per pass, so one run cannot lock a large slice of the table.
+    retention_orphan_batch: int = Field(default=500, ge=1)  # TBD(§8.4)
+
+    #: Seconds between passes. **0 disables retention entirely** (the `EVAL_ESCALATE_BELOW`
+    #: convention) — an off switch rather than a separate boolean, because "how often" and
+    #: "whether" are the same question for a periodic sweep.
+    retention_interval_seconds: float = Field(default=3600.0, ge=0)  # TBD(§8.4)
+
     # langgraph's own `LANGGRAPH_STRICT_MSGPACK` defaults to *false*, and its docstring
     # spells out the consequence: "any Python callable stored in checkpoint data will be
     # imported and executed on load". R-42(2) makes `RAGState` scalars and lists of
@@ -1153,6 +1175,31 @@ class KeycloakSettings(BaseSettings):
         # The Admin REST API lives under /admin/realms/<realm>, NOT under the
         # /realms/<realm> issuer path — deriving it from `issuer` is a 404 trap.
         return f"{self.server_url.rstrip('/')}/admin/realms/{self.realm}"
+
+    # --- Cloud-account linking (FR-AUT-11, R-63) ------------------------------
+    # Corpus stores no third-party credential: Keycloak brokers the provider OAuth,
+    # keeps the tokens (`storeToken`) and refreshes them, and the backend reads the
+    # live access token from the broker endpoint below. These two settings are the
+    # entire Google-facing surface of the application — everything provider-specific
+    # lives in the realm, not here.
+
+    #: Realm identity-provider alias. Changing it changes the broker path, so it must
+    #: match `identityProviders[].alias` in the realm import.
+    google_idp_alias: str = Field(default="google")
+
+    #: The public client that carries the FR-AUT-11 linking redirect, and nothing else.
+    #: Deliberately NOT `client_id`: that one keeps `standardFlowEnabled: false`, which
+    #: is what preserves R-28's ROPC login (R-63(2)).
+    linking_client_id: str = Field(default="corpus-linking")
+
+    def broker_token_endpoint(self, alias: str) -> str:
+        """Where the *provider's* access token is read from, per FR-AUT-11.
+
+        Requires the caller's Keycloak access token as Bearer and the `broker`
+        client's `read-token` role on the user — granted at link time by the IdP's
+        `addReadTokenRoleOnCreate`.
+        """
+        return f"{self.issuer}/broker/{alias}/token"
 
 
 class Settings(BaseSettings):

@@ -46,7 +46,6 @@ class RetrievalFilter:
     conversation_id: uuid.UUID | None = None
     knowledge_base_ids: Sequence[uuid.UUID] = field(default_factory=tuple)
     document_ids: Sequence[uuid.UUID] = field(default_factory=tuple)  # explicit / @-mention
-    active_only: bool = True
 
 
 @dataclass(frozen=True, slots=True)

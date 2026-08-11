@@ -114,7 +114,6 @@ async def _seed(session: AsyncSession, make_token: Callable[..., str]):  # noqa:
                 tenant_id=DEFAULT_TENANT_ID,
                 chunk_text=text,
                 embedding=list(vector),
-                is_active=True,
                 meta={"locator": {"kind": "page", "page": index + 1, "label": f"p. {index + 1}"}},
             )
         )

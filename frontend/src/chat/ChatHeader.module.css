@@ -1,0 +1,75 @@
+/* FR-HDR-01/02 — the chat header's own box, the title and the "Grounded" pill.
+   Transcribed per property from the prototype's inline styles (`RAG Chatbot.dc.html` lines
+   67-69) and the handoff README §2 "Chat header", which is the acceptance baseline under
+   NFR-VIS-01 as restated by R-66. The FR-HDR-03 toggle has its own stylesheet.
+
+   This is the first of <main>'s three flex children (T-505's list and T-506's composer follow);
+   the column direction is T-502's, the padding and bottom border are this element's own. */
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 22px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+/* FR-HDR-01 — "15px/600, ellipsis".
+
+   Every declaration here except the last three exists because this is an <h2> and the
+   prototype's element is a <div>: a heading arrives with a UA `margin` and its own
+   `font-size`/`font-weight`, none of which are the 14px root font the prototype's div
+   inherits. Same class of trap as T-503's row <button>, which inherited neither `font-size`
+   nor `color`.
+
+   `overflow: hidden` is doing two jobs and must not be dropped as redundant beside
+   `text-overflow`: it is also what zeroes this flex item's automatic minimum size
+   (`min-width: auto` otherwise refuses to shrink below the text), so without it a long title
+   pushes the pill and the toggle out of the header instead of ellipsising. */
+.title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* FR-HDR-02 — "11px/600 accent text on --accent-soft, 6px accent dot, radius 20".
+   `--radius-pill` is that 20, and `tokens.css` names this element in its comment. */
+.grounded {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: var(--radius-pill);
+  padding: 3px 10px;
+  flex-shrink: 0;
+}
+
+/* A literal 50%, not `--radius-avatar`: this is a 6px status dot, not an avatar, and the token
+   carries that meaning in its name. The prototype writes the same literal. */
+.groundedDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  display: inline-block;
+}
+
+/* The right-aligned group. `margin-left: auto` is what right-aligns the toggle (FR-HDR-03);
+   `flex-shrink: 0` is what stops a long title eating it. The prototype declares the `gap`
+   although only one child exists today — kept, because it is the box's own declaration and
+   T-505..T-508 add nothing here. */
+.actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}

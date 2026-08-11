@@ -14,11 +14,11 @@
     "realm": [
       {
         "name": "admin",
-        "description": "Corpus Administrator \u2014 full user mgmt, unrestricted docs (spec \u00a74.9)"
+        "description": "Corpus Administrator — full user mgmt, unrestricted docs (spec §4.9)"
       },
       {
         "name": "user",
-        "description": "Corpus Non-Administrator \u2014 own/authorized docs only (spec \u00a74.9)"
+        "description": "Corpus Non-Administrator — own/authorized docs only (spec §4.9)"
       }
     ]
   },
@@ -50,6 +50,29 @@
             "access.token.claim": "true"
           }
         }
+      ]
+    },
+    {
+      "clientId": "corpus-linking",
+      "name": "Corpus Account Linking (browser redirect, public + PKCE)",
+      "description": "Carries ONLY the FR-AUT-11 cloud-account linking redirect. Public with PKCE because the redirect runs in the browser; it grants no API access of its own (fullScopeAllowed=false) and must never be used to log in to Corpus.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": false,
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "redirectUris": [
+        "http://localhost:5173/*",
+        "http://localhost:8000/*"
+      ],
+      "webOrigins": [
+        "+"
       ]
     }
   ],
@@ -100,5 +123,26 @@
         }
       }
     ]
-  }
+  },
+  "identityProviders": [
+    {
+      "alias": "google",
+      "displayName": "Google (Drive import)",
+      "providerId": "google",
+      "enabled": true,
+      "storeToken": true,
+      "addReadTokenRoleOnCreate": true,
+      "trustEmail": false,
+      "firstBrokerLoginFlowAlias": "first broker login",
+      "linkOnly": false,
+      "config": {
+        "clientId": "CHANGE_ME_google-oauth-client-id",
+        "clientSecret": "CHANGE_ME_google-oauth-client-secret",
+        "defaultScope": "openid email profile https://www.googleapis.com/auth/drive.readonly",
+        "offlineAccess": "true",
+        "prompt": "consent",
+        "syncMode": "IMPORT"
+      }
+    }
+  ]
 }

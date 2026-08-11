@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -88,7 +89,7 @@ async def _make_document(
 
 
 async def _make_chunk(
-    session: AsyncSession, doc, kb, *, index: int, embedding=None, is_active: bool = True
+    session: AsyncSession, doc, kb, *, index: int, embedding=None
 ) -> DocumentChunk:
     chunk = DocumentChunk(
         document_id=doc.id,
@@ -100,7 +101,6 @@ async def _make_chunk(
         tenant_id=DEFAULT_TENANT_ID,
         chunk_text=f"chunk {index}",
         embedding=embedding,
-        is_active=is_active,
     )
     session.add(chunk)
     await session.flush()
@@ -173,18 +173,22 @@ async def test_mark_delete_pending_clears_searchable(session: AsyncSession) -> N
 # --- chunks --------------------------------------------------------------
 
 
-async def test_deactivate_soft_deletes_chunks(session: AsyncSession) -> None:
-    """`is_active` means FR-ING-05 soft-delete only — never version management (R-36(7))."""
+async def test_delete_by_document_hard_deletes_every_version(session: AsyncSession) -> None:
+    """FR-ING-05 "removes vectors" is a hard delete (R-39(3)), not a flag.
+
+    Replaces the old `deactivate` test: R-62(3) dropped `document_chunks.is_active`, which had
+    never gained a writer, so the soft path this used to assert no longer exists.
+    """
     user = await _make_user(session)
     kb = await _make_kb(session, user)
     doc = await _make_document(session, user, kb)
     repo = DocumentChunkRepository(session)
-    c0 = await _make_chunk(session, doc, kb, index=0)
-    c1 = await _make_chunk(session, doc, kb, index=1)
+    await _make_chunk(session, doc, kb, index=0)
+    await _make_chunk(session, doc, kb, index=1)
 
-    assert {chunk.id for chunk in await repo.list_by_document(doc.id)} == {c0.id, c1.id}
-    assert await repo.deactivate([c0.id]) == 1
-    assert {chunk.id for chunk in await repo.list_by_document(doc.id)} == {c1.id}
+    assert len(await repo.list_by_document(doc.id)) == 2
+    assert await repo.delete_by_document(doc.id) == 2
+    assert await repo.list_by_document(doc.id) == []
 
 
 # --- jobs ----------------------------------------------------------------
@@ -329,11 +333,18 @@ async def test_dense_search_ranks_and_filters(session: AsyncSession) -> None:
     assert other == []
 
 
-async def test_dense_search_excludes_inactive(session: AsyncSession) -> None:
+async def test_dense_search_excludes_a_soft_deleted_document(session: AsyncSession) -> None:
+    """Replaces the old `is_active` exclusion test, which R-62(3) left without a mechanism.
+
+    The exclusion it asserted still holds — it is just carried by `documents.deleted_at`
+    (and `searchable`), which is exactly why the chunk-level flag was redundant.
+    """
     user = await _make_user(session)
     kb = await _make_kb(session, user)
     doc = await _make_document(session, user, kb)
-    await _make_chunk(session, doc, kb, index=0, embedding=_onehot(0), is_active=False)
+    await _make_chunk(session, doc, kb, index=0, embedding=_onehot(0))
+    doc.deleted_at = datetime.now(UTC)
+    await session.flush()
 
     hits = await PgVectorRetriever(session).search(
         "anything",

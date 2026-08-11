@@ -4,8 +4,27 @@ import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 
 // https://vite.dev/config/
+/**
+ * NFR-CMP-01's supported browser matrix (R-61), pinned rather than inherited.
+ *
+ * These are exactly the versions Vite 8's `baseline-widely-available` default resolved to, so
+ * pinning changes no output today. The point is that it stops being a *default*: while the
+ * matrix was whatever the bundler happened to choose, a Vite upgrade could move the floor —
+ * dropping browsers, or silently widening what the build emits — with nothing failing. It is
+ * a product commitment, so it belongs in this file where changing it is a visible decision.
+ *
+ * `build.cssTarget` follows `build.target` unless set, which is what keeps the CSS floor and
+ * the JS floor from diverging. Every CSS feature in `tokens.css` sits at or below this floor;
+ * the two engine-gated ones (`@supports selector()`, `scrollbar-width`/`-color`) degrade to
+ * nothing rather than breaking, so they cost nothing below it either.
+ *
+ * Guarded by `src/test/build-target.test.ts` — an upgrade that moves the floor fails there.
+ */
+const BROWSER_TARGET = ['chrome111', 'edge111', 'firefox114', 'safari16.4', 'ios16.4'];
+
 export default defineConfig({
   plugins: [react()],
+  build: { target: BROWSER_TARGET },
   server: {
     // The API is same-origin in production (one reverse proxy in front of both halves), and
     // this reproduces that in development. Deliberately a proxy rather than CORS on the

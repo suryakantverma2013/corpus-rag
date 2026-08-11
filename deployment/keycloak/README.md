@@ -68,6 +68,66 @@ KEYCLOAK_CLIENT_ID=corpus-backend
 KEYCLOAK_CLIENT_SECRET=<regenerated secret>
 ```
 
+## Google Drive linking (FR-AUT-11 / FR-KBM-10, ruling R-63) — T-214
+
+Corpus imports files from Google Drive, and **Keycloak owns that OAuth entirely**. The
+backend has no Google client and stores no Google credential: Keycloak brokers the
+exchange, keeps the provider tokens (`storeToken`), refreshes them, and the backend reads
+the current one from `/realms/corpus/broker/google/token`. **The Google client secret lives
+only in Keycloak** — never in `backend/.env`, never in this repo.
+
+### 1. Register an OAuth client with Google (one time)
+
+Google requires every OAuth client to be registered; no Keycloak setting removes this.
+
+1. Google Cloud Console → a project → **enable the Google Drive API**.
+2. **OAuth consent screen.** Choose the user type deliberately, because it cannot be
+   switched freely once the app has users:
+   - **Internal** (Google Workspace domain only) — no app verification and no security
+     assessment for the restricted `drive.readonly` scope, and refresh tokens do not
+     expire. This is what R-63(7) assumes.
+   - **External** (personal `@gmail.com`) — stays in *Testing*: up to 100 test users, no
+     verification, but **refresh tokens expire after 7 days**, so you re-link about
+     weekly. Fine for development; note it invalidates R-63(7)'s assumption for anything
+     beyond it.
+3. **Credentials → Create OAuth client ID → Web application.** Authorized redirect URI:
+   ```
+   http://localhost:8081/realms/corpus/broker/google/endpoint
+   ```
+   (Keycloak's broker endpoint — match your actual port.) Keep the client ID and secret.
+
+### 2. Fill in the placeholders in Keycloak
+
+The committed realm carries `CHANGE_ME_google-oauth-client-id` / `-client-secret`, exactly
+as `corpus-backend`'s secret is a placeholder. In the admin console → Identity providers →
+`google`, set the real **Client ID** and **Client Secret**, then verify:
+
+- **Store tokens** is ON — without it the broker endpoint returns 200 with no token, and
+  the backend raises a configuration error rather than pretending it is an outage.
+- **Stored tokens readable** / `read-token` is granted on link (`addReadTokenRoleOnCreate`).
+- **Scopes** include `https://www.googleapis.com/auth/drive.readonly`.
+
+### 3. What the user sees, and the one wart
+
+Linking is **opt-in and separate from login**: ROPC login is untouched, and only a user who
+clicks "Add from cloud drive" ever sees this. The journey is: Corpus → Keycloak
+(`corpus-linking` client) → Google consent → back.
+
+**Expect one Keycloak-rendered password prompt during linking, and do not treat it as a
+bug.** ROPC issues tokens but creates **no browser session**, so when the linking redirect
+arrives Keycloak sees an unauthenticated browser. After Google returns, first-broker-login
+must prove the user owns the existing Corpus account — and because brokering is
+**link-only** (auto-creation would be a self-service signup route FR-USR-02/03 forbids),
+that means re-authenticating. It happens once per user. It is unavoidable while login is
+ROPC: client-initiated linking skips re-auth only when a browser SSO session already
+exists, and token exchange can *read* a brokered token but cannot *create* the link.
+
+### 4. Do not let brokering become a login path
+
+`google` must stay **link-only**: Keycloak must never create a Corpus account from a Google
+identity. FR-USR-02/03 make account creation administrator-only, so an auto-creating first
+broker login flow would silently add self-service signup to a product that does not have it.
+
 ## The ROPC constraint — read before changing realm config (T-110)
 
 Auth is **backend-mediated ROPC**: there is no browser in the login flow, so

@@ -103,7 +103,6 @@ async def _seed(
         knowledge_base_id=kb.id,
         tenant_id=DEFAULT_TENANT_ID,
         chunk_text=PASSAGE,
-        is_active=True,
         meta={},
     )
     session.add(chunk)

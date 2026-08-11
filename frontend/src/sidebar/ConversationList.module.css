@@ -1,0 +1,200 @@
+/* FR-SBR-03 / 04 / 07 — the conversation list.
+   Every value on `.sectionLabel`, `.list`, `.rowButton`, `.title` and `.meta` is transcribed
+   from the prototype (lines 36-52). `.menuButton` and `.menu` have no prototype precedent:
+   FR-SBR-07 is a Rev 0.5 addition, so the spec is their baseline and they are built from the
+   existing tokens only. */
+
+.sectionLabel {
+  margin: 0;
+  padding: 4px 18px 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  color: var(--muted2);
+}
+
+/* The FR-SBR-03 scroll container. `list-style`/`margin`/`padding` are reset because this is a
+   <ul> where the prototype had a <div> (NFR-A11Y-03) — the UA's 40px inline start padding and
+   bullet would otherwise be a visible departure. */
+.list {
+  flex: 1;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0 8px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* The <li> is a bare positioning context; every painted value lives on `.rowButton`, so the
+   row's box is byte-identical to the prototype's <div>. */
+.row {
+  position: relative;
+  display: flex;
+}
+
+.rowButton {
+  flex: 1;
+  min-width: 0;
+  display: block;
+  padding: 9px 10px;
+  border-radius: var(--radius-btn);
+  border: 1px solid transparent;
+  background: transparent;
+  /* `font: inherit`, not `font-family: inherit` — a <button> does not inherit font-size or
+     colour from the page, so the row computed 13.33px/black where the prototype's <div>
+     computed 14px/--text. Invisible today because `.title` and `.meta` set both themselves,
+     and a live defect the moment anyone adds text directly to the row. */
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--motion-fast) ease;
+}
+
+.rowButton:hover {
+  background: var(--panel2);
+}
+
+/* Active: --panel2 fill, --line border, title 600 in --text (FR-SBR-03). The prototype gives
+   the active row no hover treatment, and NFR-USE-02 makes adding one optional — so it is not
+   added, matching the prototype exactly. */
+.rowActive .rowButton,
+.rowActive .rowButton:hover {
+  background: var(--panel2);
+  border-color: var(--line);
+}
+
+.title {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rowActive .title {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.meta {
+  margin-top: 2px;
+  display: flex;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted2);
+}
+
+.rowActive .meta {
+  color: var(--muted);
+}
+
+/* ── FR-SBR-07 overflow control ─────────────────────────────────────────── */
+/* Revealed by OPACITY ONLY, and always present in the DOM. Three consequences, all deliberate:
+   the row's default (non-hover) appearance is unchanged, which FR-SBR-07 requires literally;
+   the control occupies no layout space, so the title's ellipsis width matches the prototype;
+   and it stays in the tab order, which is what makes it keyboard-reachable per NFR-A11Y-04.
+   `display: none` or `visibility: hidden` would each satisfy the first two and silently break
+   the third — the affordance would be pointer-only, the exact defect the requirement names.
+
+   `:focus-within` on the row is therefore load-bearing, not decoration: it is what makes the
+   control *visible* to the sighted keyboard user who has just tabbed onto it.
+
+   Its background is --panel2 so it sits cleanly over a long ellipsised title; that is also the
+   surface the row itself has whenever the button is visible (hover or active), so it reads as
+   part of the row rather than as a floating chip. */
+.menuButton {
+  position: absolute;
+  right: 6px;
+  top: 6px;
+  bottom: 6px;
+  width: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-chip);
+  background: var(--panel2);
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--motion-fast) ease;
+}
+
+.row:hover .menuButton,
+.row:focus-within .menuButton,
+.menuButton[aria-expanded='true'] {
+  opacity: 1;
+}
+
+.menuButton:hover,
+.menuButton[aria-expanded='true'] {
+  border-color: var(--line);
+  color: var(--text);
+}
+
+/* `position: fixed`, not absolute — `.list` is a scroll container and would clip an absolutely
+   positioned popover, most often on the bottom row. Coordinates come from the trigger's rect
+   (the FR-CIT-03 hover-card mechanism); `left`/`top` are supplied inline because they are
+   computed data, not styling. WIDTH IS DUPLICATED as MENU_WIDTH in ConversationList.tsx for
+   the viewport clamp — the CSS guard asserts the two agree. */
+.menu {
+  position: fixed;
+  z-index: var(--z-menu);
+  /* The one `border-box` in the codebase, and it earns it: MENU_WIDTH in the component clamps
+     this popover against the viewport and right-aligns it to its trigger, and under the
+     content-box default the declared 148 rendered as 158 (padding + border), putting the menu
+     10px past the trigger's edge. The width here is ours — FR-SBR-07 has no prototype — so
+     nothing pixel-locked depends on the box model being content-box. */
+  box-sizing: border-box;
+  width: 148px;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pop);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  animation: fadeUp var(--motion-fast) ease;
+}
+
+.menuItem {
+  padding: 7px 9px;
+  border: 0;
+  border-radius: var(--radius-btn);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.menuItem:hover {
+  background: var(--panel2);
+}
+
+/* Inline rename (FR-SBR-07, "edits the title in place"). Sized to sit exactly where the title
+   was — same 13px, same 9px/10px box — so committing or cancelling does not make the row jump.
+   The 1px accent border is the only added ink, and it marks the one row being edited. */
+.titleInput {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 10px;
+  border-radius: var(--radius-btn);
+  border: 1px solid var(--accent);
+  background: var(--panel2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}

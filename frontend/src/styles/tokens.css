@@ -97,6 +97,16 @@
   --stats-w: 272px;
   --app-min-h: 640px;
 
+  /* Stacking order — FR-LAY-03. The prototype's three literals, promoted so that the six
+     later surfaces needing a z-index do not each invent a scale (which is how `z-index: 9999`
+     arrives). A rename, not a redesign — the same move already made for --sidebar-w above and
+     the eval hues. The hover card sits ABOVE the modal, which is the prototype's own order
+     and is harmless: the card is pointer-events:none, and a citation chip cannot be hovered
+     while the modal covers it. */
+  --z-menu: 30; /* FR-CMP-04 mention menu (T-506); FR-AUT-08 user menu (T-509) */
+  --z-modal: 50; /* FR-KBM-01 (T-508); FR-AUT-09 (T-509); FR-SBR-07 confirm (T-503) */
+  --z-hovercard: 60; /* FR-CIT-03 citation hover card (T-505) */
+
   /* Motion durations — NFR-VIS-05 (prototype uses inline literals; named here).
      Components MUST use these rather than inline literals: the reduced-motion block at the
      foot of this file zeroes them, which is how NFR-A11Y-01 reaches a component that has
@@ -150,6 +160,32 @@ a:hover {
 /* Mono for dates, token counts, badges, citation chips, eval scores, footers. */
 .mono {
   font-family: 'JetBrains Mono', monospace;
+}
+
+/* ── Visually hidden — NFR-A11Y-03 (T-502) ──────────────────────────────── */
+/* Content exposed to assistive technology only. Global, beside `.mono`, because three
+   component tasks need it — T-502's document <h1>, T-506's FR-CMP-01 composer label, T-507's
+   FR-ANL-03/04 meter values — and a copy inside each CSS Module is three copies of one recipe.
+
+   IT MUST NOT BE "SIMPLIFIED" to `display: none` or `visibility: hidden`. Both remove the
+   element from the accessibility tree, which is the one thing this class exists to prevent;
+   the page would keep rendering identically and every test would stay green while the
+   document silently lost its heading.
+
+   `position: absolute` is load-bearing beyond hiding: it takes the element out of flow, so the
+   <h1> does not become a fourth flex item of the FR-LAY-01 root. `clip-path: inset(50%)` alone
+   — the deprecated `clip: rect(…)` is unnecessary across the whole pinned BROWSER_TARGET
+   (Chrome/Edge 111, Firefox 114, Safari 16.4). */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 /* ── Keyboard focus — NFR-A11Y-02 (R-59) ────────────────────────────────── */

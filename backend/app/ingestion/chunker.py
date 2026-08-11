@@ -341,7 +341,7 @@ class ChunkedDocument:
         offset. `char_count` is the length of the stored text, which for a CSV chunk
         carrying a repeated header is the only truthful one.
 
-        Absent by design: `chunk_hash`, `token_count`, `is_active`, `tenant_id`,
+        Absent by design: `chunk_hash`, `token_count`, `tenant_id`,
         `knowledge_base_id`, `document_id`, `document_version` — every one is a first-class
         column, and duplicating a column into JSONB creates a second source of truth.
         """
@@ -442,8 +442,8 @@ def build_chunk_rows(
 
     Ids are explicit parameters rather than a `Document`, because T-205 builds rows for the
     *added* subset of a re-ingest and stamps its own version. `embedding` is left ``None``
-    for T-205 to fill. `is_active` and `tenant_id` are set in Python rather than left to
-    the server defaults, so the values are readable in-session before the flush.
+    for T-205 to fill. `tenant_id` is set in Python rather than left to the server default,
+    so the value is readable in-session before the flush.
     """
     return [
         DocumentChunk(
@@ -453,7 +453,6 @@ def build_chunk_rows(
             chunk_hash=chunk.chunk_hash,
             embedding_fingerprint=chunk.embedding_fingerprint,
             token_count=chunk.token_count,
-            is_active=True,
             tenant_id=tenant_id,
             knowledge_base_id=knowledge_base_id,
             chunk_text=chunk.text,

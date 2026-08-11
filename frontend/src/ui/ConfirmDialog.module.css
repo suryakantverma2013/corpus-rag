@@ -1,0 +1,59 @@
+/* Confirmation panel. Narrower than FR-KBM-01's 520px because it asks one question; 380px is
+   the §9 login-card width, reused rather than invented. */
+.panel {
+  width: 380px;
+  max-width: calc(100vw - 32px);
+}
+
+.body {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.actions {
+  margin-top: 18px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* Both buttons share the prototype's small-control shape (radius 8, 1px --line border,
+   13px/600) — the KB modal's ✕ and the sidebar's Knowledge base button are the precedents. */
+.cancel,
+.confirm {
+  padding: 8px 14px;
+  border-radius: var(--radius-btn);
+  border: 1px solid var(--line);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--motion-fast) ease;
+}
+
+.cancel {
+  background: transparent;
+  color: var(--text);
+}
+
+.cancel:hover {
+  background: var(--panel2);
+}
+
+/* Destructive, so it carries --eval-bad rather than --accent: the accent means "the primary
+   thing to do" everywhere else in this UI (New chat, Send, the Grounded pill), and using it
+   for an irreversible delete would make the dangerous button look like the safe one.
+
+   NFR-A11Y-06: colour is not the only signal — the button's own label says what it does, and
+   the dialog states the consequence above it. */
+.confirm {
+  background: transparent;
+  color: var(--eval-bad);
+  border-color: var(--eval-bad);
+}
+
+.confirm:hover {
+  background: var(--panel2);
+}

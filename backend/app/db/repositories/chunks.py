@@ -16,7 +16,7 @@ import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
-from sqlalchemy import Integer, String, Text, column, delete, func, insert, literal, select, update
+from sqlalchemy import Integer, String, Text, column, delete, func, insert, literal, select
 from sqlalchemy import values as sa_values
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
@@ -73,12 +73,8 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
         await self.session.flush()
         return chunks
 
-    async def list_by_document(
-        self, document_id: uuid.UUID, *, active_only: bool = True
-    ) -> Sequence[DocumentChunk]:
+    async def list_by_document(self, document_id: uuid.UUID) -> Sequence[DocumentChunk]:
         stmt = select(DocumentChunk).where(DocumentChunk.document_id == document_id)
-        if active_only:
-            stmt = stmt.where(DocumentChunk.is_active.is_(True))
         return (await self.session.scalars(stmt.order_by(DocumentChunk.chunk_index))).all()
 
     async def list_by_version(
@@ -223,7 +219,6 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
                 new_rows.c.chunk_hash,
                 new_rows.c.embedding_fingerprint,
                 new_rows.c.token_count,
-                literal(True),  # noqa: FBT003 — the `is_active` column, not a flag argument
                 literal(tenant_id, type_=PGUUID(as_uuid=True)),
                 literal(knowledge_base_id, type_=PGUUID(as_uuid=True)),
                 new_rows.c.chunk_text,
@@ -244,7 +239,6 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
                     table.c.chunk_hash,
                     table.c.embedding_fingerprint,
                     table.c.token_count,
-                    table.c.is_active,
                     table.c.tenant_id,
                     table.c.knowledge_base_id,
                     table.c.chunk_text,
@@ -312,23 +306,14 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
     async def delete_by_document(self, document_id: uuid.UUID) -> int:
         """FR-ING-05's "removes vectors": every version's rows, hard-deleted (R-39(3)).
 
-        Not `deactivate` below. R-36(7) had assigned `is_active` exactly this job, but
-        retrieval already excludes the document through `documents.searchable`/`deleted_at`,
-        so the flag would change no query result while retaining ~12 KB per chunk plus its
-        HNSW entry indefinitely — for a document the user asked to delete. That is the same
-        storage argument R-36(4) settled when it made the collect step mandatory. `is_active`
-        is consequently left with no writer anywhere (OI-28).
+        A hard delete rather than a soft flag: retrieval already excludes the document
+        through `documents.searchable`/`deleted_at`, so a flag would change no query result
+        while retaining ~12 KB per chunk plus its HNSW entry indefinitely — for a document
+        the user asked to delete. That is the same storage argument R-36(4) settled when it
+        made the collect step mandatory. `document_chunks.is_active` existed for the soft
+        path R-36(7) had imagined; it never gained a writer and was dropped by R-62(3).
         """
         stmt = delete(DocumentChunk).where(DocumentChunk.document_id == document_id)
-        result = await self.session.execute(stmt)
-        await self.session.flush()
-        return result.rowcount
-
-    async def deactivate(self, chunk_ids: Sequence[uuid.UUID]) -> int:
-        """Soft-delete chunks. **Unused** — R-39(3) made FR-ING-05 a hard delete (OI-28)."""
-        if not chunk_ids:
-            return 0
-        stmt = update(DocumentChunk).where(DocumentChunk.id.in_(chunk_ids)).values(is_active=False)
         result = await self.session.execute(stmt)
         await self.session.flush()
         return result.rowcount

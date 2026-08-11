@@ -1,0 +1,35 @@
+/* The modal shell — the prototype's KB-modal overlay and panel values (FR-KBM-01), which are
+   the only modal treatment the design defines, so every §4.17 and FR-SBR-07 surface inherits
+   them. `--overlay` and `--radius-modal` were promoted to tokens in T-004/T-501.
+
+   `backdrop-filter` is on the OVERLAY, never on a shell layout box: it makes the element a
+   containing block for `position: fixed` descendants, which is exactly what AppShell's guard
+   forbids up there. Here it is correct and matches the prototype — the panel is a child, and
+   its own positioning is static. */
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  background: var(--overlay);
+  backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-modal);
+  box-shadow: var(--shadow);
+  padding: 22px;
+  animation: fadeUp var(--motion) ease;
+}
+
+/* 16px/700, the prototype's "Knowledge base" modal heading. It is an <h2>: the document's only
+   <h1> is the shell's (T-502). */
+.title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+}

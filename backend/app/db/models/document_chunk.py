@@ -15,7 +15,6 @@ import uuid
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     CHAR,
-    Boolean,
     ForeignKey,
     Index,
     Integer,
@@ -34,10 +33,9 @@ class DocumentChunk(CreatedAtMixin, Base):
     __table_args__ = (
         UniqueConstraint("document_id", "document_version", "chunk_index"),
         Index(
-            "ix_document_chunks_tenant_id_knowledge_base_id_is_active",
+            "ix_document_chunks_tenant_id_knowledge_base_id",
             "tenant_id",
             "knowledge_base_id",
-            "is_active",
         ),  # FR-RET-04 / NFR-SEC-06 access filter
     )
 
@@ -50,7 +48,8 @@ class DocumentChunk(CreatedAtMixin, Base):
     chunk_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     embedding_fingerprint: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     token_count: Mapped[int | None] = mapped_column(Integer)
-    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    # `is_active` was dropped by R-62(3)/OI-28: R-39(3) made FR-ING-05 a hard delete, so the
+    # flag never acquired a writer and its retrieval predicate was a tautology.
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         nullable=False,

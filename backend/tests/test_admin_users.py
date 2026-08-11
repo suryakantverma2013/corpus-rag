@@ -310,6 +310,49 @@ async def test_patch_self_demote_blocked(
     assert resp.json()["detail"] == "You cannot perform this action on your own account."
 
 
+async def test_patch_self_disable_blocked(
+    client: httpx.AsyncClient, session: AsyncSession, make_token: Callable[..., str]
+) -> None:
+    """Disabling is the other half of demotion — an inactive admin cannot administer either."""
+    admin_sub, headers = await _admin_headers(session, make_token)
+    resp = await client.patch(
+        f"/api/v1/users/{admin_sub}", headers=headers, json={"is_active": False}
+    )
+    assert resp.status_code == 409
+
+
+async def test_an_administrator_cannot_remove_their_own_administration(
+    client: httpx.AsyncClient, session: AsyncSession, make_token: Callable[..., str]
+) -> None:
+    """OI-25 / R-62(2) — the admin-lockout invariant, pinned as behaviour.
+
+    These routes are administrator-gated, and all three ways to strip an administrator —
+    demote, disable, delete — are refused when the target is the **actor**. The acting
+    administrator therefore always survives their own request, so no *sequential* series of
+    calls can take the system to zero administrators. That, not a `count(admins) > 1` check,
+    is what closes FR-USR-03/07's lockout hole: a count is read-then-act and races with
+    itself, and roles live in Keycloak (R-28) so it could not be made transactional anyway.
+
+    **Accepted residual (R-62(2)):** two administrators deleting *each other* concurrently
+    both pass this check and both succeed. A count guard would not catch that either. It is
+    recoverable — the Keycloak admin console is independent of these application roles.
+
+    The three separate tests above assert the codes; this one asserts they hold *together*,
+    which is the property the requirement actually needs.
+    """
+    admin_sub, headers = await _admin_headers(session, make_token)
+
+    demote = await client.patch(
+        f"/api/v1/users/{admin_sub}", headers=headers, json={"role": "user"}
+    )
+    disable = await client.patch(
+        f"/api/v1/users/{admin_sub}", headers=headers, json={"is_active": False}
+    )
+    delete = await client.delete(f"/api/v1/users/{admin_sub}", headers=headers)
+
+    assert [demote.status_code, disable.status_code, delete.status_code] == [409, 409, 409]
+
+
 async def test_patch_not_found_404(
     client: httpx.AsyncClient,
     session: AsyncSession,

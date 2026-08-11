@@ -52,7 +52,7 @@ def test_users_keyed_to_keycloak_subject_no_password() -> None:
 def test_access_filter_columns_present() -> None:
     # FR-RET-04 / NFR-SEC-06: filter in-query by tenant/owner, KB, active/searchable.
     chunks = Base.metadata.tables["document_chunks"]
-    for col in ("tenant_id", "knowledge_base_id", "is_active"):
+    for col in ("tenant_id", "knowledge_base_id"):
         assert col in chunks.columns
     docs = Base.metadata.tables["documents"]
     for col in ("tenant_id", "owner_id", "knowledge_base_id", "searchable"):
@@ -62,7 +62,7 @@ def test_access_filter_columns_present() -> None:
 def test_access_filter_index_declared() -> None:
     chunks = Base.metadata.tables["document_chunks"]
     index_cols = {tuple(c.name for c in idx.columns) for idx in chunks.indexes}
-    assert ("tenant_id", "knowledge_base_id", "is_active") in index_cols
+    assert ("tenant_id", "knowledge_base_id") in index_cols
 
 
 def test_embedding_dimension() -> None:
@@ -79,7 +79,6 @@ def test_incremental_embedding_fields() -> None:
         "chunk_hash",
         "embedding_fingerprint",
         "token_count",
-        "is_active",
     ):
         assert col in chunks.columns
 
