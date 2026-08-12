@@ -164,7 +164,10 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
-  animation: fadeUp var(--motion-fast) ease;
+  /* The `fadeUp` reference lives on the global `.animate-fade-up` utility in tokens.css:
+     CSS Modules rewrites `animation-name` even for a keyframe it does not declare, so
+     writing it here compiles to a hashed name that matches nothing and never runs. */
+  --fade-up-duration: var(--motion-fast);
 }
 
 .menuItem {

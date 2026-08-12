@@ -90,13 +90,14 @@ BLOCKED_INJECTION = (  # TBD(§8.4)
 #:
 #: **The normative source is FR-STA-04, not this constant.** The composer blocks *before* a
 #: request exists (R-51(6)), so it can never receive this `message` and must carry its own
-#: copy; both sides derive from the requirement so the two cannot drift. Wording remains
-#: author-confirmable in §8.4 — the *design* question is not open.
+#: copy; both sides derive from the requirement so the two cannot drift. **The wording was
+#: author-confirmed by R-69(1) and is no longer a TBD** — it is FR-STA-04's own line, and this
+#: constant is a copy of the requirement, not a candidate for it. Change it there first.
 #:
 #: Names no number: the limit is a `# TBD(§8.4)` knob, and a user cannot act on "10,400"
 #: any more than on the groundedness score `ABSTAIN_LOW_GROUNDEDNESS` withholds.
 CONTEXT_WINDOW_EXCEEDED_CODE = "CONTEXT_WINDOW_EXCEEDED"
-CONTEXT_WINDOW_EXCEEDED = (  # TBD(§8.4) — wording only; adopted by R-67(2) into FR-STA-04
+CONTEXT_WINDOW_EXCEEDED = (  # FR-STA-04, verbatim (adopted by R-67(2), confirmed by R-69(1))
     "This conversation has reached its length limit. Start a new chat to keep going — your "
     "documents and their answers stay where they are."
 )
@@ -113,7 +114,7 @@ CONTEXT_WINDOW_EXCEEDED = (  # TBD(§8.4) — wording only; adopted by R-67(2) i
 #: covers requests no *correct* client makes; this is one a correct client makes and loses to a
 #: later turn landing under an open action bar.
 NOT_LATEST_ANSWER_CODE = "NOT_LATEST_ANSWER"
-NOT_LATEST_ANSWER = (  # TBD(§8.4) — copy owned by T-505/T-508 with the rest of the action bar
+NOT_LATEST_ANSWER = (  # TBD(§8.4) — copy owned by T-513, which renders this `409`
     "Only the most recent answer can be regenerated. Refresh the conversation to see the "
     "latest reply."
 )

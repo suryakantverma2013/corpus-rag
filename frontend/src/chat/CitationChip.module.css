@@ -1,0 +1,38 @@
+/* FR-CIT-01 — transcribed per property from `RAG Chatbot.dc.html` line 105.
+   The prototype's element is a <span>; this is a <button> (NFR-A11Y-03), which is why the
+   font and colour properties below are declared rather than inherited — see the note there. */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  /* The prototype's literal. NOT `var(--radius-chip)`: that token is 4px, and these two are
+     the "5px" half of its own "4–5px" comment. Tokenising it here would silently render a
+     pixel tighter — asserted by the CSS guard, which requires this file not to use it. */
+  border-radius: 5px;
+  padding: 1px 7px;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  margin: 0 2px;
+  /* Nudges the chip onto the surrounding 1.65 line box's baseline. Easy to mistake for noise;
+     it is the difference between a chip that sits in the text and one that rides above it. */
+  vertical-align: 1px;
+  border: 1px solid transparent;
+
+  /* A <button> inherits NONE of the font properties (T-503 measured 13.33px/black against the
+     prototype's own value), which is why `font-size`, `font-weight` and `color` are declared
+     above rather than left to cascade. `font-family` is deliberately NOT declared here: the
+     global `.mono` utility sets it on this same element, and a competing `font-family: inherit`
+     at equal specificity would be decided by stylesheet order rather than by intent.
+
+     `line-height` is the same trap one property on: a button's UA value is `normal`, where the
+     prototype's <span> inherits the body's 1.65. */
+  line-height: inherit;
+}
+
+.chip:hover {
+  border-color: var(--accent);
+}

@@ -1,0 +1,188 @@
+/* FR-MSG-04 — transcribed per property from `RAG Chatbot.dc.html` lines 97–122.
+   The Markdown block styles below (FR-MSG-07) are a Rev 0.5 addition the prototype has no
+   equivalent for, so they are authored from the §5.1 tokens and the NFR-VIS-03 type scale. */
+
+.row {
+  display: flex;
+  gap: 12px;
+  /* The `fadeUp` reference lives on the global `.animate-fade-up` utility in tokens.css:
+     CSS Modules rewrites `animation-name` even for a keyframe it does not declare, so
+     writing it here compiles to a hashed name that matches nothing and never runs. */
+}
+
+.avatar {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: var(--radius-btn);
+  background: var(--accent);
+  /* The prototype's literal, and a recorded NFR-A11Y-06 exception (3.17:1 in dark) rather than
+     an implementation choice — R-58 logged it with the brand mark and the send glyph. */
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 12px;
+}
+
+/* The prototype puts `margin-top: 2px` on the AI MESSAGE's avatar (line 99) and NOT on the
+   FR-MSG-05 typing avatar (line 126) — so it belongs to this usage, not to the avatar
+   itself. It was on `.avatar` with a `margin-top: 0` override in MessageList.module.css,
+   which is a specificity TIE (0,1,0 each) decided by stylesheet order: measured headed, the
+   typing avatar rendered at 2px and the override never applied. Scoping it to `.row` makes
+   the distinction structural instead of order-dependent. */
+.row .avatar {
+  margin-top: 2px;
+}
+
+.content {
+  max-width: 68%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* Without this the flex item's automatic minimum size is its content, so a wide code block or
+     table pushes the column past 68% instead of scrolling inside it — the same mechanism T-504
+     documented on the header title. */
+  min-width: 0;
+}
+
+.body {
+  line-height: 1.65;
+  font-size: 13.5px;
+  overflow-wrap: anywhere;
+}
+
+.sourceLine {
+  font-size: 11px;
+  color: var(--muted2);
+}
+
+/* FR-MSG-08's bar, revealed on hover or keyboard focus. It lives here rather than in
+   `MessageActions.module.css` because the hover target is `.row`, and a CSS Module cannot
+   select another module's hashed class.
+
+   NOT `display: none` / `visibility: hidden`: both look identical to a mouse user and remove
+   the buttons from the tab order, which is the exact NFR-A11Y-04 defect T-503 fixed for the
+   FR-SBR-07 affordance. Opacity keeps them focusable, so `:focus-within` is what reveals them
+   to the keyboard user who has just tabbed onto one. */
+.actions {
+  opacity: 0;
+  transition: opacity var(--motion-fast) ease;
+}
+
+.row:hover .actions,
+.actions:focus-within {
+  opacity: 1;
+}
+
+/* ── Markdown (FR-MSG-07) ────────────────────────────────────────────────── */
+
+/* The body is one flow: the first and last blocks must not add margin, or an answer with a
+   heading sits lower than one without and the 8px content gap stops being the spacing. Each
+   block therefore resets its own UA margin instead of sharing one grouped rule — a grouped
+   selector makes every one of them a second definition, so a reader (and the drift guard) finds
+   the group rather than the rule carrying the block's real declarations. */
+.paragraph {
+  margin: 0;
+}
+
+.paragraph + .paragraph,
+.paragraph + .heading,
+.paragraph + .list,
+.paragraph + .pre,
+.paragraph + .tableWrap,
+.list + .paragraph,
+.pre + .paragraph,
+.tableWrap + .paragraph,
+.heading + .paragraph,
+.heading + .list,
+.list + .heading,
+.pre + .heading,
+.tableWrap + .heading {
+  margin-top: 10px;
+}
+
+.heading {
+  margin: 0;
+  /* An <h3>..<h6> arrives with a UA margin and its own font-size/weight, where the surrounding
+     text is 13.5px/1.65 — the T-504 non-inheritance trap one element on. Sized just above the
+     body so the hierarchy reads without the answer competing with the FR-HDR-01 chat title. */
+  font-size: 14.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--text);
+}
+
+.list {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.listItem {
+  margin: 2px 0;
+}
+
+.link {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.code {
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-chip);
+  padding: 1px 5px;
+  font-size: 12px;
+}
+
+.pre {
+  margin: 0;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-btn);
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.55;
+  /* FR-MSG-07's "horizontal scroll on overflow". `min-width: 0` on `.content` above is what
+     lets this actually scroll instead of stretching the column. */
+  overflow-x: auto;
+  /* A fenced block is verbatim text: it must not be re-wrapped by the body's `overflow-wrap`. */
+  overflow-wrap: normal;
+  white-space: pre;
+}
+
+.tableWrap {
+  margin: 0;
+  overflow-x: auto;
+}
+
+.table {
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.table th,
+.table td {
+  border: 1px solid var(--line);
+  padding: 5px 9px;
+  text-align: left;
+}
+
+.table th {
+  font-weight: 600;
+  background: var(--panel2);
+  color: var(--text);
+}
+
+/* GFM column alignment. Class-based, never an inline style: a style attribute whose value came
+   from content is the one thing this renderer must never produce. */
+.alignLeft {
+  text-align: left;
+}
+.alignCenter {
+  text-align: center;
+}
+.alignRight {
+  text-align: right;
+}

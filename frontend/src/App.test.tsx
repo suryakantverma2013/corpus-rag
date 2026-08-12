@@ -47,11 +47,19 @@ describe('FR-SYS-04 defaults (§9)', () => {
 });
 
 describe('FR-HDR-01 — the header follows the active conversation', () => {
-  /** Drives the real FR-SBR-07 flow: ⋯ → Delete → confirm. */
-  function deleteConversation(title: string) {
-    fireEvent.click(screen.getByRole('button', { name: `Actions for ${title}` }));
+  /** Drives the real FR-SBR-07 flow on the first row still present: ⋯ → Delete → confirm.
+   *
+   *  Deliberately not driven from a hardcoded list of seeded titles. It was, and adding two
+   *  conversations in T-505 made the delete-everything test below stop reaching the state it
+   *  asserts — while still passing its earlier steps, so it failed for a reason that had nothing
+   *  to do with what it tests. Draining the list keeps it honest as the seeds change. */
+  function deleteFirstConversation() {
+    const actions = screen.queryAllByRole('button', { name: /^Actions for / });
+    if (actions.length === 0) return false;
+    fireEvent.click(actions[0]);
     fireEvent.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Delete' }));
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Delete' }));
+    return true;
   }
 
   const headerTitle = () => within(screen.getByRole('main')).getByRole('heading', { level: 2 });
@@ -74,14 +82,9 @@ describe('FR-HDR-01 — the header follows the active conversation', () => {
     // is an index into a non-empty array), so the rule is ours — and without the null branch in
     // App the header would crash or render an empty heading.
     render(<App />);
-    for (const title of [
-      'Analyzing Market Trends',
-      'Product Launch Strategy',
-      'Customer Persona Refinement',
-      'Pricing Experiment Review',
-    ]) {
-      deleteConversation(title);
-    }
+    // Bounded so a bug that stops the list shrinking fails here rather than hanging the suite.
+    for (let i = 0; i < 50 && deleteFirstConversation(); i += 1);
+    expect(screen.queryAllByRole('button', { name: /^Actions for / })).toHaveLength(0);
     expect(headerTitle().textContent).toBe('New chat');
   });
 });

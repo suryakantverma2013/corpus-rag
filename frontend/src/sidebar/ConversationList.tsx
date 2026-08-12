@@ -246,7 +246,7 @@ export function ConversationList({
 
                   {menuFor === conversation.id && (
                     <div
-                      className={styles.menu}
+                      className={`${styles.menu} animate-fade-up`}
                       style={{ left: `${menuPos.left}px`, top: `${menuPos.top}px` }}
                       role="menu"
                       aria-label={`Actions for ${title}`}

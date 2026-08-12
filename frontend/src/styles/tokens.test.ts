@@ -12,6 +12,7 @@
  * carry their own copy.
  */
 import { describe, expect, it } from 'vitest';
+import { readdirSync } from 'node:fs';
 import { blockAfter, readSource, stripBlockComments } from '../test/css-source';
 
 const css = readSource('src/styles/tokens.css');
@@ -33,6 +34,23 @@ describe('token block structure', () => {
       .split('{')[0]
       .trim();
     expect(selector).toBe(':root');
+  });
+});
+
+describe('motion durations (NFR-VIS-05)', () => {
+  // The positive half of the pair with the reduced-motion exception below, and with
+  // `chat/MessageList.css.test.ts`, which asserts the typing dots read these through `var()`.
+  // The prototype writes `dotPulse 1.2s infinite` staggered `.2s`/`.4s`; the third dot is
+  // `calc(var(--motion-dot-delay) * 2)`, so only two tokens are needed.
+  it.each([
+    ['--motion-fast', '0.15s'],
+    ['--motion', '0.2s'],
+    ['--motion-slow', '0.25s'],
+    ['--motion-bar', '0.5s'],
+    ['--motion-dot', '1.2s'],
+    ['--motion-dot-delay', '0.2s'],
+  ])('declares %s as %s', (token, value) => {
+    expect(code).toMatch(new RegExp(`${token}:\\s*${value}\\s*;`));
   });
 });
 
@@ -115,9 +133,50 @@ describe('reduced motion (NFR-A11Y-01, R-59)', () => {
     }
   });
 
+  it('leaves the FR-MSG-05 dot durations ALONE — the one deliberate exception (T-505)', () => {
+    // Zeroing a duration is `animation-duration: 0s`, which stops the animation applying and
+    // falls the element back to its base style: the exact failure the keyframe redefinition
+    // above exists to prevent, reached through a different door. The dots must stay VISIBLE
+    // and STILL, and the constant keyframe is what delivers that — so these two must not be
+    // "completed" into the list above. Asserted on the comment-stripped block, because the
+    // stylesheet's own note names both tokens.
+    const declarations = stripBlockComments(block);
+    expect(declarations).not.toContain('--motion-dot');
+    expect(declarations).not.toContain('--motion-dot-delay');
+  });
+
   it('does not use the blanket universal-selector rule', () => {
     expect(block).not.toMatch(/\*\s*,\s*\*::before/);
     expect(block).not.toMatch(/animation-duration:\s*\.01ms/);
+  });
+});
+
+describe('animation utilities (NFR-VIS-05)', () => {
+  it('declares both keyframe references globally, with an overridable duration', () => {
+    expect(code).toMatch(/\.animate-fade-up\s*\{[^}]*animation:\s*fadeUp/);
+    // The duration is a per-call-site custom property, so each surface keeps its own --motion-*
+    // token and NFR-A11Y-01's zeroing still reaches every one of them.
+    expect(code).toMatch(/var\(--fade-up-duration,\s*var\(--motion-slow\)\)/);
+    expect(code).toMatch(/\.animate-dot-pulse\s*\{[^}]*animation:\s*dotPulse/);
+  });
+
+  it('is the ONLY place a keyframe is referenced — no CSS Module may name one', () => {
+    // The defect this exists to prevent, found headed in T-505 and shipping since T-503:
+    // **CSS Modules rewrites `animation-name` even for a keyframe it does not declare**, so
+    // `animation: fadeUp …` inside a `*.module.css` compiles to `_fadeUp_<hash>`, matches no
+    // @keyframes rule, and never runs. It fails silently — the declaration is present and
+    // `getComputedStyle` reports an animation-name — so nothing but a rendered check catches it.
+    // At the time this guard was written, six modules were affected and all six were dead.
+    const modules = readdirSync('src', { recursive: true, encoding: 'utf8' }).filter((f) =>
+      f.endsWith('.module.css'),
+    );
+    expect(modules.length).toBeGreaterThan(5);
+    for (const file of modules) {
+      const sheet = stripBlockComments(readSource(`src/${file}`.replaceAll('\\', '/')));
+      expect(sheet, `${file} references a keyframe; use the global utility`).not.toMatch(
+        /animation(-name)?:\s*[A-Za-z_]/,
+      );
+    }
   });
 });
 

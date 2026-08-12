@@ -11,7 +11,7 @@ import type { Conversation } from '../api';
  * returns no count at all. It cannot be derived client-side either — only the active chat's
  * messages are ever loaded, so every other row would render "· 0 messages", which is worse
  * than wrong: it is plausible. Recorded as **T-407** (add `message_count` to the list route);
- * until that lands, T-509's wiring has nothing truthful to pass here.
+ * until that lands, T-513's wiring has nothing truthful to pass here.
  *
  * Deliberately an intersection rather than a redeclared interface, so a change to the
  * generated model reaches this file as a type error (the frontend-dev "never hand-write a

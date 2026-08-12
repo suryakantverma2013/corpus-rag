@@ -1,0 +1,120 @@
+/* §4.3 — transcribed per property from `RAG Chatbot.dc.html` lines 82–133.
+   The FR-STA-04 notice has no prototype equivalent (R-67 is Rev 0.34) and is authored from the
+   §5.1 tokens under NFR-VIS-01's Rev 0.5+ carve-out. */
+
+.list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 26px 30px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  /* No scrollbar declarations here on purpose: NFR-USE-05's 8px bar is global in `tokens.css`,
+     gated on `::-webkit-scrollbar-thumb` (R-60), and `scrollbar-width` is applied via `*` there
+     precisely so scroll containers do not each restate it. */
+}
+
+/* ── FR-MSG-02 empty state ───────────────────────────────────────────────── */
+
+.empty {
+  /* `margin: auto` inside the column flex is what centres it vertically — the list's own
+     `gap` never applies, because this is the only child in this state. */
+  margin: auto;
+  text-align: center;
+  max-width: 380px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+}
+
+.emptyMark {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-pop);
+  background: var(--accent-soft);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 20px;
+}
+
+.emptyTitle {
+  /* An <h3> arrives with a UA margin and its own font-size/weight; the prototype's element is a
+     <div> inheriting the 14px root font and overriding only these two. The T-504 trap again. */
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  color: inherit;
+  line-height: normal;
+}
+
+.emptyHelper {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.emptyMention {
+  color: var(--accent);
+}
+
+/* ── FR-MSG-05 typing indicator ──────────────────────────────────────────── */
+
+.typingRow {
+  display: flex;
+  gap: 12px;
+}
+
+.typingBubble {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-bubble);
+  padding: 12px 16px;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+  /* `dotPulse` and the durations are global (`tokens.css`). NO `prefers-reduced-motion` block
+     here and no literal duration: NFR-A11Y-01 redefines the keyframe under reduced motion so
+     the dots stay fully visible and still, and a local override would fall the element back to
+     its resting style — the exact failure that requirement exists to prevent.
+
+     No resting `opacity` is declared either, for the same reason from the other direction. */
+  /* `dotPulse` is applied by the global `.animate-dot-pulse` utility in tokens.css — see
+     the note there; a module-local reference compiles to a name that matches nothing. */
+}
+
+.dot2 {
+  animation-delay: var(--motion-dot-delay);
+}
+
+.dot3 {
+  animation-delay: calc(var(--motion-dot-delay) * 2);
+}
+
+/* ── FR-STA-04 frozen conversation (R-67) ────────────────────────────────── */
+
+/* Deliberately NOT an error: R-67(1) makes this a designed terminal state — frozen, not broken.
+   `--panel2` and `--muted`, the same quiet register as the empty state, rather than the
+   `--eval-bad` hue a failure would use. */
+.frozen {
+  align-self: center;
+  max-width: 420px;
+  text-align: center;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  padding: 12px 16px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--muted);
+}

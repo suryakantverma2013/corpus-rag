@@ -181,6 +181,69 @@ classes, and T-503's hover-revealed affordance needs `:focus-within` to be keybo
 - Note that **Vitest never parses CSS**, so a syntax error in a module reaches only
   `npm run build`. That step is required, not optional.
 
+## The message list (T-505)
+
+`src/chat/` holds the §4.3 transcript. Three things there are load-bearing and easy to undo.
+
+**Markdown is ours (`markdown.ts`), and that is what makes FR-MSG-07's "sanitized" true.**
+Parsing produces a plain-JSON AST; rendering maps it through `createElement`. **No markup string
+is ever built**, so there is no path from a `<` in an answer to an element and nothing to
+sanitize — every off-the-shelf pipeline instead builds the hazard and then removes it. Do not
+introduce `dangerouslySetInnerHTML`, `innerHTML` or a Markdown dependency; a guard forbids the
+first two across `src/chat/`. The only content-derived attribute is a link `href`, allow-listed
+to `http:` / `https:` / `mailto:`.
+
+**Citation chips are anchored by _offset_, never by a sentinel substring.** `flatten` joins the
+text segments and records where each citation sat. That is what keeps a list straddling a `segs`
+boundary **one** list, and it is why document content cannot forge a chip. Do not "simplify" it
+into inserting a placeholder token into the text.
+
+**The hover card lives in `AppShell`'s `overlays` slot, with its state in a context** (the
+`src/theme/` shape: context / provider / hook, three modules, no barrel). It is `position: fixed`
+and would be clipped by the list's `overflow-y: auto` anywhere else. `close(chipId)` ignores a
+call for a chip that is no longer open — with adjacent chips the browser fires A's `mouseleave`
+**after** B's `mouseenter`.
+
+### Animations: use the global utility classes, never `animation:` in a module
+
+**CSS Modules rewrites `animation-name` even for a keyframe the module does not declare.** So
+`animation: fadeUp var(--motion) ease` inside a `*.module.css` compiles to `_fadeUp_<hash>`,
+matches no `@keyframes` rule, and **the animation simply never runs**. It fails silently: the
+declaration is right there, the emitted CSS looks fine, `getComputedStyle` reports an
+`animation-name`, and the suite stays green. When T-505 measured the typing dots in a real
+browser, **six modules were affected and all six were dead** — two of them shipped in T-503, so
+no motion in the product had ever actually run.
+
+```css
+/* NO — compiles to a name that matches nothing */
+.card {
+  animation: fadeUp var(--motion-fast) ease;
+}
+
+/* YES — the global utility carries the keyframe, this sheet only sets the duration */
+.card {
+  --fade-up-duration: var(--motion-fast);
+}
+```
+
+```tsx
+<div className={`${styles.card} animate-fade-up`} />
+```
+
+`.animate-fade-up` and `.animate-dot-pulse` live in `tokens.css`; `src/styles/tokens.test.ts`
+fails the build if any module names a keyframe. `:global(fadeUp)` in a value is a postcss-modules
+syntax error here, so there is no in-module escape hatch.
+
+**Related trap, same task:** an animation that sets `transform` **replaces** the element's own
+`transform` while it runs. `fadeUp` does, so the hover card's lift uses the independent
+**`translate`** property, which composes instead of being overwritten. If you position something
+with `transform` and animate it with `fadeUp`, it will sit in the wrong place and then jump.
+
+**And one more:** two single-class rules setting the same property are a **specificity tie
+decided by stylesheet order**, not by which file you think is "more specific". The FR-MSG-05
+typing avatar's `margin-top: 0` lost that race to `.avatar`'s `2px`; the fix was to scope the
+margin to its usage (`.row .avatar`), not to add `!important`.
+
 ## Commands
 
 ```bash

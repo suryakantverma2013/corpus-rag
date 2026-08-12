@@ -96,7 +96,9 @@ export function Dialog({ title, onClose, panelClassName, children }: DialogProps
       <div
         ref={panelRef}
         className={
-          panelClassName === undefined ? styles.panel : `${styles.panel} ${panelClassName}`
+          panelClassName === undefined
+            ? `${styles.panel} animate-fade-up`
+            : `${styles.panel} ${panelClassName} animate-fade-up`
         }
         role="dialog"
         aria-modal="true"

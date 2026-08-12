@@ -1,0 +1,123 @@
+/* FR-CMP-04 — the @-mention popover.
+
+   Transcribed per property from the prototype's inline styles (`RAG Chatbot.dc.html` lines
+   139-146). That region sits inside `<sc-if value="{{ mentionOpen }}">`, so under R-66 it has
+   never painted anywhere — the declarations are complete and are the baseline, but nothing
+   about its rendered geometry has ever been observed. Verified per property in a real browser
+   as part of this task rather than assumed. */
+
+/* `position: absolute` against the composer's `position: relative` (T-502's AppShell comment
+   records that this is deliberately NOT in the overlays slot: the prototype anchors it to the
+   composer, not the viewport).
+
+   `bottom: 76px` / `left: 30px` are the prototype's literals and they are measured against the
+   composer's own padding box — 76px clears the input bar plus the footer line, 30px matches the
+   composer's 30px horizontal padding so the menu's left edge lines up with the input bar's. */
+.menu {
+  position: absolute;
+  bottom: 76px;
+  left: 30px;
+  width: 320px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pop);
+  box-shadow: var(--shadow);
+  padding: 6px;
+  z-index: 30;
+}
+
+/* FR-CMP-04's "REFERENCE A DOCUMENT" heading. Not an <h*>: it labels the listbox and is wired
+   up with `aria-labelledby`, so promoting it to a heading would put a section break in the
+   middle of the composer for a screen-reader user navigating by heading. */
+.heading {
+  padding: 7px 10px 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--muted2);
+}
+
+/* The list itself. `list-style` and the margin/padding reset exist because this is a <ul> where
+   the prototype has a bare <div> — the same class of trap T-503 hit with <button> and T-504
+   with <h2>: a UA stylesheet supplies list markers and 40px of inline padding that the
+   prototype's div never had. */
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* One row. A <button> for NFR-A11Y-03, restyled to the prototype's <div>:
+   `width: 100%` + `text-align: left` + `font: inherit` + `color: inherit` undo the button
+   defaults, and `background: transparent` / `border: none` remove its chrome.
+
+   `box-sizing: border-box` is load-bearing and is T-502's recorded finding: there is no global
+   reset, so `width: 100%` plus 10px of horizontal padding would overflow the 320px popover. */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: none;
+  border-radius: var(--radius-btn);
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* The prototype's `style-hover`. `[data-active='true']` carries the same fill for the keyboard
+   path: NFR-A11Y-03 requires `aria-activedescendant` traversal, and a row the arrow keys have
+   moved to must look the way a hovered row looks or the keyboard user cannot see where they
+   are. Colour is not the sole carrier — `aria-activedescendant` is what assistive technology
+   reads (NFR-A11Y-06). */
+.row:hover,
+.row[data-active='true'] {
+  background: var(--panel2);
+}
+
+/* FR-CMP-04 — "type badge (mono 9.5px accent on accent-soft, 32px)". The 32px is a fixed width,
+   which is why `flex-shrink: 0` and `text-align: center` are both here: the badge is a column,
+   not a chip that hugs its text. */
+.badge {
+  font-size: 9.5px;
+  font-weight: 500;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: var(--radius-chip);
+  padding: 2px 5px;
+  width: 32px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+/* FR-CMP-04 — "filename (13px ellipsis)". `overflow: hidden` is doing the same second job it
+   does in ChatHeader's title: it zeroes the flex item's automatic minimum size, without which
+   a long filename pushes the meta cell out of the 320px popover instead of ellipsising. */
+.name {
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* FR-CMP-04 — "meta (11px, right)". `margin-left: auto` is what right-aligns it. */
+.meta {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted2);
+  flex-shrink: 0;
+}
+
+/* No documents in scope. Not in the prototype — its `docs` array is never empty — but a real
+   knowledge base starts empty, and a popover with a heading and nothing under it reads as a
+   failure. Styled as a row so the popover keeps its shape. */
+.empty {
+  padding: 8px 10px;
+  font-size: 13px;
+  color: var(--muted2);
+}

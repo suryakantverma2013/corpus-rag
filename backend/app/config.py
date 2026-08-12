@@ -795,11 +795,26 @@ class RerankSettings(BaseSettings):
     #: mid-object produces exactly the malformed payload R-47(2) then has to throw away.
     max_output_tokens: int = Field(default=400)  # TBD(§8.4)
 
-    #: The integer scale the model scores on; the FR-CIT-04 number is `score / scale`. Ten
-    #: keeps the output one token per passage, at the cost of a hover card that can only ever
-    #: show tenths where the prototype shows `0.91`. Raising it to 100 is a one-value change —
-    #: settle it when the card is built (T-506).
-    score_scale: int = Field(default=10)  # TBD(§8.4)
+    #: The integer scale the model scores on; the FR-CIT-04 number is `score / scale`.
+    #:
+    #: **Settled at 10 by R-69(2) — no longer a TBD.** The long-standing note here said the
+    #: card "can only ever show tenths where the prototype shows `0.91`", so raising this to
+    #: 100 looked like a free second decimal. It was measured on the shipped path (prompt,
+    #: schema, parser and batching unchanged, only this value overridden), over two candidate
+    #: sets and two models: across **90 scored passages, not one had a non-zero second
+    #: decimal**, and at scale 100 both `gpt-4o-mini` and `gpt-4o` returned **only multiples
+    #: of ten** — 60 of 60. On the clear-cut set the finer scale produced *fewer* distinct
+    #: values than the coarse one.
+    #:
+    #: The resolution was never this knob's to grant: the scale is a rubric bound in a prompt
+    #: and the output's granularity belongs to the model, which reasons in tenths whatever
+    #: range it is handed. Raising it would render the identical set of strings while
+    #: advertising precision the judge does not have — which is the defect OI-35 names.
+    #:
+    #: **Revisit trigger:** a rerank model whose returned scores are measurably not quantised
+    #: to tenths. Re-run the probe; do not re-argue the arithmetic. Nothing thresholds on this
+    #: number (R-49), so it is display-only and the question is purely what the card says.
+    score_scale: int = Field(default=10)
 
     @model_validator(mode="after")
     def _coherent(self) -> RerankSettings:

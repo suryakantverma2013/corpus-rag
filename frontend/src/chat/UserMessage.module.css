@@ -1,0 +1,42 @@
+/* FR-MSG-03 — transcribed per property from `RAG Chatbot.dc.html` lines 92–95. */
+
+.row {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  /* The `fadeUp` reference lives on the global `.animate-fade-up` utility in tokens.css:
+     CSS Modules rewrites `animation-name` even for a keyframe it does not declare, so
+     writing it here compiles to a hashed name that matches nothing and never runs. */
+}
+
+.bubble {
+  max-width: 62%;
+  background: var(--bubble);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-bubble-user);
+  padding: 11px 15px;
+  line-height: 1.55;
+  font-size: 13.5px;
+  /* A pasted URL or a long identifier must wrap inside the 62% box rather than widen the row
+     past it — the prototype's sample questions are all short, so this never showed there. */
+  overflow-wrap: anywhere;
+  /* The composer is a single-line input, but a pasted multi-line question must keep its breaks
+     rather than collapse into one paragraph. */
+  white-space: pre-wrap;
+}
+
+.avatar {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: var(--radius-avatar);
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 10.5px;
+  margin-top: 2px;
+}

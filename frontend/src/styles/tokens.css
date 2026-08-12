@@ -116,6 +116,14 @@
   --motion-slow: 0.25s;
   --motion-bar: 0.5s; /* meter/bar width transitions */
 
+  /* FR-MSG-05 typing indicator (T-505). The prototype writes `dotPulse 1.2s infinite` with
+     .2s/.4s stagger; named here because components may not hard-code a duration (NFR-A11Y-01)
+     and no existing token is 1.2s. The third dot uses calc(var(--motion-dot-delay) * 2).
+
+     DELIBERATELY OUTSIDE the reduced-motion zeroing below — see the note in that block. */
+  --motion-dot: 1.2s;
+  --motion-dot-delay: 0.2s;
+
   /* Focus ring — NFR-A11Y-02 (R-59). The prototype has no focus styling at all, so this is
      spec-authored. `--accent` is not a guess: measured against every surface in both themes
      it ranges 3.92–6.00 : 1, clearing WCAG 1.4.11's 3:1 for a non-text indicator everywhere,
@@ -222,6 +230,27 @@ a:hover {
   }
 }
 
+/* ── Animation utilities — NFR-VIS-05 ───────────────────────────────────── */
+/* Global classes, and that is NOT tidiness — it is the only thing that works.
+   **CSS Modules rewrites `animation-name` inside every `*.module.css`, including names it does
+   not declare**, so `animation: fadeUp …` written in a module compiles to `_fadeUp_<hash>`,
+   which matches no `@keyframes` rule and therefore never runs. It fails silently: the property
+   is present, `getComputedStyle` reports an `animation-name`, and the element simply sits at its
+   base style. Measured headed in Chromium during T-505 — the FR-MSG-05 dots were static at
+   opacity 1 — and the same defect had been shipping unnoticed since T-503 in the dialog panel
+   and the conversation menu.
+   `:global(fadeUp)` in a value position is a postcss-modules syntax error here (`Double colon`),
+   so the reference lives in this plain stylesheet and components opt in with the class.
+   The duration stays per call site through the custom property below, so each keeps its own
+   `--motion-*` token and NFR-A11Y-01's zeroing still reaches every one of them. */
+.animate-fade-up {
+  animation: fadeUp var(--fade-up-duration, var(--motion-slow)) ease;
+}
+
+.animate-dot-pulse {
+  animation: dotPulse var(--motion-dot) infinite;
+}
+
 /* ── Reduced motion — NFR-A11Y-01 (R-59) ────────────────────────────────── */
 /* Per animation, never blanket, and the keyframes are REDEFINED rather than switched off.
    The reason is measured, not stylistic. `dotPulse` is a state indicator, not decoration:
@@ -241,6 +270,15 @@ a:hover {
     --motion: 0s;
     --motion-slow: 0s;
     --motion-bar: 0s;
+
+    /* --motion-dot and --motion-dot-delay are ABSENT HERE ON PURPOSE. Do not "complete" this
+       list. Zeroing a duration is `animation-duration: 0s`, which stops the animation applying
+       and falls the element back to its BASE style — precisely the failure mode measured above
+       (0.25, invisible, if the component authors a dim resting state), reached through a
+       different door. Leaving the duration alone and letting the redefined single-keyframe
+       dotPulse below hold opacity 1 gives a VISIBLE, STILL indicator under either authoring
+       style, which is what NFR-A11Y-01 asks for. The stagger is irrelevant once the keyframe
+       is constant. */
   }
 
   /* Hold the dots fully visible and still — present, not pulsing. */

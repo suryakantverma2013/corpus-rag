@@ -1,0 +1,40 @@
+/* FR-EVL-02/03 — transcribed per property from `RAG Chatbot.dc.html` lines 113–116. */
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--line);
+  /* The prototype's literal, and NOT `var(--radius-chip)` (4px) — see the note in
+     `CitationChip.module.css`; the CSS guard requires this file not to use that token. */
+  border-radius: 5px;
+  padding: 2px 8px;
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+/* FR-EVL-03's theme-independent bands. */
+.dotGood {
+  background: var(--eval-good);
+}
+.dotWarn {
+  background: var(--eval-warn);
+}
+.dotBad {
+  background: var(--eval-bad);
+}

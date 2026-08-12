@@ -22,6 +22,9 @@ export type TextSegment = Schemas['TextSegment'];
 export type CitationLocator = Schemas['CitationLocator'];
 export type Evaluation = Schemas['EvaluationResponse'];
 export type Feedback = Schemas['Feedback'];
+/** The served-but-unstored branch of a turn (R-54(3)) — no row, so nothing to rate or
+ *  regenerate. Carries the FR-ERR-04 copy in a single text run. */
+export type DegradedMessage = Schemas['DegradedMessage'];
 
 // --- the chat stream (R-54(2)) ---
 export type ChatFrame = Schemas['ChatStreamFrame'];

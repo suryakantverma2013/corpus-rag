@@ -269,13 +269,26 @@ async def test_realm_artifact_imports_and_works() -> None:
     realm, which a hand-fix in the admin console can silently keep working while the artifact
     everyone else imports stays broken.
 
-    Needs master credentials (`KC_ADMIN_USER`/`KC_ADMIN_PASSWORD`) since creating a realm is
-    not something the `corpus` service account may do.
+    Needs master credentials since creating a realm is not something the `corpus` service
+    account may do. **Two accepted spellings, and that is a fix rather than laxity:** this
+    gate read only `KC_ADMIN_USER`/`KC_ADMIN_PASSWORD` while `.env` has carried the very same
+    master credentials as `KEYCLOAK_ADMIN_USER`/`KEYCLOAK_ADMIN_PASSWORD` throughout — nothing
+    in `KeycloakSettings` reads that pair, so it reached no consumer and this test skipped on
+    every run since it was written. It passes when given them.
+
+    That is Rev 0.12's lesson for the third time (*a live test that has only ever skipped is
+    not a passing test*) and R-50's exact shape, where six live Keycloak tests silently stopped
+    running and reported as **skipped**, which reads as "no credentials" rather than as a
+    regression. A skip is indistinguishable from a pass in a summary line, so the gate must
+    accept the name the environment actually uses.
     """
-    user = os.environ.get("KC_ADMIN_USER", "")
-    password = os.environ.get("KC_ADMIN_PASSWORD", "")
+    user = os.environ.get("KC_ADMIN_USER") or os.environ.get("KEYCLOAK_ADMIN_USER", "")
+    password = os.environ.get("KC_ADMIN_PASSWORD") or os.environ.get("KEYCLOAK_ADMIN_PASSWORD", "")
     if not (user and password):
-        pytest.skip("KC_ADMIN_USER/KC_ADMIN_PASSWORD unset; realm-import test skipped")
+        pytest.skip(
+            "no master credentials (KC_ADMIN_USER/PASSWORD or KEYCLOAK_ADMIN_USER/PASSWORD); "
+            "realm-import test skipped"
+        )
 
     base = get_settings().keycloak.server_url.rstrip("/")
     payload: dict[str, Any] = json.loads(REALM_FILE.read_text(encoding="utf-8"))
@@ -405,9 +418,7 @@ async def test_realm_artifact_imports_and_works() -> None:
             # R-28's ROPC-only stance and R-63(2)'s separation, as Keycloak holds them rather
             # than as the artifact spells them.
             backend_applied = (
-                await http.get(
-                    f"{base}/admin/realms/{realm}/clients/{client['id']}", headers=adm
-                )
+                await http.get(f"{base}/admin/realms/{realm}/clients/{client['id']}", headers=adm)
             ).json()
             assert backend_applied["standardFlowEnabled"] is False, (
                 "corpus-backend must keep the browser flow disabled (R-28)"
@@ -415,9 +426,7 @@ async def test_realm_artifact_imports_and_works() -> None:
             assert backend_applied["directAccessGrantsEnabled"] is True, "ROPC login (R-28)"
 
             linking_applied = (
-                await http.get(
-                    f"{base}/admin/realms/{realm}/clients/{linking['id']}", headers=adm
-                )
+                await http.get(f"{base}/admin/realms/{realm}/clients/{linking['id']}", headers=adm)
             ).json()
             assert linking_applied["standardFlowEnabled"] is True, "the linking redirect (R-63(2))"
             assert linking_applied["directAccessGrantsEnabled"] is False, (

@@ -1,0 +1,53 @@
+/* FR-MSG-08 — a Rev 0.5 addition with no prototype precedent, so the spec's own words are the
+   baseline: "a low-emphasis action row … using the existing icon-button styling (--muted default
+   → --accent on hover)". Sizing follows the sidebar's icon buttons. */
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 2px;
+}
+
+/* The hover/focus REVEAL is not here: it needs the AI row as its hover target, and a CSS Module
+   cannot select another module's hashed class. It lives on `.actions` in
+   `AiMessage.module.css`, which owns both elements. */
+
+.action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  border-radius: var(--radius-btn);
+  padding: 3px 7px;
+  cursor: pointer;
+  color: var(--muted);
+  /* A <button> inherits no font property (T-503). The row is metadata-sized, matching the
+     FR-MSG-04 source line above it. */
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  transition: color var(--motion-fast) ease;
+}
+
+.action:hover:not(:disabled) {
+  color: var(--accent);
+  background: var(--panel2);
+}
+
+.action:disabled {
+  cursor: default;
+  /* Deliberately NOT a lower opacity on the emoji glyphs: the row is already at low emphasis,
+     and the disabled state is carried by the native `disabled` attribute, which assistive
+     technology reports. Colour alone would be the sole carrier (NFR-A11Y-06). */
+  color: var(--muted2);
+}
+
+/* FR-MSG-08's "toggles" — the active thumb. `aria-pressed` carries the same fact for anyone
+   not seeing the colour, which is why the selector keys on it rather than on a class. */
+.action[aria-pressed='true'] {
+  color: var(--accent);
+}

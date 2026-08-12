@@ -4,7 +4,7 @@
  * Renders into T-502's `chat` slot as the first of `<main>`'s three flex children; T-505's
  * message list and T-506's composer follow it.
  *
- * Presentational, following T-503: the title arrives as a prop and T-509 owns wiring it to the
+ * Presentational, following T-503: the title arrives as a prop and T-513 owns wiring it to the
  * conversations API. The single exception is `ThemeToggle`, which reads `useTheme()` directly
  * because R-58(5) forbids threading theme through the shell.
  */

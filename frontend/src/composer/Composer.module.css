@@ -1,0 +1,129 @@
+/* FR-CMP-01/06 — the composer's box, the input bar and the footer line.
+
+   Transcribed per property from the prototype's inline styles (`RAG Chatbot.dc.html` lines
+   137, 151-157). The third of <main>'s flex children (T-504's header and T-505's list are the
+   first two); the column direction is T-502's, everything here is this element's own. */
+
+/* `position: relative` is what FR-CMP-04's popover is absolutely positioned against — T-502's
+   AppShell records that the mention menu is deliberately not in the overlays slot for exactly
+   this reason. Dropping it would reparent the menu to the viewport. */
+.composer {
+  padding: 14px 30px 18px;
+  position: relative;
+}
+
+/* FR-CMP-01 — "flex row (--panel background, border — accent when focused, radius 12)".
+
+   `:focus-within`, not `:focus`: the prototype writes `style-focus` on the *bar*, which is a
+   <div> that can never receive focus — its intent is plainly "when the input inside is
+   focused", and `:focus-within` is the only selector that expresses it. */
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pop);
+  padding: 8px 10px;
+}
+
+.bar:focus-within {
+  border-color: var(--accent);
+}
+
+/* The `@` and `+` icon buttons. Both are 30px squares in the prototype; only the font differs,
+   so the shared box lives here and the two rules below carry just their own type.
+
+   `font-family: inherit` is deliberate even though `.at` overrides it: a <button> inherits
+   neither font nor colour (T-503's recorded finding), so without it the `+` glyph would render
+   in the UA's default button font. */
+.iconButton {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-btn);
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-family: inherit;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.iconButton:hover {
+  background: var(--panel2);
+  color: var(--accent);
+}
+
+/* FR-CMP-02's `@` — mono 15px/600 in the prototype. */
+.at {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+/* FR-CMP-02's `+` — 17px, and no weight declared in the prototype. */
+.add {
+  font-size: 17px;
+}
+
+/* FR-CMP-01 — "borderless text input". `outline: none` is the prototype's and is the one place
+   it is permitted: the focus indicator is not removed but *relocated* to the bar's accent
+   border via `:focus-within` above, which is a visible focus indicator for the same control.
+   NFR-A11Y-02's prohibition is on leaving a control with no indicator, not on this pattern. */
+.input {
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13.5px;
+  padding: 6px 4px;
+  /* `min-width: 0` is not in the prototype and is required here: a flex <input> carries an
+     intrinsic default size (~20 characters) as its automatic minimum, so a narrow viewport
+     would push the Send button out of the bar rather than shrink the field. */
+  min-width: 0;
+}
+
+.input::placeholder {
+  color: var(--muted2);
+}
+
+/* FR-CMP-01 — the accent Send button. `#fff` is the prototype's literal, not a token: it is
+   white-on-accent in both themes, which NFR-A11Y-06 enumerates as an accepted contrast
+   exception (3.17:1 in dark) rather than something to fix here. */
+.send {
+  padding: 7px 16px;
+  border-radius: var(--radius-btn);
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.send:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+/* Not in the prototype, which has no disabled state because its send is never guarded. FR-CMP-03
+   ignores an empty or pending send and FR-STA-04 blocks an over-budget one, and a button that
+   silently does nothing is worse than one that says it will. `cursor: default` rather than
+   `not-allowed`: the guard is a transient condition the user resolves by typing, not a
+   permanent prohibition. */
+.send:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* FR-CMP-06 — "mono 11px --muted2". The prototype's `padding-left: 2px` aligns it with the
+   input's text rather than the bar's border. */
+.footer {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--muted2);
+  padding-left: 2px;
+}

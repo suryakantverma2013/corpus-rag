@@ -1,0 +1,89 @@
+/* FR-CIT-03 — transcribed per property from `RAG Chatbot.dc.html` lines 231–239.
+   One of the `<sc-if>` regions the prototype never paints (R-66), so these declarations are the
+   whole baseline: there is no rendered reference to compare against, only the source. */
+
+.card {
+  position: fixed;
+  /* `left`/`top` are supplied inline by the component — computed geometry, not styling. */
+
+  /* The prototype writes this lift as `transform: translateY(calc(-100% - 10px))` *and* applies
+     `fadeUp` to the same element — and the two conflict, because an animation that sets
+     `transform` REPLACES the element's own for as long as it runs. Measured headed: the card
+     appeared at the chip's own top, 146px below where it belongs, and (fill-mode `none`) snapped
+     up when the 150ms animation ended. The prototype has the same defect and could never show
+     it, since it does not render (R-66).
+
+     `translate` is the independent transform property: it composes with an animated `transform`
+     instead of being overwritten by it, so the lift holds for the whole entrance. Supported
+     across the whole pinned BROWSER_TARGET (Chrome 104+, Firefox 72+, Safari 14.1+). The
+     rendered result is what the prototype's declarations *intend*; only the property differs. */
+  translate: 0 calc(-100% - 10px);
+  /* Must equal CARD_WIDTH in `CitationHoverProvider.tsx`, whose clamp is this + 20. The CSS
+     guard parses both and asserts they agree, because the clamp silently stops working if one
+     of them moves. */
+  width: 330px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pop);
+  box-shadow: var(--shadow);
+  padding: 14px 16px;
+  z-index: var(--z-hovercard);
+  /* FR-CIT-02: the card is non-interactive. It also means a mouse user cannot select the
+     quote — a real cost, accepted because the requirement is explicit, and because a hoverable
+     card would need an intent delay and a hover bridge to be usable at all. */
+  pointer-events: none;
+  /* The `fadeUp` reference lives on the global `.animate-fade-up` utility in tokens.css:
+     CSS Modules rewrites `animation-name` even for a keyframe it does not declare, so
+     writing it here compiles to a hashed name that matches nothing and never runs. */
+  --fade-up-duration: var(--motion-fast);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mark {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: var(--accent);
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.doc {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.locator {
+  /* FR-CIT-03's "right-aligned". */
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--muted2);
+  flex-shrink: 0;
+}
+
+.quote {
+  margin-top: 9px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--muted);
+  border-left: 2px solid var(--accent);
+  padding-left: 11px;
+  /* A retrieved passage can be long and can contain a very long token; the card's width is
+     fixed, so the overflow has to break rather than widen it. */
+  overflow-wrap: anywhere;
+}
+
+.footer {
+  margin-top: 9px;
+  font-size: 10.5px;
+  color: var(--muted2);
+}

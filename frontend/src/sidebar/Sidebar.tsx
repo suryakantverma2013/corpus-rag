@@ -6,7 +6,7 @@
  * element's declarations across two stylesheets would need a wrapper the prototype does not
  * have. Everything below is the column's contents, which the prototype pads block by block.
  *
- * Presentational: every mutation is a prop. T-509 owns wiring these to the conversations API
+ * Presentational: every mutation is a prop. T-513 owns wiring these to the conversations API
  * ("then wire generated TS client + SSE into all views"), so nothing here fetches.
  */
 import styles from './Sidebar.module.css';
