@@ -76,8 +76,20 @@ export function citationsOf(segments: readonly Segment[]): CitationSegment[] {
 export function sourceLine(citations: readonly CitationSegment[]): string | null {
   if (citations.length === 0) return null;
   const documents = [...new Set(citations.map((c) => c.doc))];
-  const passages = `${citations.length} passage${citations.length === 1 ? '' : 's'}`;
-  return `grounded in ${passages} · ${documents.join(' · ')}`;
+  return `grounded in ${passageCount(citations.length)} · ${documents.join(' · ')}`;
+}
+
+/**
+ * `1 passage` / `2 passages` — FR-MSG-04(2)'s source line and FR-ANL-05's source card.
+ *
+ * Extracted for the second caller rather than copied. FR-ANL-05 writes the count as `{N} passages`
+ * with no singular case, but the requirement one section away is explicit that "passage is
+ * singular when exactly one citation exists" — and a chat citing one document once is the common
+ * case, not a corner, so the literal reading renders `1 passages` on the stats panel while the
+ * message above it says `1 passage`. One rule, one copy.
+ */
+export function passageCount(passages: number): string {
+  return `${passages} passage${passages === 1 ? '' : 's'}`;
 }
 
 /**
@@ -119,10 +131,31 @@ export function citationFooter(citation: CitationSegment): string {
   // 90 scored passages and found no non-zero second decimal at any scale — the granularity
   // belongs to the model, not to `RERANK_SCORE_SCALE` — so this renders `0.90`, never `0.91`.
   // Kept deliberately: the trailing zero is not a false claim, two decimals is the
-  // prototype's form (NFR-VIS-01), and dropping a digit here while the eval chips beside it
-  // keep two would pre-empt OI-35, which T-507 owns.
+  // prototype's form (NFR-VIS-01), and dropping a digit here would split from the eval chips
+  // beside it — which **R-70 has since settled at two decimals as well** (Rev 0.37, §8.57),
+  // ruling them indicative rather than exact. So the two surfaces agree, for two different
+  // reasons that R-69(2)/R-69(3) were careful to keep apart: this number *lacks* the resolution
+  // it shows, while a judge score has hundredths that cannot be trusted to them.
   return `${FOOTER_PREFIX} · retrieval score ${score.toFixed(2)}`;
 }
+
+/**
+ * The native tooltip on every rendered DeepEval score — FR-EVL-02's chip and FR-ANL-04's rows.
+ *
+ * **One constant for both surfaces, by R-70.** FR-EVL-02 originally named the tooltip
+ * `DeepEval metric`; the qualification is the ruling that closed OI-35, which measured two
+ * frontier judges disagreeing by ≥0.25 on 22% of scores — both of them scoring answers that are
+ * *verbatim restatements of the passage they cite* at 0.50. So the second decimal is real output
+ * and is not a measurement, and the honest fix is to say so rather than to drop the digit: the
+ * numeral is in the pixel-perfect prototype (NFR-VIS-01), it is what stops colour being the sole
+ * carrier of the FR-EVL-03 band (NFR-A11Y-06), and one decimal would be no more *trustworthy*,
+ * only less precise. A `title` is invisible until hover, so this costs no pixels.
+ *
+ * It lives here rather than beside either surface because R-69(3) required both to be settled
+ * together, and two copies is how they stop agreeing.
+ */
+export const EVAL_SCORE_TOOLTIP =
+  'DeepEval metric — indicative judge score, not an exact measurement';
 
 export type EvalBand = 'good' | 'warn' | 'bad';
 

@@ -1,0 +1,242 @@
+/* FR-ANL-01..05 — transcribed per property from `RAG Chatbot.dc.html` lines 161–226.
+
+   Read as source, never rendered: the whole column sits inside `<sc-if value="{{ showStats }}">`
+   and the handoff never shipped `support.js`, so under R-66 none of this has ever painted
+   anywhere. The declarations are complete; the geometry is verified headed, per property.
+
+   The panel's own box — width, left border, `--panel` background, 18px padding, 14px gap,
+   `overflow-y` — belongs to `AppShell.module.css`'s `.stats` and is deliberately NOT restated
+   here (see `AppShellProps.stats`). Restating it would double the padding and re-scroll the
+   column inside itself. */
+
+/* ── Labels ────────────────────────────────────────────────────────────────
+   Two classes, because the prototype has two: the group labels carry
+   `letter-spacing: .12em` and the card labels do not. Merging them is the easy fidelity
+   mistake, so the guard asserts the absence as well as the presence.
+
+   `margin: 0` on both undoes the UA heading margins — these are `<h2>`/`<h3>` for
+   NFR-A11Y-03's outline where the prototype had bare `<div>`s. */
+
+.sectionLabel {
+  margin: 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  color: var(--muted2);
+}
+
+.cardLabel {
+  margin: 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--muted2);
+}
+
+/* ── The shared card box ───────────────────────────────────────────────────
+   Padding is deliberately NOT here. Three surfaces use this box at three different paddings,
+   and `.card` + `.sessionCard` are both single-class selectors — so a `padding` on both would
+   be a specificity tie broken by stylesheet order, which is exactly the defect T-505 found in
+   the typing avatar. Each usage class owns its own padding and there is no tie to lose. */
+
+.card {
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+}
+
+/* ── FR-ANL-01 — SESSION ───────────────────────────────────────────────── */
+
+.sessionGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.sessionCard {
+  padding: 10px 12px;
+}
+
+.statValue {
+  margin-top: 4px;
+  font-size: 16px;
+}
+
+/* ── FR-ANL-02/03/04 — the three full-width cards ──────────────────────── */
+
+.panelCard {
+  padding: 12px;
+}
+
+.cardHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+/* FR-ANL-02 */
+.modelId {
+  margin-top: 5px;
+  font-size: 12.5px;
+}
+
+.modelCaption {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* FR-ANL-03 */
+.tokens {
+  font-size: 11px;
+  color: var(--accent);
+}
+
+.track {
+  margin-top: 10px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width var(--motion-bar) ease;
+}
+
+.caption {
+  margin-top: 7px;
+  font-size: 11px;
+  color: var(--muted2);
+}
+
+/* FR-ANL-04 */
+.overall {
+  font-size: 11px;
+  color: var(--accent);
+}
+
+.evalEmpty {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--muted2);
+}
+
+.metrics {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.metricHead {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+
+.metricLabel {
+  color: var(--muted);
+}
+
+.score {
+  color: var(--text);
+}
+
+/* A state the prototype never renders: its sample data scores all four metrics, while R-52(1)
+   makes Ctx Precision and Ctx Recall permanently em-dashed. At full `--text` strength the dash
+   reads as a value; `--muted2` is the same token the card labels already use on this surface,
+   so it introduces no new NFR-A11Y-06 colour pair. */
+.scoreAbsent {
+  color: var(--muted2);
+}
+
+.metricTrack {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.metricFill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width var(--motion-bar) ease;
+}
+
+/* FR-EVL-03's theme-independent bands, as `EvalChips.module.css` applies them to the chip dots. */
+.metricFillGood {
+  background: var(--eval-good);
+}
+.metricFillWarn {
+  background: var(--eval-warn);
+}
+.metricFillBad {
+  background: var(--eval-bad);
+}
+
+/* ── FR-ANL-05 — SOURCES REFERENCED ────────────────────────────────────────
+   A bare flex column, not a card — only the per-document rows are cards. */
+
+.sources {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sourcesEmpty {
+  padding: 4px 2px;
+  font-size: 12px;
+  color: var(--muted2);
+}
+
+/* A <ul> where the prototype had bare <div>s (NFR-A11Y-03), so the UA's markers and 40px of
+   inline padding have to go — the MentionMenu precedent. The 8px rhythm is `.sources`' gap. */
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sourceRow {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 11px;
+}
+
+.badge {
+  width: 32px;
+  flex-shrink: 0;
+  padding: 2px 5px;
+  border-radius: var(--radius-chip);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 9.5px;
+  text-align: center;
+}
+
+/* Zeroes the flex automatic minimum size. Without it a long filename widens the row instead of
+   ellipsising, and the row pushes out of the 272px column. */
+.sourceBody {
+  min-width: 0;
+}
+
+.sourceName {
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sourceHits {
+  font-size: 10.5px;
+  color: var(--muted2);
+}

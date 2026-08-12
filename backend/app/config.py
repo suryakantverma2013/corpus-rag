@@ -460,7 +460,12 @@ class OpenAISettings(BaseSettings):
     # a realistic 8-passage grounding set, where this model scores it 1.00 — and FR-EVL-02
     # renders that number to a user. Across the band the swap corrects six chips and regresses
     # two, so it is better on balance and **not an oracle**: this model also scored two
-    # verbatim-grounded answers 0.50. That residual imprecision is OI-35, not a model choice.
+    # verbatim-grounded answers 0.50. That residual imprecision was OI-35, and **R-70 closed it
+    # on the display side, not here** (Rev 0.37, §8.57): the two decimals FR-EVL-02 and FR-ANL-04
+    # render stay, ruled *indicative rather than exact* and said so in the tooltip. Which is the
+    # standing instruction for this line — **the imprecision is not a model choice, so do not
+    # try to fix it by changing this value.** That lever was measured in Rev 0.20.1 and is the
+    # wrong one.
     judge_model: str = Field(default="gpt-4o")
     # The T-314 escalation judge: a second, stronger model re-scores the minority of chips
     # that come back below `EVAL_ESCALATE_BELOW`. Sized by measurement, not preference — on
@@ -809,7 +814,12 @@ class RerankSettings(BaseSettings):
     #: The resolution was never this knob's to grant: the scale is a rubric bound in a prompt
     #: and the output's granularity belongs to the model, which reasons in tenths whatever
     #: range it is handed. Raising it would render the identical set of strings while
-    #: advertising precision the judge does not have — which is the defect OI-35 names.
+    #: advertising precision the judge does not have — which is the defect OI-35 named, and
+    #: which R-70 has since settled for the DeepEval scores by keeping the digits and ruling
+    #: them *indicative* (Rev 0.37, §8.57). **That ruling does not transfer here**: these two
+    #: were deliberately separated by R-69(2)/R-69(3) as opposite defects — a rerank score
+    #: *lacks* the resolution it displays, while a judge score has hundredths that cannot be
+    #: trusted. Raising this knob would still buy nothing measurable.
     #:
     #: **Revisit trigger:** a rerank model whose returned scores are measurably not quantised
     #: to tenths. Re-run the probe; do not re-argue the arithmetic. Nothing thresholds on this

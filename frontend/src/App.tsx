@@ -23,6 +23,8 @@ import { SAMPLE_TRANSCRIPTS, asked, regenerated } from './chat/sampleTranscripts
 import type { SampleChat } from './chat/sampleTranscripts';
 import { Composer } from './composer/Composer';
 import type { MentionDocument } from './composer/mentions';
+import { StatsPanel } from './stats/StatsPanel';
+import { modelNameOf } from './stats/stats';
 import { displayTitle, nextActiveId, UNTITLED_CONVERSATION } from './sidebar/conversations';
 import type { SidebarConversation } from './sidebar/conversations';
 import type { Feedback, Message } from './api';
@@ -87,6 +89,18 @@ const ROOMY_USAGE = { used: 240, limit: 10_400, reserve: 1_500 };
 const FULL_USAGE = { used: 8_900, limit: 10_400, reserve: 1_500 };
 
 /**
+ * FR-ANL-02 / FR-SYS-03 — the configured chat model, standing in for the API until T-513.
+ *
+ * **No route carries it.** `MeResponse` has no model field and the only model string on the wire
+ * is `MessageResponse.model_name`, which is per answer — so a chat with no AI turn yet has
+ * nothing to read. This is the backend default (`OpenAISettings.chat_model`), and the seeded
+ * answers in `sampleTranscripts.ts` carry the same id, which is why the card does not change when
+ * the user opens a conversation that has been answered. Flagged for T-513 alongside
+ * `answer_reserve_tokens`.
+ */
+const SAMPLE_MODEL_NAME = 'gpt-4o';
+
+/**
  * Replace one AI message wherever it lives, leaving every other conversation untouched.
  *
  * Keyed on the message rather than the conversation because both routes address a message id and
@@ -147,6 +161,14 @@ function App({ accent, brandName = DEFAULT_BRAND_NAME, showStats = true }: AppPr
   const [activeId, setActiveId] = useState<string | null>(SAMPLE_CONVERSATIONS[0]?.id ?? null);
   const [transcripts, setTranscripts] = useState<Record<string, SampleChat>>(SAMPLE_TRANSCRIPTS);
   const nextId = useRef(0);
+  /**
+   * FR-CST-01's session `startTime`, driving FR-ANL-01's DURATION.
+   *
+   * Owned here rather than in `StatsPanel` because FR-LAY-02's `showStats={false}` **unmounts**
+   * the panel, so a panel-owned start would restart the clock whenever the column was hidden and
+   * shown again. R-14 scopes the duration to the session; only a reload begins a new one.
+   */
+  const [sessionStartedAt] = useState(() => Date.now());
 
   /**
    * `POST /api/v1/messages/{id}/feedback` with `{"feedback": "up" | "down" | null}` — the key is
@@ -225,6 +247,10 @@ function App({ accent, brandName = DEFAULT_BRAND_NAME, showStats = true }: AppPr
   // A chat with no seeded transcript — every FR-SBR-02 New chat — shows the empty state.
   const chat = (activeId === null ? undefined : transcripts[activeId]) ?? EMPTY_CHAT;
 
+  // ONE expression, two consumers: the FR-ANL-03 meter and the composer's FR-STA-04 projection
+  // read the same numbers, so the panel cannot say a chat has room while the composer refuses it.
+  const usage = chat.frozen ? FULL_USAGE : ROOMY_USAGE;
+
   return (
     <ThemeProvider accent={accent}>
       {/* Outside AppShell so it is an ancestor of BOTH the `chat` slot (where the chips are) and
@@ -234,6 +260,14 @@ function App({ accent, brandName = DEFAULT_BRAND_NAME, showStats = true }: AppPr
           brandName={brandName}
           showStats={showStats}
           overlays={<CitationCard />}
+          stats={
+            <StatsPanel
+              sessionStartedAt={sessionStartedAt}
+              entries={chat.entries}
+              usage={usage}
+              modelName={modelNameOf(chat.entries) ?? SAMPLE_MODEL_NAME}
+            />
+          }
           chat={
             <>
               <ChatHeader
@@ -251,7 +285,7 @@ function App({ accent, brandName = DEFAULT_BRAND_NAME, showStats = true }: AppPr
               <Composer
                 documents={SAMPLE_DOCUMENTS}
                 pending={chat.typing}
-                usage={chat.frozen ? FULL_USAGE : ROOMY_USAGE}
+                usage={usage}
                 documentCount={SAMPLE_DOCUMENTS.length}
                 onSend={onSend}
                 onOpenKnowledgeBase={() => {

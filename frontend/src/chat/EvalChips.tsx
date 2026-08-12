@@ -10,13 +10,14 @@
  * palette's contrast failures — all three FR-EVL-03 hues fail as text in the light theme — on the
  * condition that colour is never the sole carrier of information. Dropping the number to leave a
  * coloured dot would break that condition.
+ *
+ * The two decimals stay, and R-70 rules them **indicative rather than exact** — the qualification
+ * rides the native tooltip (`EVAL_SCORE_TOOLTIP`), which the FR-ANL-04 session-average rows share
+ * so the two surfaces cannot say different things about the same number.
  */
 import styles from './EvalChips.module.css';
-import { evalChips } from './messages';
+import { EVAL_SCORE_TOOLTIP, evalChips } from './messages';
 import type { Evaluation } from '../api';
-
-/** §9's literal, and normative: FR-EVL-02 names the native tooltip explicitly. */
-const CHIP_TOOLTIP = 'DeepEval metric';
 
 export interface EvalChipsProps {
   evaluation: Evaluation | null | undefined;
@@ -32,7 +33,7 @@ export function EvalChips({ evaluation }: EvalChipsProps) {
   return (
     <div className={styles.row}>
       {chips.map((chip) => (
-        <span key={chip.key} className={`${styles.chip} mono`} title={CHIP_TOOLTIP}>
+        <span key={chip.key} className={`${styles.chip} mono`} title={EVAL_SCORE_TOOLTIP}>
           {/* `data-band` rather than a class name for the test seam: Vitest stubs CSS Modules
               with a Proxy answering ANY key with a truthy string, so asserting on
               `styles.dotGood` would pass against a typo. The class still carries the colour. */}

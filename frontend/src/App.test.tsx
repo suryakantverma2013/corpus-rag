@@ -4,8 +4,8 @@
  * `AppShell.test.tsx` proves the shell in isolation; this proves that the FR-SYS-04 defaults
  * resolve here, and that the shell is mounted *inside* `ThemeProvider` as R-58(5) requires.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import App from './App';
 
 const root = () => document.documentElement;
@@ -86,6 +86,74 @@ describe('FR-HDR-01 — the header follows the active conversation', () => {
     for (let i = 0; i < 50 && deleteFirstConversation(); i += 1);
     expect(screen.queryAllByRole('button', { name: /^Actions for / })).toHaveLength(0);
     expect(headerTitle().textContent).toBe('New chat');
+  });
+});
+
+describe('§4.6 stats panel wiring (T-507)', () => {
+  const stats = () => screen.getByRole('complementary', { name: 'Session statistics' });
+
+  it('fills the FR-LAY-01 third region rather than leaving it empty', () => {
+    render(<App />);
+    expect(within(stats()).getByRole('heading', { name: 'SESSION' })).not.toBeNull();
+    expect(within(stats()).getByRole('heading', { name: 'SOURCES REFERENCED' })).not.toBeNull();
+  });
+
+  it('reads the same usage the composer projects FR-STA-04 against', () => {
+    // Two consumers, one object in App. If they ever drift apart the panel will tell a user a
+    // conversation has room while the composer refuses their message — the OI-31 shape, one
+    // surface over. `Vendor Security Review` is the seeded frozen chat.
+    render(<App />);
+    expect(within(stats()).getByText('0.2K / 10.4K')).not.toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Vendor Security Review/ }));
+    expect(within(stats()).getByText('8.9K / 10.4K')).not.toBeNull();
+    expect(within(stats()).getByText('86% used · 2K tokens remaining')).not.toBeNull();
+    // …and the composer must be refusing at the same moment. Asserting the meter alone passes
+    // against a composer still reading the roomy seed, which is precisely the disagreement
+    // hoisting `usage` into one expression exists to make impossible.
+    //
+    // A draft has to be typed first: `sendBlock` returns `empty` before it ever considers the
+    // budget, so an untouched composer is disabled either way and the assertion would be
+    // vacuous — which is exactly how it read until the mutation check called the bluff.
+    const send = () => screen.getByRole('button', { name: 'Send' }) as HTMLButtonElement;
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'one more question' } });
+    expect(send().disabled).toBe(true);
+
+    fireEvent.click(screen.getByRole('button', { name: /^Analyzing Market Trends/ }));
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'one more question' } });
+    expect(send().disabled).toBe(false);
+  });
+
+  it('keeps FR-ANL-01’s duration session-scoped across a chat switch (R-14)', () => {
+    // Everything else on the panel is per active chat; the duration is not. Owning the start in
+    // App is what makes that true — and what stops FR-LAY-02's showStats toggle restarting it.
+    vi.useFakeTimers();
+    try {
+      render(<App />);
+      act(() => void vi.advanceTimersByTime(5_000));
+      fireEvent.click(screen.getByRole('button', { name: /^Product Launch Strategy/ }));
+      act(() => void vi.advanceTimersByTime(3_000));
+      expect(within(stats()).getByText('00:08')).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('derives the message count and the sources from the active chat', () => {
+    render(<App />);
+    // The seeded market-trends chat: one question, one answer citing two documents.
+    expect(within(stats()).getByText('2')).not.toBeNull();
+    expect(within(stats()).getAllByRole('listitem')).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole('button', { name: /^Customer Persona Refinement/ }));
+    expect(
+      within(stats()).getByText('None yet — answers will list their sources here.'),
+    ).not.toBeNull();
+  });
+
+  it('leaves the document with exactly one <h1> (T-502 owns it)', () => {
+    render(<App />);
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
   });
 });
 

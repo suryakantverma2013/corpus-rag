@@ -9,6 +9,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { AiMessage } from './AiMessage';
+import { EVAL_SCORE_TOOLTIP } from './messages';
 import { CitationHoverProvider } from './CitationHoverProvider';
 import type { CitationSegment, Evaluation, Feedback, Message, Segment } from '../api';
 
@@ -54,7 +55,7 @@ describe('FR-MSG-04 — the content column’s four parts, in order', () => {
     );
     const body = screen.getByText(/Growth was strong/);
     const source = screen.getByText(/^grounded in/);
-    const chip = screen.getAllByTitle('DeepEval metric')[0];
+    const chip = screen.getAllByTitle(EVAL_SCORE_TOOLTIP)[0];
     const regenerate = screen.getByRole('button', { name: 'Regenerate' });
 
     expect(precedes(body, source)).toBe(true);
@@ -69,14 +70,14 @@ describe('FR-MSG-04 — the content column’s four parts, in order', () => {
 
   it('omits the eval row until the job lands, and for ever if it never does', () => {
     show(answer([{ text: 'A plain answer.' }], { evaluation: null }));
-    expect(screen.queryByTitle('DeepEval metric')).toBeNull();
+    expect(screen.queryByTitle(EVAL_SCORE_TOOLTIP)).toBeNull();
   });
 });
 
 describe('FR-EVL-02/03 — the chip row', () => {
   it('renders one chip per metric present, never padded', () => {
     show(answer([{ text: 'x' }], { evaluation: { relevancy: 0.86, faithfulness: null } }));
-    const chips = screen.getAllByTitle('DeepEval metric');
+    const chips = screen.getAllByTitle(EVAL_SCORE_TOOLTIP);
     expect(chips).toHaveLength(1);
     expect(chips[0].textContent).toBe('Relevancy 0.86');
   });
@@ -91,7 +92,7 @@ describe('FR-EVL-02/03 — the chip row', () => {
     expect(bands).toEqual(['good', 'bad']);
     // The number is what NFR-A11Y-06's exception depends on: all three FR-EVL-03 hues fail
     // contrast as text in the light theme, so colour may not be the sole carrier.
-    expect(screen.getAllByTitle('DeepEval metric')[1].textContent).toBe('Faithfulness 0.75');
+    expect(screen.getAllByTitle(EVAL_SCORE_TOOLTIP)[1].textContent).toBe('Faithfulness 0.75');
   });
 });
 
