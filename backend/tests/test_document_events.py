@@ -29,7 +29,13 @@ from fastapi import HTTPException
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
-from app.api.documents import StreamScope, _frame, hold_stream_slot, stream_documents
+from app.api.documents import (
+    StreamScope,
+    _frame,
+    hold_stream_slot,
+    resolve_stream_scope,
+    stream_documents,
+)
 from app.config import Settings, SseSettings, get_settings
 from app.db.base import DEFAULT_TENANT_ID
 from app.db.enums import DocumentStatus, JobStatus, JobType
@@ -440,6 +446,73 @@ async def test_a_foreign_conversation_is_404(
         headers=headers,
     )
     assert response.status_code == 404
+
+
+async def test_a_chat_scope_with_no_knowledge_base_yet_streams_nothing(
+    session: AsyncSession, db_connection: AsyncConnection, make_token: Callable[..., str]
+) -> None:
+    """The stream must report exactly what `list_documents` reports for the same request.
+
+    A chat whose knowledge base does not exist yet — every conversation before its first
+    attachment — resolves to no KB id, and `knowledge_base_id=None` means *unfiltered*
+    downstream. So this streamed the caller's **entire** document set (every global document
+    and every other chat's attachments) to a client that asked for one conversation, while
+    the list route early-returns `[]` for the identical parameters. The route's own docstring
+    promises the two cannot disagree.
+    """
+    owner, _ = await _caller(session, make_token)
+    await _document(session, owner_id=owner)  # a GLOBAL document, in the caller's default KB
+    conversation = Conversation(owner_id=owner, tenant_id=DEFAULT_TENANT_ID, title="Fresh")
+    session.add(conversation)
+    await session.flush()
+    user = await UserRepository(session).get(owner)
+    assert user is not None
+
+    scope = await resolve_stream_scope(
+        user=user, session=session, scope="chat", conversation_id=conversation.id
+    )
+    assert scope.empty is True
+
+    frames = stream_documents(
+        scope_=scope,
+        _slot=None,
+        user=user,
+        sessionmaker=_factory(db_connection),  # type: ignore[arg-type]
+        settings=_fast_settings(),
+    )
+    first = await anext(frames)
+    assert first.event == "snapshot"
+    assert json.loads(first.data.model_dump_json())["data"] == []
+    await frames.aclose()
+
+
+async def test_an_unscoped_stream_is_still_unfiltered(
+    session: AsyncSession, db_connection: AsyncConnection, make_token: Callable[..., str]
+) -> None:
+    """The other half of the same distinction, so the fix cannot be "filter everything out".
+
+    T-508 consumes exactly this form — one unscoped stream, split into the two FR-KBM-03
+    sections client-side — so `empty` must stay false when no scope was asked for.
+    """
+    owner, _ = await _caller(session, make_token)
+    document = await _document(session, owner_id=owner)
+    user = await UserRepository(session).get(owner)
+    assert user is not None
+
+    scope = await resolve_stream_scope(user=user, session=session)
+    assert scope.empty is False
+
+    frames = stream_documents(
+        scope_=scope,
+        _slot=None,
+        user=user,
+        sessionmaker=_factory(db_connection),  # type: ignore[arg-type]
+        settings=_fast_settings(),
+    )
+    first = await anext(frames)
+    rows = json.loads(first.data.model_dump_json())["data"]
+    assert [row["document_id"] for row in rows] == [str(document.id)]
+    await frames.aclose()
 
 
 async def test_the_snapshot_frame_carries_the_metadata_only_dto(

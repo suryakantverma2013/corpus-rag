@@ -29,6 +29,16 @@
   --fade-up-duration: var(--motion);
 }
 
+/* The prototype's KB-modal header row: the title, and a right-aligned control pushed there by
+   its own `margin-left: auto`. `align-items: center` is what vertically centres the ~19px title
+   against the 28px ✕ button — the reason `headerAction` is a slot rather than the caller's
+   problem. Only rendered when a caller supplies one, so the confirm and change-password dialogs
+   keep a bare <h2> and their existing spacing. */
+.header {
+  display: flex;
+  align-items: center;
+}
+
 /* 16px/700, the prototype's "Knowledge base" modal heading. It is an <h2>: the document's only
    <h1> is the shell's (T-502). */
 .title {

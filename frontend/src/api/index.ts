@@ -45,6 +45,13 @@ export type DocumentEvent = Schemas['DocumentEventResponse'];
 export type DocumentFrame = Schemas['DocumentStreamFrame'];
 export type DocumentStatus = Schemas['DocumentStatus'];
 export type Job = Schemas['JobResponse'];
+export type UploadResult = Schemas['UploadResponse'];
+export type DeleteResult = Schemas['DeleteResponse'];
+export type RetryResult = Schemas['RetryResponse'];
+export type ReplaceResult = Schemas['ReplaceResponse'];
+/** `global | chat`. Taken off the DTO rather than a schema of its own: FastAPI inlines the
+ *  literal on the form and query parameters, so this field is the only named home it has. */
+export type UploadScope = Schemas['DocumentResponse']['scope'];
 
 // --- auth (§4.17, FR-AUT-*) ---
 export type Token = Schemas['TokenResponse'];
@@ -53,8 +60,10 @@ export type Me = Schemas['MeResponse'];
 // --- errors ---
 /** The ordinary `{detail: string}` body. Render `detail`; never branch on it. */
 export type ApiError = Schemas['ErrorResponse'];
-/** The two `409`s a client must branch on, keyed by `detail.error_code` (R-56(1)). */
+/** The `409`s a client must branch on, keyed by `detail.error_code` (R-56(1), R-71(1)). */
 export type ContextWindowExceeded = Schemas['ContextWindowExceededResponse'];
 export type NotLatestAnswer = Schemas['NotLatestAnswerResponse'];
+export type ProcessingLocked = Schemas['ProcessingLockedResponse'];
 
-export { api, streamFrames } from './client';
+export { api, streamFrames, StreamError, DOCUMENT_EVENTS_URL } from './client';
+export { authHeaders, currentAccessToken, setAccessToken } from './auth';

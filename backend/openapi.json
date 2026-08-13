@@ -175,18 +175,9 @@
         "tags": [
           "auth"
         ],
-        "summary": "Exchange a refresh token for a new pair",
+        "summary": "Exchange the refresh cookie for a new access token",
+        "description": "No request body: the refresh token comes from the httpOnly cookie and nowhere else\n(R-72(1)). The rotated token replaces the cookie, so an idle client's cookie lifetime\ntracks the realm's ``ssoSessionIdleTimeout`` rather than the login time.",
         "operationId": "refresh",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RefreshRequest"
-              }
-            }
-          },
-          "required": true
-        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -199,7 +190,7 @@
             }
           },
           "401": {
-            "description": "The refresh token is invalid or expired.",
+            "description": "The refresh cookie is absent, invalid or expired.",
             "content": {
               "application/json": {
                 "schema": {
@@ -227,16 +218,6 @@
                 }
               }
             }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
           }
         }
       }
@@ -246,18 +227,9 @@
         "tags": [
           "auth"
         ],
-        "summary": "Revoke a refresh token",
+        "summary": "Revoke the session and clear the refresh cookie",
+        "description": "Idempotent, and the cookie is cleared on **every** path including the ones that fail.\n\nFR-AUT-08's sign out must leave the browser signed out even when the upstream revoke\ncannot be delivered; the alternative is a user who clicked \"Sign out\", saw an error, and\nis still holding a live session cookie.",
         "operationId": "logout",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/LogoutRequest"
-              }
-            }
-          },
-          "required": true
-        },
         "responses": {
           "204": {
             "description": "Successful Response"
@@ -268,16 +240,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -1034,7 +996,14 @@
             }
           },
           "200": {
-            "description": "Duplicate checksum — not re-ingested."
+            "description": "Duplicate checksum — not re-ingested.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadResponse"
+                }
+              }
+            }
           },
           "404": {
             "description": "scope=chat naming no conversation of this caller's.",
@@ -1097,11 +1066,11 @@
             }
           },
           "409": {
-            "description": "R-24 — another file action is in flight for this caller.",
+            "description": "R-24 — a response is generating for this caller; retry when it finishes.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/ProcessingLockedResponse"
                 }
               }
             }
@@ -1336,14 +1305,21 @@
             }
           },
           "200": {
-            "description": "Duplicate checksum — not re-ingested."
+            "description": "Duplicate checksum — not re-ingested.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadResponse"
+                }
+              }
+            }
           },
           "409": {
             "description": "No cloud account is linked, the provider revoked access, or a response is generating.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CloudLinkRequiredResponse"
+                  "$ref": "#/components/schemas/ImportConflictResponse"
                 }
               }
             }
@@ -1492,7 +1468,14 @@
             }
           },
           "200": {
-            "description": "Already deleted — nothing queued."
+            "description": "Already deleted — nothing queued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResponse"
+                }
+              }
+            }
           },
           "404": {
             "description": "No such document for this caller.",
@@ -1505,11 +1488,11 @@
             }
           },
           "409": {
-            "description": "R-24 — another file action is in flight for this caller.",
+            "description": "R-24 — a response is generating for this caller; retry when it finishes.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/ProcessingLockedResponse"
                 }
               }
             }
@@ -1684,7 +1667,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/DocumentConflictResponse"
                 }
               }
             }
@@ -1930,7 +1913,14 @@
             }
           },
           "200": {
-            "description": "Identical bytes — nothing queued."
+            "description": "Identical bytes — nothing queued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplaceResponse"
+                }
+              }
+            }
           },
           "404": {
             "description": "No such document for this caller.",
@@ -2003,7 +1993,14 @@
             }
           },
           "409": {
-            "description": "Not ACTIVE/FAILED, the bytes belong to another document, or a response is generating."
+            "description": "Not ACTIVE/FAILED, the bytes belong to another document, or a response is generating.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentConflictResponse"
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -3165,7 +3162,7 @@
           "messages"
         ],
         "summary": "Rate an answer",
-        "description": "FR-MSG-08's 👍/👎, and FR-MSG-06's third state, the clear (T-403, R-55).\n\nAddressed by **message id**, not through its conversation, because FR-MSG-08 spells the\npath that way and the action bar has only the message. Ownership is therefore a join and\nit lives in the query (`MessageRepository.get_owned`) — R-54: a message in someone else's\nchat is `404`, never `403`, for an administrator exactly as for anyone else.\n\n**One status and one string cover all three ways this can fail.** A message that does not\nexist, one in a foreign chat, and one whose role is `user` are indistinguishable in the\nresponse on purpose: distinguishing them would make the route a probe for which ids exist\n(NFR-SEC-02). The wrong-role case is a `404` rather than the `409` this surface uses for\n`NotRetryableError` / `NotReplaceableError` — those answer a request a *correct* client\ncould make against state that moved under it, whereas FR-MSG-04 puts the action bar beneath\nAI answers only, so no correct client produces this one. It is also already the answer\nR-54(3) gives an errored turn: nothing was persisted, so there is nothing to rate.\n\n**Not gated by the R-24 processing lock**, although FR-MSG-08 names it. R-43(4) enforces\nthat gate at exactly R-24's four *file* verbs and states read routes are never gated; this\nis a write, but on a row a finished turn already committed and served. The in-flight answer\nhas no row yet, so it can never be this route's target — and because the lock is keyed on\nthe caller, gating would refuse feedback on one message because a *different* one is\ngenerating, which is not the requirement's clause but a bug. FR-MSG-08's \"disabled while\ngenerating\" is discharged as the GUI affordance OI-31 already governs, which also leaves\nOI-31's unpredicted-`409` gap unmanufactured.\n\nIdempotent: the same value twice is a `200`. The column is state, not an event log.\n\nTouches `messages.feedback` and nothing else — in particular never `evaluation`, which is\nDeepEval's alone (R-49(1), OI-34 as R-50(6) closed it). A human thumb is not a judge score,\nand the FR-EVL-02 chip must not move because someone disagreed with it.",
+        "description": "FR-MSG-08's 👍/👎, and FR-MSG-06's third state, the clear (T-403, R-55).\n\nAddressed by **message id**, not through its conversation, because FR-MSG-08 spells the\npath that way and the action bar has only the message. Ownership is therefore a join and\nit lives in the query (`MessageRepository.get_owned`) — R-54: a message in someone else's\nchat is `404`, never `403`, for an administrator exactly as for anyone else.\n\n**One status and one string cover all three ways this can fail.** A message that does not\nexist, one in a foreign chat, and one whose role is `user` are indistinguishable in the\nresponse on purpose: distinguishing them would make the route a probe for which ids exist\n(NFR-SEC-02). The wrong-role case is a `404` rather than the `409` this surface uses for\n`NotRetryableError` / `NotReplaceableError` — those answer a request a *correct* client\ncould make against state that moved under it, whereas FR-MSG-04 puts the action bar beneath\nAI answers only, so no correct client produces this one. It is also already the answer\nR-54(3) gives an errored turn: nothing was persisted, so there is nothing to rate.\n\n**Not gated by the R-24 processing lock**, although FR-MSG-08 names it. R-43(4) enforces\nthat gate at exactly R-24's four *file* verbs and states read routes are never gated; this\nis a write, but on a row a finished turn already committed and served. The in-flight answer\nhas no row yet, so it can never be this route's target — and because the lock is keyed on\nthe caller, gating would refuse feedback on one message because a *different* one is\ngenerating, which is not the requirement's clause but a bug. FR-MSG-08's \"disabled while\ngenerating\" is discharged as the GUI affordance R-71(1) governs (OI-31, now resolved): the\nclient-side in-flight signal disables the control, and the `409` this route deliberately does\nnot raise is one the client would then have to reconcile for nothing.\n\nIdempotent: the same value twice is a `200`. The column is state, not an event log.\n\nTouches `messages.feedback` and nothing else — in particular never `evaluation`, which is\nDeepEval's alone (R-49(1), OI-34 as R-50(6) closed it). A human thumb is not a judge score,\nand the FR-EVL-02 chip must not move because someone disagreed with it.",
         "operationId": "set_feedback",
         "security": [
           {
@@ -4070,6 +4067,16 @@
         "title": "DocumentChangedFrame",
         "description": "One row whose state changed.\n\nEmitted from **polling**, so it samples state rather than replaying every transition: a fast\ningestion was measured going `QUEUED → INDEXING → ACTIVE` inside one interval (T-210). A\nclient must render whatever arrives and never assume it will see each FR-ING-01 stage."
       },
+      "DocumentConflictResponse": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/ProcessingLockedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/ErrorResponse"
+          }
+        ]
+      },
       "DocumentEventResponse": {
         "properties": {
           "document_id": {
@@ -4475,7 +4482,7 @@
           "deleted_at"
         ],
         "title": "DocumentResponse",
-        "description": "One document, for both the list and the single-document read (R-40(5)).\n\n**Metadata only.** R-31(4) names T-209 as a likely route to a download/export/preview\nsurface, which would make Corpus a file-distribution vector and turn the malware\nscanner from optional into required — so `storage_uri` is deliberately absent and no\nfield on this model carries or points at bytes. `checksum_sha256` is absent too: no\nrequirement asks for it, and the duplicate story is already told by the upload and\nreplace responses. No chunk id appears anywhere either (R-36(6)(b)): a replaced\ndocument's historical chunk ids dangle by design, and nothing here may become a way to\nresolve one.\n\n**`current_version` is the version serving retrieval, not the version being built.**\nWhile a replace is in flight `latest_job_document_version` is `current_version + 1`,\nand that inequality is the only signal distinguishing \"this document failed and is\nsilent\" from \"this document's replace failed and the previous version still answers\"\n(OI-29). The job's own status and progress are deliberately not denormalised here —\n`GET /jobs/{id}` owns them, and a surface rendering two statuses read at two different\nmoments will eventually render them disagreeing."
+        "description": "One document, for both the list and the single-document read (R-40(5)).\n\n**Metadata only.** R-31(4) names T-209 as a likely route to a download/export/preview\nsurface, which would make Corpus a file-distribution vector and turn the malware\nscanner from optional into required — so `storage_uri` is deliberately absent and no\nfield on this model carries or points at bytes. `checksum_sha256` is absent too: no\nrequirement asks for it, and the duplicate story is already told by the upload and\nreplace responses. No chunk id appears anywhere either (R-36(6)(b)): a replaced\ndocument's historical chunk ids dangle by design, and nothing here may become a way to\nresolve one.\n\n**`current_version` is the version serving retrieval, not the version being built.**\nWhile a replace is in flight `latest_job_document_version` is `current_version + 1`,\nand that inequality is the only signal distinguishing \"this document failed and is\nsilent\" from \"this document's replace failed and the previous version still answers\".\nR-71(2) settles what the GUI does with it (OI-29, resolved): the row keeps `Failed` and\nits Retry affordance, and the FR-KBM-04 meta line reads\n`update failed, v{current_version} still answering`. The job's own status and progress\nare deliberately not denormalised here —\n`GET /jobs/{id}` owns them, and a surface rendering two statuses read at two different\nmoments will eventually render them disagreeing."
       },
       "DocumentSnapshotFrame": {
         "properties": {
@@ -4718,6 +4725,16 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
+      "ImportConflictResponse": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/ProcessingLockedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/CloudLinkRequiredResponse"
+          }
+        ]
+      },
       "ImportRequest": {
         "properties": {
           "provider": {
@@ -4957,20 +4974,6 @@
         ],
         "title": "LoginRequest"
       },
-      "LogoutRequest": {
-        "properties": {
-          "refresh_token": {
-            "type": "string",
-            "minLength": 1,
-            "title": "Refresh Token"
-          }
-        },
-        "type": "object",
-        "required": [
-          "refresh_token"
-        ],
-        "title": "LogoutRequest"
-      },
       "MeResponse": {
         "properties": {
           "id": {
@@ -5197,6 +5200,39 @@
         "title": "NotLatestAnswerResponse",
         "description": "The wire body for R-56(1)'s refusal."
       },
+      "ProcessingLockedDetail": {
+        "properties": {
+          "error_code": {
+            "type": "string",
+            "const": "PROCESSING_LOCKED",
+            "title": "Error Code"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "error_code",
+          "message"
+        ],
+        "title": "ProcessingLockedDetail",
+        "description": "R-24 / R-43(4)'s gate on the four file verbs, with a code the client can branch on.\n\n**Why a code and not just copy (R-71(1), OI-31).** These four routes answer `409` for more\nthan one reason — `NotRetryableError`, `NotReplaceableError` and `DuplicateChecksumError`\nlive on the same status — and R-71(1) makes the GUI *reconcile* an unpredicted lock `409`\nrather than render it as an error: it disables its own affordances and clears them when the\nturn ends. That reconciliation has to know which `409` arrived, and the only alternative is\nmatching on a `# TBD(§8.4)` string, which R-57(4) forbids in as many words. Three of the\nfour cases are derivable from the route and the row's state; **Replace is not** — it can\nanswer `409` from `ACTIVE`/`FAILED` for either reason — so without this the client is left\nguessing on exactly the verb it cannot guess about.\n\nA refusal about the caller's *session*, not a failure, so it carries no `FailureClass` —\nthe R-51(5) precedent, and the same reasoning that put `409` here rather than `423`/`429`."
+      },
+      "ProcessingLockedResponse": {
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/ProcessingLockedDetail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "detail"
+        ],
+        "title": "ProcessingLockedResponse",
+        "description": "The wire body for R-24's gate."
+      },
       "ReadinessResponse": {
         "properties": {
           "status": {
@@ -5222,20 +5258,6 @@
         ],
         "title": "ReadinessResponse",
         "description": "NFR-REL-02's readiness body, on both arms (T-405).\n\nTyped so the `503` branch is expressible in the schema at all: the status code is set\nimperatively on the response object, so FastAPI cannot infer it, and before T-405 the whole\nbody was an untyped `dict[str, object]`."
-      },
-      "RefreshRequest": {
-        "properties": {
-          "refresh_token": {
-            "type": "string",
-            "minLength": 1,
-            "title": "Refresh Token"
-          }
-        },
-        "type": "object",
-        "required": [
-          "refresh_token"
-        ],
-        "title": "RefreshRequest"
       },
       "RenameConversationRequest": {
         "properties": {
@@ -5396,10 +5418,6 @@
             "type": "string",
             "title": "Access Token"
           },
-          "refresh_token": {
-            "type": "string",
-            "title": "Refresh Token"
-          },
           "token_type": {
             "type": "string",
             "title": "Token Type",
@@ -5413,10 +5431,10 @@
         "type": "object",
         "required": [
           "access_token",
-          "refresh_token",
           "expires_in"
         ],
-        "title": "TokenResponse"
+        "title": "TokenResponse",
+        "description": "The half of the token pair a browser is allowed to hold (R-72(1), FR-AUT-07).\n\n**There is deliberately no ``refresh_token`` field.** T-509 moved it into an httpOnly\ncookie, and a cookie set beside a body copy protects nothing — script would still read\nthe body. ``RefreshRequest`` and ``LogoutRequest`` were removed for the same reason:\nwith no way for a client to *obtain* a refresh token, a body that accepts one is a\nsecond channel that can only ever be a bypass.\n\n``expires_in`` is Keycloak's ``accessTokenLifespan`` (300s on the shipped realm), and\nthe client refreshes against it rather than waiting for a 401."
       },
       "TurnOutcome": {
         "type": "string",

@@ -90,7 +90,12 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /** Exchange a refresh token for a new pair */
+    /**
+     * Exchange the refresh cookie for a new access token
+     * @description No request body: the refresh token comes from the httpOnly cookie and nowhere else
+     *     (R-72(1)). The rotated token replaces the cookie, so an idle client's cookie lifetime
+     *     tracks the realm's ``ssoSessionIdleTimeout`` rather than the login time.
+     */
     post: operations['refresh'];
     delete?: never;
     options?: never;
@@ -107,7 +112,14 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /** Revoke a refresh token */
+    /**
+     * Revoke the session and clear the refresh cookie
+     * @description Idempotent, and the cookie is cleared on **every** path including the ones that fail.
+     *
+     *     FR-AUT-08's sign out must leave the browser signed out even when the upstream revoke
+     *     cannot be delivered; the alternative is a user who clicked "Sign out", saw an error, and
+     *     is still holding a live session cookie.
+     */
     post: operations['logout'];
     delete?: never;
     options?: never;
@@ -649,8 +661,9 @@ export interface paths {
      *     has no row yet, so it can never be this route's target — and because the lock is keyed on
      *     the caller, gating would refuse feedback on one message because a *different* one is
      *     generating, which is not the requirement's clause but a bug. FR-MSG-08's "disabled while
-     *     generating" is discharged as the GUI affordance OI-31 already governs, which also leaves
-     *     OI-31's unpredicted-`409` gap unmanufactured.
+     *     generating" is discharged as the GUI affordance R-71(1) governs (OI-31, now resolved): the
+     *     client-side in-flight signal disables the control, and the `409` this route deliberately does
+     *     not raise is one the client would then have to reconcile for nothing.
      *
      *     Idempotent: the same value twice is a `200`. The column is state, not an event log.
      *
@@ -1088,6 +1101,8 @@ export interface components {
       event: 'document';
       data: components['schemas']['DocumentEventResponse'];
     };
+    DocumentConflictResponse:
+      components['schemas']['ProcessingLockedResponse'] | components['schemas']['ErrorResponse'];
     /**
      * DocumentEventResponse
      * @description The list/get DTO plus the one field the live channel adds (R-41(4)/(5)).
@@ -1202,8 +1217,11 @@ export interface components {
      *     **`current_version` is the version serving retrieval, not the version being built.**
      *     While a replace is in flight `latest_job_document_version` is `current_version + 1`,
      *     and that inequality is the only signal distinguishing "this document failed and is
-     *     silent" from "this document's replace failed and the previous version still answers"
-     *     (OI-29). The job's own status and progress are deliberately not denormalised here —
+     *     silent" from "this document's replace failed and the previous version still answers".
+     *     R-71(2) settles what the GUI does with it (OI-29, resolved): the row keeps `Failed` and
+     *     its Retry affordance, and the FR-KBM-04 meta line reads
+     *     `update failed, v{current_version} still answering`. The job's own status and progress
+     *     are deliberately not denormalised here —
      *     `GET /jobs/{id}` owns them, and a surface rendering two statuses read at two different
      *     moments will eventually render them disagreeing.
      */
@@ -1405,6 +1423,9 @@ export interface components {
       /** Detail */
       detail?: components['schemas']['ValidationError'][];
     };
+    ImportConflictResponse:
+      | components['schemas']['ProcessingLockedResponse']
+      | components['schemas']['CloudLinkRequiredResponse'];
     /**
      * ImportRequest
      * @description Import one cloud-drive file into a knowledge base.
@@ -1526,11 +1547,6 @@ export interface components {
       /** Password */
       password: string;
     };
-    /** LogoutRequest */
-    LogoutRequest: {
-      /** Refresh Token */
-      refresh_token: string;
-    };
     /** MeResponse */
     MeResponse: {
       /**
@@ -1633,6 +1649,39 @@ export interface components {
       detail: components['schemas']['NotLatestAnswerDetail'];
     };
     /**
+     * ProcessingLockedDetail
+     * @description R-24 / R-43(4)'s gate on the four file verbs, with a code the client can branch on.
+     *
+     *     **Why a code and not just copy (R-71(1), OI-31).** These four routes answer `409` for more
+     *     than one reason — `NotRetryableError`, `NotReplaceableError` and `DuplicateChecksumError`
+     *     live on the same status — and R-71(1) makes the GUI *reconcile* an unpredicted lock `409`
+     *     rather than render it as an error: it disables its own affordances and clears them when the
+     *     turn ends. That reconciliation has to know which `409` arrived, and the only alternative is
+     *     matching on a `# TBD(§8.4)` string, which R-57(4) forbids in as many words. Three of the
+     *     four cases are derivable from the route and the row's state; **Replace is not** — it can
+     *     answer `409` from `ACTIVE`/`FAILED` for either reason — so without this the client is left
+     *     guessing on exactly the verb it cannot guess about.
+     *
+     *     A refusal about the caller's *session*, not a failure, so it carries no `FailureClass` —
+     *     the R-51(5) precedent, and the same reasoning that put `409` here rather than `423`/`429`.
+     */
+    ProcessingLockedDetail: {
+      /**
+       * Error Code
+       * @constant
+       */
+      error_code: 'PROCESSING_LOCKED';
+      /** Message */
+      message: string;
+    };
+    /**
+     * ProcessingLockedResponse
+     * @description The wire body for R-24's gate.
+     */
+    ProcessingLockedResponse: {
+      detail: components['schemas']['ProcessingLockedDetail'];
+    };
+    /**
      * ReadinessResponse
      * @description NFR-REL-02's readiness body, on both arms (T-405).
      *
@@ -1650,11 +1699,6 @@ export interface components {
       checks: {
         [key: string]: components['schemas']['CheckResult'];
       };
-    };
-    /** RefreshRequest */
-    RefreshRequest: {
-      /** Refresh Token */
-      refresh_token: string;
     };
     /**
      * RenameConversationRequest
@@ -1748,12 +1792,22 @@ export interface components {
       /** Text */
       text: string;
     };
-    /** TokenResponse */
+    /**
+     * TokenResponse
+     * @description The half of the token pair a browser is allowed to hold (R-72(1), FR-AUT-07).
+     *
+     *     **There is deliberately no ``refresh_token`` field.** T-509 moved it into an httpOnly
+     *     cookie, and a cookie set beside a body copy protects nothing — script would still read
+     *     the body. ``RefreshRequest`` and ``LogoutRequest`` were removed for the same reason:
+     *     with no way for a client to *obtain* a refresh token, a body that accepts one is a
+     *     second channel that can only ever be a bypass.
+     *
+     *     ``expires_in`` is Keycloak's ``accessTokenLifespan`` (300s on the shipped realm), and
+     *     the client refreshes against it rather than waiting for a 401.
+     */
     TokenResponse: {
       /** Access Token */
       access_token: string;
-      /** Refresh Token */
-      refresh_token: string;
       /**
        * Token Type
        * @default bearer
@@ -1985,11 +2039,7 @@ export interface operations {
       path?: never;
       cookie?: never;
     };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['RefreshRequest'];
-      };
-    };
+    requestBody?: never;
     responses: {
       /** @description Successful Response */
       200: {
@@ -2000,22 +2050,13 @@ export interface operations {
           'application/json': components['schemas']['TokenResponse'];
         };
       };
-      /** @description The refresh token is invalid or expired. */
+      /** @description The refresh cookie is absent, invalid or expired. */
       401: {
         headers: {
           [name: string]: unknown;
         };
         content: {
           'application/json': components['schemas']['ErrorResponse'];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
         };
       };
       /** @description NFR-SEC-07 — too many attempts. `Retry-After` carries the cooldown. */
@@ -2045,11 +2086,7 @@ export interface operations {
       path?: never;
       cookie?: never;
     };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['LogoutRequest'];
-      };
-    };
+    requestBody?: never;
     responses: {
       /** @description Successful Response */
       204: {
@@ -2057,15 +2094,6 @@ export interface operations {
           [name: string]: unknown;
         };
         content?: never;
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
       };
       /** @description The identity provider is unreachable (R-28). */
       503: {
@@ -2679,7 +2707,9 @@ export interface operations {
         headers: {
           [name: string]: unknown;
         };
-        content?: never;
+        content: {
+          'application/json': components['schemas']['UploadResponse'];
+        };
       };
       /** @description Accepted; ingestion queued. */
       202: {
@@ -2726,13 +2756,13 @@ export interface operations {
           'application/json': components['schemas']['ErrorResponse'];
         };
       };
-      /** @description R-24 — another file action is in flight for this caller. */
+      /** @description R-24 — a response is generating for this caller; retry when it finishes. */
       409: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ErrorResponse'];
+          'application/json': components['schemas']['ProcessingLockedResponse'];
         };
       };
       /** @description The upload exceeds the per-file size ceiling. */
@@ -2809,7 +2839,9 @@ export interface operations {
         headers: {
           [name: string]: unknown;
         };
-        content?: never;
+        content: {
+          'application/json': components['schemas']['UploadResponse'];
+        };
       };
       /** @description Accepted; ingestion queued. */
       202: {
@@ -2862,7 +2894,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['CloudLinkRequiredResponse'];
+          'application/json': components['schemas']['ImportConflictResponse'];
         };
       };
       /** @description The upload exceeds the per-file size ceiling. */
@@ -2995,7 +3027,9 @@ export interface operations {
         headers: {
           [name: string]: unknown;
         };
-        content?: never;
+        content: {
+          'application/json': components['schemas']['DeleteResponse'];
+        };
       };
       /** @description Accepted; the document left retrieval. */
       202: {
@@ -3033,13 +3067,13 @@ export interface operations {
           'application/json': components['schemas']['ErrorResponse'];
         };
       };
-      /** @description R-24 — another file action is in flight for this caller. */
+      /** @description R-24 — a response is generating for this caller; retry when it finishes. */
       409: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ErrorResponse'];
+          'application/json': components['schemas']['ProcessingLockedResponse'];
         };
       };
       /** @description Validation Error */
@@ -3115,7 +3149,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ErrorResponse'];
+          'application/json': components['schemas']['DocumentConflictResponse'];
         };
       };
       /** @description Validation Error */
@@ -3235,7 +3269,9 @@ export interface operations {
         headers: {
           [name: string]: unknown;
         };
-        content?: never;
+        content: {
+          'application/json': components['schemas']['ReplaceResponse'];
+        };
       };
       /** @description Accepted; the new version is queued. */
       202: {
@@ -3287,7 +3323,9 @@ export interface operations {
         headers: {
           [name: string]: unknown;
         };
-        content?: never;
+        content: {
+          'application/json': components['schemas']['DocumentConflictResponse'];
+        };
       };
       /** @description The upload exceeds the per-file size ceiling. */
       413: {

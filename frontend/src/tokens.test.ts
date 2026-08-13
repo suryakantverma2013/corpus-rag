@@ -4,7 +4,8 @@
  * R-51(2) sanctions a second implementation of `ceil(len/4)` in the browser because FR-STA-04
  * blocks before a request exists. What it does not sanction is the two drifting: the failure
  * mode is a composer that refuses what the server accepts, or accepts what the server refuses
- * — and the second is an unpredicted `409` (OI-31). So the constant is asserted against
+ * — and the second is an unpredicted `409` (the R-71(1) reconciliation path). So the constant
+ * is asserted against
  * `backend/app/tokens.py` **read off disk**, not against a copy of the number.
  */
 import { describe, expect, it } from 'vitest';

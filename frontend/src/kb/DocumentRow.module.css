@@ -1,0 +1,158 @@
+/* FR-KBM-04's row. Every declaration down to `.status` is the prototype's, per property
+   (`RAG Chatbot.dc.html` lines 253–257); the status *colours* and the FR-KBM-07 actions are the
+   Rev 0.5 spec additions NFR-VIS-01 carves out. */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  padding: 10px 12px;
+  background: var(--panel2);
+}
+
+/* 34px, not the 32px of the stats-panel and mention badges: the prototype makes this one wider,
+   and it is the same element in both themes. `flex-shrink: 0` keeps it from collapsing when a
+   long filename competes for the row. */
+.badge {
+  font-size: 9.5px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: var(--radius-chip);
+  padding: 2px 5px;
+  width: 34px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+/* `min-width: 0` is what actually makes the ellipsis work: without it the flex item refuses to
+   shrink below its content's intrinsic width, so a long filename widens the row and pushes the
+   status label out of the panel instead of truncating. */
+.body {
+  min-width: 0;
+  flex: 1;
+}
+
+.name {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.meta {
+  font-size: 11px;
+  color: var(--muted2);
+}
+
+/* The prototype pushes this right with `margin-left: auto`; `.body` now carries `flex: 1`, which
+   does the same and additionally gives the name something to ellipsise against. */
+.status {
+  font-size: 10.5px;
+  font-weight: 600;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* ACTIVE — the prototype's own accent `Ready`. */
+.ready {
+  color: var(--accent);
+}
+
+/* The five in-flight states. `--muted` rather than `--accent` so a queue reads as quieter than a
+   finished document, which FR-KBM-04 offers as the alternative in as many words. */
+.progress {
+  color: var(--muted);
+}
+
+/* FR-KBM-04 names this hue exactly. It is `--eval-bad` because that token IS `#E86A8A`; a second
+   literal would be a second thing to keep in step with the palette. */
+.failed {
+  color: var(--eval-bad);
+}
+
+/* OI-29 / R-71(2): the replace failed, the previous version is still answering. Amber rather than
+   red because the document is not silent — the meta line says which version is serving, and
+   painting this the same colour as a genuinely dead document is the conflation the issue names.
+   Still not colour-alone: the word is `Failed` and the qualification is in text. */
+.failedServing {
+  color: var(--eval-warn);
+}
+
+/* R-39(7) parks a dead-lettered purge here indefinitely, so it must read as quiet, not as an
+   error. */
+.deleting {
+  color: var(--muted2);
+}
+
+/* The FR-KBM-04 in-progress indicator, borrowing the FR-MSG-05 dot. One dot rather than three:
+   this is a badge suffix at 10.5px, not the typing indicator, and three would be wider than the
+   label. The duration comes from the token, so NFR-A11Y-01's zeroing reaches it. */
+.dots {
+  width: 4px;
+  height: 4px;
+  border-radius: var(--radius-avatar);
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+/* FR-KBM-07's affordances. Revealed by OPACITY — never `display: none` or `visibility: hidden`,
+   both of which look identical to a mouse user and make the control pointer-only, which is the
+   exact NFR-A11Y-04 defect T-503 found and fixed in the sidebar. Opacity keeps the buttons in the
+   DOM, in the tab order and in layout, so the row's width never jumps on hover. */
+.actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity var(--motion-fast) ease;
+}
+
+.row:hover .actions,
+/* `:focus-within` is what makes them VISIBLE to the keyboard user who has just tabbed onto one.
+   Without it they are reachable and invisible, which is worse than either. */
+.row:focus-within .actions {
+  opacity: 1;
+}
+
+.action,
+.destructive {
+  padding: 3px 8px;
+  border-radius: var(--radius-chip);
+  border: 1px solid var(--line);
+  background: transparent;
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  cursor: pointer;
+  color: var(--muted);
+  transition: background var(--motion-fast) ease;
+}
+
+.action:hover:not(:disabled) {
+  background: var(--panel);
+  color: var(--text);
+}
+
+/* Destructive, so it carries `--eval-bad` rather than the accent — the ConfirmDialog precedent:
+   the accent means "the primary thing to do" everywhere else in this UI, and an irreversible
+   delete must not look like the safe option. */
+.destructive {
+  color: var(--eval-bad);
+}
+
+.destructive:hover:not(:disabled) {
+  background: var(--panel);
+}
+
+/* R-71(1)'s pause. Kept visible and greyed rather than removed: a control that disappears for a
+   few seconds is harder to understand than one that is plainly unavailable with the reason stated
+   above it in the panel. */
+.action:disabled,
+.destructive:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}

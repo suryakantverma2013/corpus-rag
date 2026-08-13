@@ -564,7 +564,16 @@ def test_websearch_input_ors_terms_and_strips_meaning_changing_operators(
 async def test_fetch_chunks_returns_rows_in_the_requested_order(session: AsyncSession) -> None:
     """The requested order is the R-46(3) merged ranking, and `IN` guarantees no order at all."""
     user, kb, doc = await _corpus(session)
-    stmt = select(DocumentChunk).order_by(DocumentChunk.chunk_index)
+    # Scoped to the document this test just created. T-109's constraint applies to every read in
+    # the suite, not only to assertions: the dev database is shared and nothing truncates it, so
+    # an unfiltered `select(DocumentChunk)` picks up whatever anyone has ever ingested through
+    # the running app and `ids[0..2]` silently stop being this corpus's three chunks. Found when
+    # T-508's live pass put real documents in the same database.
+    stmt = (
+        select(DocumentChunk)
+        .where(DocumentChunk.document_id == doc.id)
+        .order_by(DocumentChunk.chunk_index)
+    )
     ids = [chunk.id for chunk in (await session.execute(stmt)).scalars().all()]
     requested = [ids[2], ids[0], ids[1]]
 

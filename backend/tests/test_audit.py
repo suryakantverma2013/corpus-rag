@@ -120,7 +120,8 @@ async def test_refresh_audited(
         json={"access_token": new_access, "refresh_token": "r2", "expires_in": 300}
     )
 
-    resp = await client.post("/api/v1/auth/refresh", json={"refresh_token": "r1"})
+    client.cookies.set(get_settings().session.refresh_cookie_name, "r1")
+    resp = await client.post("/api/v1/auth/refresh")
     assert resp.status_code == 200
 
     rows = await AuditLogRepository(session).list_events(
@@ -143,7 +144,8 @@ async def test_logout_audited_with_subject(
     refresh_jwt = make_token(sub=sub, email="u@corpus.local")
     respx_mock.post(kc.logout_endpoint).respond(204)
 
-    resp = await client.post("/api/v1/auth/logout", json={"refresh_token": refresh_jwt})
+    client.cookies.set(get_settings().session.refresh_cookie_name, refresh_jwt)
+    resp = await client.post("/api/v1/auth/logout")
     assert resp.status_code == 204
 
     rows = await AuditLogRepository(session).list_events(

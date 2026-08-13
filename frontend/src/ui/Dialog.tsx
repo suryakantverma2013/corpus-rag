@@ -23,6 +23,16 @@ export interface DialogProps {
   onClose: () => void;
   /** Extra class for the panel, so a caller can set its own width/height (FR-KBM-01's 520px). */
   panelClassName?: string;
+  /**
+   * A control rendered on the title's own row, right-aligned (FR-KBM-01's ✕).
+   *
+   * A slot rather than the caller placing it absolutely, because the prototype's header **is** a
+   * flex row (`display:flex; align-items:center`) that vertically centres a 19px title against a
+   * 28px button. Reproducing that from outside would mean either restyling this component's
+   * `<h2>` from another module — impossible under CSS Modules — or absolutely positioning the
+   * button and hand-matching the title's line box to it.
+   */
+  headerAction?: ReactNode;
   children: ReactNode;
 }
 
@@ -32,17 +42,48 @@ const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), ' +
   'textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-export function Dialog({ title, onClose, panelClassName, children }: DialogProps) {
+/**
+ * Every mounted dialog, innermost last. Only the last one owns the keyboard.
+ *
+ * Two dialogs both listening on `document` in the capture phase fire in **registration** order,
+ * and `stopPropagation()` does not stop a *sibling* listener on the same node — that would need
+ * `stopImmediatePropagation`, which the outer (first-registered) handler would win anyway. So
+ * without this stack, Escape with T-508's FR-KBM-07 delete confirmation open runs the KB modal's
+ * handler first and closes the whole surface; and the outer trap's `!panel.contains(active)`
+ * branch yanks focus out of the confirmation on every Tab.
+ *
+ * A module-scope stack rather than a `suspended` prop because it needs no cooperation from the
+ * caller: nesting is a fact about what is mounted, not something each call site should have to
+ * declare and keep correct.
+ */
+const stack: symbol[] = [];
+
+export function Dialog({ title, onClose, panelClassName, headerAction, children }: DialogProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
+
+  // The handler is registered once (see the effect's empty dep array) and must still call the
+  // *current* `onClose`. Threading `onClose` through the deps instead would re-run the whole
+  // effect — and so re-run the initial focus move — on every render of any caller that passes an
+  // inline arrow, silently pulling focus back to the first control as the user tabs.
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
 
   useEffect(() => {
     const panel = panelRef.current;
     if (panel === null) return;
 
+    const token = Symbol('dialog');
+    stack.push(token);
+    const owns = () => stack[stack.length - 1] === token;
+
     // Captured before the first focus move, and restored on unmount. Without this, dismissing
     // the dialog drops focus to <body> and a keyboard user restarts from the top of the page —
-    // which is why NFR-A11Y-04 names restoring focus and not just trapping it.
+    // which is why NFR-A11Y-04 names restoring focus and not just trapping it. For a nested
+    // dialog `previous` is a control in the dialog below, so dismissing the inner one lands the
+    // user back where they opened it from rather than at the outer dialog's first control.
     const previous = document.activeElement;
 
     const focusable = () => [...panel.querySelectorAll<HTMLElement>(FOCUSABLE)];
@@ -51,9 +92,11 @@ export function Dialog({ title, onClose, panelClassName, children }: DialogProps
     (focusable()[0] ?? panel).focus();
 
     const onKeyDown = (event: KeyboardEvent) => {
+      // A dialog below the top of the stack stands down entirely — both keys, not just Escape.
+      if (!owns()) return;
       if (event.key === 'Escape') {
         event.stopPropagation();
-        onClose();
+        onCloseRef.current();
         return;
       }
       if (event.key !== 'Tab') return;
@@ -82,9 +125,11 @@ export function Dialog({ title, onClose, panelClassName, children }: DialogProps
     document.addEventListener('keydown', onKeyDown, true);
     return () => {
       document.removeEventListener('keydown', onKeyDown, true);
+      const at = stack.lastIndexOf(token);
+      if (at !== -1) stack.splice(at, 1);
       if (previous instanceof HTMLElement) previous.focus();
     };
-  }, [onClose]);
+  }, []);
 
   return (
     // The overlay is not a button and takes no keyboard handler: Escape already closes the
@@ -107,9 +152,18 @@ export function Dialog({ title, onClose, panelClassName, children }: DialogProps
         // Clicks inside must not reach the overlay's close handler (the prototype's `stopProp`).
         onClick={(event) => event.stopPropagation()}
       >
-        <h2 className={styles.title} id={titleId}>
-          {title}
-        </h2>
+        {headerAction === undefined ? (
+          <h2 className={styles.title} id={titleId}>
+            {title}
+          </h2>
+        ) : (
+          <div className={styles.header}>
+            <h2 className={styles.title} id={titleId}>
+              {title}
+            </h2>
+            {headerAction}
+          </div>
+        )}
         {children}
       </div>
     </div>

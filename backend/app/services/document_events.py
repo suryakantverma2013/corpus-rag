@@ -146,6 +146,7 @@ async def _read_states(
     *,
     owner_id: uuid.UUID,
     knowledge_base_id: uuid.UUID | None,
+    empty: bool,
     stall_after: float,
 ) -> list[DocumentState]:
     """One tick's read, in its own short-lived session.
@@ -163,6 +164,15 @@ async def _read_states(
     can only fail (`MissingGreenlet`). Every field the DTO and the fingerprint read is a
     plain column on that SELECT, so nothing is left to load.
     """
+    # A requested scope that resolves to no knowledge base matches no document, and saying so
+    # here is what keeps `knowledge_base_id=None` meaning exactly one thing downstream. Without
+    # this the two readings collide: `None` is also "no scope was asked for", so a `scope=chat`
+    # stream on a conversation whose KB does not exist yet streamed the caller's ENTIRE document
+    # set — while `list_documents` returned `[]` for the same request. The route's own promise is
+    # that the stream and the page it updates cannot disagree.
+    if empty:
+        return []
+
     async with sessionmaker() as session:
         listings = await DocumentRepository(session).list_for_owner(
             owner_id=owner_id,
@@ -185,6 +195,7 @@ async def stream_document_events(
     *,
     owner_id: uuid.UUID,
     knowledge_base_id: uuid.UUID | None = None,
+    empty: bool = False,
     poll_interval: float,
     stall_after: float,
     max_ticks: int | None = None,
@@ -194,6 +205,12 @@ async def stream_document_events(
     Scoping is the repository's (`owner_id` is a query predicate, NFR-SEC-06) — this loop
     never filters in Python, so there is no path by which a caller sees another user's
     document.
+
+    `empty` is the third scope state, distinct from an unfiltered `knowledge_base_id=None`:
+    the caller named a scope that has no knowledge base yet, so nothing can match. See
+    `_read_states`. The stream stays open — the connection is still the caller's live channel,
+    and R-41(6) makes every reconnect a fresh snapshot anyway — it simply reports the empty set
+    the list route reports.
 
     `max_ticks` exists for tests; production passes `None` and the loop ends only when the
     client disconnects and the consumer closes the generator.
@@ -206,6 +223,7 @@ async def stream_document_events(
             sessionmaker,
             owner_id=owner_id,
             knowledge_base_id=knowledge_base_id,
+            empty=empty,
             stall_after=stall_after,
         )
         current = {state.document_id: state for state in states}

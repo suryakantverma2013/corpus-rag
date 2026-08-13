@@ -13,7 +13,7 @@
  * is what makes a button-opened menu close on the next keystroke — recorded in the Rev 0.5.1
  * legacy delta as intended, and the one behaviour a "smarter" implementation would break.
  */
-import { useCallback, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 
 import styles from './Composer.module.css';
@@ -61,6 +61,16 @@ export interface ComposerProps {
   onSend: (text: string) => void;
   /** FR-CMP-02 — the `+` button opens the §4.7 KB modal (T-508). */
   onOpenKnowledgeBase: () => void;
+  /**
+   * FR-CST-01's `docsOpen`, for FR-CMP-05's "close when the KB modal opens".
+   *
+   * The `+` button closes the menu itself, but FR-KBM-01 says **either** entry point closes it —
+   * and FR-SBR-05's sidebar button is the other one, which this component never hears about.
+   * A boolean rather than lifting `mentionOpen` into `App`: FR-CST-01 enumerates state *content*,
+   * not topology (R-58(5)), and one prop is a smaller change than moving the FR-CMP-05 matrix
+   * out of the component whose source guard pins it.
+   */
+  knowledgeBaseOpen?: boolean;
 }
 
 export function Composer({
@@ -70,6 +80,7 @@ export function Composer({
   documentCount,
   onSend,
   onOpenKnowledgeBase,
+  knowledgeBaseOpen = false,
 }: ComposerProps) {
   const [value, setValue] = useState('');
   const [mentionOpen, setMentionOpen] = useState(false);
@@ -87,6 +98,14 @@ export function Composer({
     setMentionOpen(false);
     setActiveIndex(-1);
   }, []);
+
+  // FR-KBM-01: opening the modal from EITHER entry point closes the menu. The `+` button below
+  // does it directly; this covers FR-SBR-05's sidebar button, which this component cannot see.
+  // Not folded into the FR-CMP-05 keystroke assignment — that line is `setMentionOpen(hasTrigger)`
+  // exactly, and a second condition inside it is what would break the matrix a guard pins.
+  useEffect(() => {
+    if (knowledgeBaseOpen) closeMenu();
+  }, [knowledgeBaseOpen, closeMenu]);
 
   const send = useCallback(() => {
     // FR-CMP-03: every guard is checked here rather than only on the button, because Enter is

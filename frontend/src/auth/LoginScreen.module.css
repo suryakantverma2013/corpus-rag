@@ -1,0 +1,236 @@
+/* §4.17 FR-AUT-01..05 — the login screen.
+   Spec-authored (R-27): the prototype boots pre-authenticated and has no auth surface at all,
+   so NFR-VIS-01's Rev 0.6 carve-out applies and the spec text is the acceptance baseline. The
+   declarations below are the addendum's (`design_addendum_login/Login.html`, non-normative),
+   which is the only rendered reference for this section — and unlike the main prototype it is
+   plain static HTML, so it genuinely paints (R-66, §8.49).
+
+   BOX-SIZING, and it differs from FR-KBM-01 on purpose. Every §4.17 box in the addendum sets
+   `box-sizing: border-box` explicitly, so "380px wide" (FR-AUT-01) and "420px wide"
+   (FR-AUT-09) are OUTER widths. The knowledge-base modal measures 566px outer for a declared
+   520px because the *prototype* has no box-sizing reset anywhere — an artifact T-508 measured
+   rather than a value anyone chose. Inheriting that artifact into a surface whose own
+   reference declares the opposite would be copying the accident and not the design. */
+
+.screen {
+  /* FR-AUT-01: full viewport, on --bg. `min-height` rather than `height` so the card is never
+     clipped on a short window — the expired banner adds 12px + its own box above it. */
+  min-height: 100vh;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  box-sizing: border-box;
+}
+
+/* FR-AUT-06's info banner, above the card. Only rendered after a session actually ended. */
+.expired {
+  width: 380px;
+  max-width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 12px;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  padding: 9px 13px;
+  font-size: 12px;
+  color: var(--muted);
+  --fade-up-duration: var(--motion);
+}
+
+.card {
+  width: 380px;
+  max-width: 100%;
+  box-sizing: border-box;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-modal);
+  box-shadow: var(--shadow);
+  padding: 30px 28px 24px;
+  --fade-up-duration: var(--motion);
+}
+
+/* --- brand block (FR-AUT-01) --- */
+
+.brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 24px;
+  text-align: center;
+}
+
+/* The FR-MSG-02 empty-state mark at 44px. A white "C" on --accent in BOTH themes: it is the
+   brand mark, and #fff on --accent is one of NFR-A11Y-06's enumerated contrast exceptions
+   (3.17:1 dark) — accepted there precisely because it carries no information colour is the
+   sole carrier of. It is decorative here; the brand name sits beside it in text. */
+.mark {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-pop);
+  background: var(--accent);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 20px;
+}
+
+/* The document's <h1> while the login screen is mounted — see LoginScreen.tsx. The UA margin
+   must be reset or the 10px flex gap becomes 10px plus .67em (the T-503/T-504/T-507 trap). */
+.brandName {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+/* `margin-top: -4px` is the addendum's, tightening the 10px gap under the brand name only. */
+.subtitle {
+  margin: -4px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* --- fields (FR-AUT-02) --- */
+
+.label {
+  display: block;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  color: var(--muted2);
+  margin: 14px 2px 6px;
+}
+
+.fieldRow {
+  position: relative;
+}
+
+/* `font-family: inherit` and an explicit `color` are not belt-and-braces: an <input> inherits
+   neither (the T-503 finding, in a third place). `width: 100%` with padding needs the
+   border-box above or the field overflows its card by 26px. */
+.input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-btn);
+  padding: 10px 12px;
+  font-family: inherit;
+  font-size: 13.5px;
+  color: var(--text);
+  outline: none;
+}
+
+.input:focus {
+  border-color: var(--accent);
+}
+
+/* The password field reserves room for the Show/Hide toggle so a long password never runs
+   under it. 52px is the addendum's inline value. */
+.password {
+  padding-right: 52px;
+}
+
+/* FR-AUT-02's text toggle — a text glyph, no icon (NFR-CMP-03). A real <button> at a real tab
+   stop, which is what FR-AUT-02's stated order (email → password → toggle → Sign in) requires. */
+.toggle {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  padding: 2px 4px;
+}
+
+/* --- error (FR-AUT-04) --- */
+
+/* `#E86A8A` is --eval-bad's literal, and the addendum writes the literal. Using the token
+   would tie login errors to the FR-EVL-03 scoring palette, which is a different meaning that
+   happens to share a hue — a rename away from breaking this. */
+.error {
+  margin: 12px 2px 0;
+  font-size: 12px;
+  color: #e86a8a;
+  --fade-up-duration: var(--motion-fast);
+}
+
+/* --- sign in (FR-AUT-03) --- */
+
+.submit {
+  width: 100%;
+  margin-top: 18px;
+  padding: 10px 0;
+  border: none;
+  border-radius: var(--radius-btn);
+  background: var(--accent);
+  color: #fff;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  /* Holds the button's height constant when the three dots replace the label — without it the
+     card resizes the moment the user clicks Sign in. */
+  min-height: 38px;
+}
+
+.submit:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.submit:disabled {
+  cursor: default;
+  filter: none;
+  opacity: 0.85;
+}
+
+/* FR-AUT-03's three white 6px dots, reusing the §4.3 typing motion. The animation comes from
+   the global `.animate-dot-pulse` utility, never from this module: CSS Modules rewrites
+   `animation-name` even for keyframes it does not declare, so `animation: dotPulse …` here
+   would compile to a hashed name matching nothing and silently never run (§8.54(4)). */
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-avatar);
+  background: #fff;
+  display: inline-block;
+}
+
+.dot:nth-child(2) {
+  animation-delay: var(--motion-dot-delay);
+}
+
+.dot:nth-child(3) {
+  animation-delay: calc(var(--motion-dot-delay) * 2);
+}
+
+/* --- footer (FR-AUT-05) --- */
+
+.footer {
+  margin-top: 18px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted2);
+}
+
+.version {
+  margin-top: 10px;
+  text-align: center;
+  font-size: 10.5px;
+  color: var(--muted2);
+}

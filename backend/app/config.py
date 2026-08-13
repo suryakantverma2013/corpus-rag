@@ -1261,6 +1261,58 @@ class KeycloakSettings(BaseSettings):
         return f"{self.issuer}/broker/{alias}/link"
 
 
+class SessionSettings(BaseSettings):
+    """Where the refresh token lives on the wire (T-509, R-72(1), FR-AUT-07).
+
+    FR-AUT-07 recommended "access token in memory, refresh token in an httpOnly cookie"
+    and left the mechanism a ``(D)``. T-103 shipped the other half of that sentence —
+    both tokens in the JSON body — so the recommendation was never actually in force.
+    R-72(1) confirms it: the refresh token is now carried **only** by this cookie, and
+    ``TokenResponse`` no longer contains it.
+
+    **"Only" is the whole point.** A cookie that is set *beside* a body copy buys nothing:
+    script can still read the body, so the credential is still exfiltrable by an XSS and
+    the httpOnly flag is decoration. Hence ``/auth/refresh`` and ``/auth/logout`` take no
+    request body at all — there is one place a refresh token can come from.
+
+    Deployment is same-origin by construction (R-57: the SPA and the API sit behind one
+    reverse proxy, and the Vite dev server proxies ``/api`` to reproduce it), which is what
+    makes ``SameSite=strict`` free of cost here: no legitimate cross-site request to this
+    API exists, so nothing breaks and the CSRF surface a cookie would otherwise open is
+    closed without a token scheme.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="SESSION_", env_file=".env", extra="ignore")
+
+    refresh_cookie_name: str = Field(default="corpus_refresh")
+
+    #: ``Path`` — scoped to the only three routes that read it, so the credential is not
+    #: attached to every API call (and so never reaches a request that could echo it back).
+    refresh_cookie_path: str = Field(default="/api/v1/auth")
+
+    #: ``Secure``. Default on; set false only for plain-HTTP local development. Chromium and
+    #: Gecko both treat ``http://localhost`` as a trustworthy origin, so the default works
+    #: unmodified on this box — the knob exists for an HTTP LAN deployment.
+    refresh_cookie_secure: bool = Field(default=True)
+
+    refresh_cookie_samesite: Literal["strict", "lax", "none"] = Field(default="strict")
+
+    @model_validator(mode="after")
+    def _coherent(self) -> SessionSettings:
+        if not self.refresh_cookie_name:
+            raise ValueError("SESSION_REFRESH_COOKIE_NAME must not be empty")
+        if not self.refresh_cookie_path.startswith("/"):
+            raise ValueError("SESSION_REFRESH_COOKIE_PATH must start with '/'")
+        # Browsers reject `SameSite=None` without `Secure`, silently dropping the cookie —
+        # which presents as "login works, refresh signs me out" rather than as a config error.
+        if self.refresh_cookie_samesite == "none" and not self.refresh_cookie_secure:
+            raise ValueError(
+                "SESSION_REFRESH_COOKIE_SAMESITE=none requires "
+                "SESSION_REFRESH_COOKIE_SECURE=true — browsers drop the cookie otherwise"
+            )
+        return self
+
+
 class CloudDriveSettings(BaseSettings):
     """Cloud-drive import — the provider-facing knobs (T-214, FR-KBM-10, R-63).
 
@@ -1350,6 +1402,7 @@ class Settings(BaseSettings):
     checkpointer: CheckpointerSettings = Field(default_factory=CheckpointerSettings)
     graph: GraphSettings = Field(default_factory=GraphSettings)
     keycloak: KeycloakSettings = Field(default_factory=KeycloakSettings)
+    session: SessionSettings = Field(default_factory=SessionSettings)
     cloud: CloudDriveSettings = Field(default_factory=CloudDriveSettings)
 
     @model_validator(mode="after")
@@ -1374,6 +1427,16 @@ class Settings(BaseSettings):
                 "CHECKPOINTER_BACKEND=memory is forbidden when ENVIRONMENT=production "
                 "(FR-PER-01): conversation durability comes from the checkpointer "
                 "(NFR-REL-03). Set CHECKPOINTER_BACKEND=postgres."
+            )
+        # R-72(1): the refresh cookie is the *only* copy of the refresh token (FR-AUT-07), so
+        # dropping `Secure` puts a renewable session credential on the wire in clear. It fails
+        # silently in the direction that matters — everything keeps working, which is exactly
+        # why the development escape hatch must not survive into production.
+        if self.environment == "production" and not self.session.refresh_cookie_secure:
+            raise ValueError(
+                "SESSION_REFRESH_COOKIE_SECURE=false is forbidden when ENVIRONMENT=production "
+                "(FR-AUT-07, R-72(1)): the refresh cookie is the only copy of a renewable "
+                "session credential and would travel unencrypted."
             )
         # R-47(3): the FR-RET-02 top-K and the R-46(4) merge ceiling span two groups, and
         # §8.4 requires them to be settled together. A top-K above the merge ceiling is not

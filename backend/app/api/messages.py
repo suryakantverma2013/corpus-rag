@@ -706,8 +706,9 @@ async def set_feedback(
     has no row yet, so it can never be this route's target — and because the lock is keyed on
     the caller, gating would refuse feedback on one message because a *different* one is
     generating, which is not the requirement's clause but a bug. FR-MSG-08's "disabled while
-    generating" is discharged as the GUI affordance OI-31 already governs, which also leaves
-    OI-31's unpredicted-`409` gap unmanufactured.
+    generating" is discharged as the GUI affordance R-71(1) governs (OI-31, now resolved): the
+    client-side in-flight signal disables the control, and the `409` this route deliberately does
+    not raise is one the client would then have to reconcile for nothing.
 
     Idempotent: the same value twice is a `200`. The column is state, not an event log.
 

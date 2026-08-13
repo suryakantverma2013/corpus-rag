@@ -6,7 +6,44 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
-import App from './App';
+import { AuthContext } from './auth/AuthContext';
+import type { AuthContextValue } from './auth/AuthContext';
+import type { Me } from './api';
+
+/**
+ * A signed-in session, supplied synchronously.
+ *
+ * The real `AuthProvider` boots by asking the server whether a refresh cookie exists (it is
+ * httpOnly, so there is no other way to know — R-72(1)), which makes mounting the app
+ * genuinely asynchronous. Every test below is about the *shell*, so it is mocked out at the
+ * provider rather than the transport: that keeps these tests synchronous and, more to the
+ * point, keeps them testing what they say they test. The phase machine and FR-AUT-07's guard
+ * have their own file, `auth/guard.test.tsx`, which uses the real provider.
+ */
+const ME: Me = {
+  id: '11111111-1111-1111-1111-111111111111',
+  email: 'maya.jensen@example.com',
+  display_name: 'Maya Jensen',
+  roles: ['user'],
+  is_active: true,
+};
+
+const SESSION: AuthContextValue = {
+  phase: 'authenticated',
+  user: ME,
+  expired: false,
+  signIn: vi.fn(async () => ({ ok: true }) as const),
+  signOut: vi.fn(async () => undefined),
+  changePassword: vi.fn(async () => ({ ok: true }) as const),
+};
+
+vi.mock('./auth/AuthProvider', () => ({
+  AuthProvider: ({ children }: { children: React.ReactNode }) => (
+    <AuthContext value={SESSION}>{children}</AuthContext>
+  ),
+}));
+
+const App = (await import('./App')).default;
 
 const root = () => document.documentElement;
 
@@ -100,8 +137,9 @@ describe('§4.6 stats panel wiring (T-507)', () => {
 
   it('reads the same usage the composer projects FR-STA-04 against', () => {
     // Two consumers, one object in App. If they ever drift apart the panel will tell a user a
-    // conversation has room while the composer refuses their message — the OI-31 shape, one
-    // surface over. `Vendor Security Review` is the seeded frozen chat.
+    // conversation has room while the composer refuses their message — the two-copies-of-one-
+    // state shape R-71(1) rules on, one surface over. `Vendor Security Review` is the seeded
+    // frozen chat.
     render(<App />);
     expect(within(stats()).getByText('0.2K / 10.4K')).not.toBeNull();
 
@@ -154,6 +192,53 @@ describe('§4.6 stats panel wiring (T-507)', () => {
   it('leaves the document with exactly one <h1> (T-502 owns it)', () => {
     render(<App />);
     expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
+  });
+});
+
+describe('FR-KBM-01 — the two entry points', () => {
+  const modal = () => screen.queryByRole('dialog', { name: 'Knowledge base' });
+
+  it('opens from FR-SBR-05’s sidebar button', () => {
+    render(<App />);
+    expect(modal()).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Knowledge base/ }));
+    expect(modal()).not.toBeNull();
+  });
+
+  it('opens from FR-CMP-02’s + button, and closes again', () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'Add documents' }));
+    expect(modal()).not.toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Close knowledge base' }));
+    expect(modal()).toBeNull();
+  });
+
+  it('closes the @-mention menu from EITHER entry point', () => {
+    // The `+` closes it directly (FR-CMP-05), but FR-KBM-01 says either one does — and the
+    // sidebar button is in a component the composer never hears from, so without an explicit
+    // signal the menu would still be open underneath the overlay and reappear on close.
+    // Asserted on the menu's heading rather than its listbox: with no token yet the document set
+    // is legitimately empty, and `MentionMenu` renders its FR-CMP-04 empty state in place of the
+    // listbox — so a `queryByRole('listbox')` here would be `null` whether or not the menu closed.
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'Reference a document' }));
+    expect(screen.queryByText('REFERENCE A DOCUMENT')).not.toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /Knowledge base/ }));
+    expect(screen.queryByText('REFERENCE A DOCUMENT')).toBeNull();
+  });
+
+  it('shows FR-SBR-05 and FR-CMP-06 the SAME count', () => {
+    // FR-CMP-06 requires it in as many words, and the two used to be fed by a literal `5` and a
+    // seeded array's length — agreeing only by coincidence. One derivation is what guarantees it.
+    render(<App />);
+    const sidebarCount = screen
+      .getByRole('button', { name: /Knowledge base/ })
+      .textContent?.replace('Knowledge base', '')
+      .trim();
+    expect(
+      screen.getByText(`Responses grounded in ${sidebarCount} documents · Enter to send`),
+    ).not.toBeNull();
   });
 });
 

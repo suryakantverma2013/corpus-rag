@@ -85,6 +85,10 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+  /* The containing block for FR-AUT-08's popover, which the addendum anchors to this box
+     (`bottom: 56px; left: 14px` — the same 14px as the padding above, so its left edge lines
+     up with the avatar). Inert until T-509's menu is rendered into the `userMenu` slot. */
+  position: relative;
 }
 
 .kbButton {

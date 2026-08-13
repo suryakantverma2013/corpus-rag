@@ -1,0 +1,95 @@
+/* FR-KBM-05. The `.zone` block is the prototype's, per property (`RAG Chatbot.dc.html` line 271);
+   the scope control above it is R-71(3)'s spec-authored addition, styled in FR-HDR-03's segment
+   language so it introduces no new vocabulary. */
+.wrap {
+  margin-top: 16px;
+}
+
+.scope {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 8px;
+}
+
+.scopeLabel {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  color: var(--muted2);
+  text-transform: uppercase;
+}
+
+/* The FR-HDR-03 pill. `overflow: hidden` clips the active segment's fill to the rounded ends —
+   and T-504 measured that it ALSO clips a descendant's focus outline, so the ring is pulled
+   inside the border box with a negative offset. `outline: none` is prohibited and is not used. */
+.segments {
+  display: flex;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-btn);
+  overflow: hidden;
+}
+
+.segment {
+  padding: 4px 11px;
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted2);
+  cursor: pointer;
+  --focus-ring-offset: -2px;
+}
+
+.on {
+  background: var(--panel2);
+  color: var(--text);
+}
+
+.segment:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* The prototype's dashed box. `width: 100%` plus `box-sizing: border-box` because this is a
+   <button> rather than the prototype's <div>: a button does not fill its parent, and without the
+   border box the 26px padding would push it past the panel (the T-503 finding). A button also
+   inherits neither `font-family` nor `color`, so both are restated — the other half of it. */
+.zone {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  border: 1.5px dashed var(--line);
+  border-radius: var(--radius-pop);
+  padding: 26px;
+  text-align: center;
+  color: var(--muted2);
+  font-family: inherit;
+  font-size: 12.5px;
+  background: transparent;
+  cursor: pointer;
+  transition:
+    border-color var(--motion-fast) ease,
+    color var(--motion-fast) ease;
+}
+
+/* The prototype's `style-hover` is TWO properties — the border turns accent and the text lifts
+   from `--muted2` to `--muted`. The caption below inherits `color`, so both lines move together;
+   restating the caption's colour would freeze it and lose half the effect. */
+.zone:hover:not(:disabled),
+.dragging {
+  border-color: var(--accent);
+  color: var(--muted);
+}
+
+.zone:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.caption {
+  display: block;
+  margin-top: 5px;
+  font-size: 10.5px;
+}

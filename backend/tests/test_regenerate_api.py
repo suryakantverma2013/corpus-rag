@@ -435,7 +435,9 @@ async def test_a_regenerate_is_not_refused_while_another_chat_is_generating(
     caller's document affordances. It must not *check* it at the route: the gate is keyed on the
     **caller** (R-43(1)), so a route-level `409` would refuse a regenerate in one chat because a
     **different** chat of the same user is mid-turn — the precise defect R-55(1) rejected for
-    feedback, and exactly the unpredicted `409` OI-31 leaves unspecified.
+    feedback, and exactly the unpredicted `409` R-71(1) makes the client reconcile (OI-31, now
+    resolved) — a reconciliation this route should never have to trigger, because nothing here
+    is blocked.
     """
     owner, headers, conversation, answer = await _chat(session, make_token)
     # A gate the same caller holds for a **different** conversation — the exact situation a

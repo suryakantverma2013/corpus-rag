@@ -5,7 +5,7 @@
  * FR-STA-04 blocks **before** submission, so the GUI cannot ask the server to count every
  * keystroke, and a mismatch between the two sides shows up as the composer refusing a message
  * the server would have accepted (or, worse, accepting one it refuses — an unpredicted `409`,
- * which is the shape OI-31 already records as unspecified).
+ * the shape R-71(1) now makes the client reconcile rather than treat as an error).
  *
  * So this is a deliberate second copy of a rule, and the only defensible kind: `ceil(len / 4)`
  * is one line, has no dependency, and cannot drift *silently* because `tokens.test.ts` reads

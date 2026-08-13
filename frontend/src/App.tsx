@@ -11,8 +11,15 @@
  * buildable and testable. Every mutation here is the shape of the API call that replaces it —
  * `onRename` is `PATCH /conversations/{id}`, `onDelete` is `DELETE /conversations/{id}`.
  */
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ThemeProvider } from './theme/ThemeProvider';
+import { AuthProvider } from './auth/AuthProvider';
+import { ChangePasswordModal } from './auth/ChangePasswordModal';
+import { LoginScreen } from './auth/LoginScreen';
+import { UserMenu } from './auth/UserMenu';
+import { PASSWORD_CHANGED } from './auth/copy';
+import { displayName, initials } from './auth/identity';
+import { useAuth } from './auth/useAuth';
 import { AppShell } from './shell/AppShell';
 import { Sidebar } from './sidebar/Sidebar';
 import { ChatHeader } from './chat/ChatHeader';
@@ -22,7 +29,9 @@ import { MessageList } from './chat/MessageList';
 import { SAMPLE_TRANSCRIPTS, asked, regenerated } from './chat/sampleTranscripts';
 import type { SampleChat } from './chat/sampleTranscripts';
 import { Composer } from './composer/Composer';
-import type { MentionDocument } from './composer/mentions';
+import { KnowledgeBaseModal } from './kb/KnowledgeBaseModal';
+import { documentCount, toMentionDocuments } from './kb/documents';
+import { useDocuments } from './kb/useDocuments';
 import { StatsPanel } from './stats/StatsPanel';
 import { modelNameOf } from './stats/stats';
 import { displayTitle, nextActiveId, UNTITLED_CONVERSATION } from './sidebar/conversations';
@@ -38,9 +47,9 @@ import type { Feedback, Message } from './api';
  */
 const DEFAULT_BRAND_NAME = 'Corpus';
 
-/** FR-SBR-06's sample identity — the prototype's, and replaced by `GET /api/v1/auth/me` in
- *  T-509. The version tag is the §9/Appendix A "v1.4". */
-const SAMPLE_USER = { initials: 'MJ', name: 'Maya Jensen', version: 'v1.4' };
+/** The §9/Appendix A GUI version tag, on FR-SBR-06's sidebar row and FR-AUT-05's login footer.
+ *  Product metadata, not session data — it is the same string signed in or out. */
+const GUI_VERSION = 'v1.4';
 
 /** Sample conversations, standing in for `GET /api/v1/conversations` until T-513. Shaped as
  *  the generated `Conversation` model so the swap is a data-source change, not a type change. */
@@ -58,23 +67,6 @@ const SAMPLE_CONVERSATIONS: SidebarConversation[] = [
 /** A conversation with no seeded transcript — every chat created by FR-SBR-02's New chat — shows
  *  the FR-MSG-02 empty state, which is exactly what a new chat should show. */
 const EMPTY_CHAT: SampleChat = { entries: [], typing: false, frozen: false };
-
-/**
- * The FR-CMP-04 mention rows and the FR-CMP-06 count, standing in for `GET /api/v1/documents`
- * until T-513. These are the prototype's own five (`RAG Chatbot.dc.html` line 285), including
- * the one chat-scoped attachment that exercises FR-CMP-04's "this chat" substitution.
- *
- * `documentCount` is deliberately this list's length rather than a second literal: FR-CMP-06
- * requires the composer footer and FR-SBR-05's KB button to show the *same* number, and two
- * constants is how they stop agreeing.
- */
-const SAMPLE_DOCUMENTS: MentionDocument[] = [
-  { id: 'd1', name: 'Project_Alpha_Brief.pdf', type: 'PDF', meta: '24 pages', scope: 'chat' },
-  { id: 'd2', name: 'Q3_Market_Report.pdf', type: 'PDF', meta: '58 pages', scope: 'global' },
-  { id: 'd3', name: 'Customer_Feedback.csv', type: 'CSV', meta: '1,204 rows', scope: 'global' },
-  { id: 'd4', name: 'Pricing_Strategy.docx', type: 'DOC', meta: '11 pages', scope: 'global' },
-  { id: 'd5', name: 'Onboarding_Playbook.pdf', type: 'PDF', meta: '32 pages', scope: 'global' },
-];
 
 /**
  * Seeded FR-ANL-03 usage for the FR-STA-04 projection, standing in for `ContextWindowResponse`.
@@ -156,7 +148,31 @@ export interface AppProps {
   showStats?: boolean;
 }
 
+/**
+ * The FR-SYS-04 boundary and the two runtimes every surface sits inside.
+ *
+ * `AuthProvider` is inside `ThemeProvider`, not beside it: FR-AUT-01 puts the login screen on
+ * `--bg` with the stored theme applied, so the theme has to be in force on the *un*authenticated
+ * side too. The reverse nesting would leave the login card unthemed.
+ */
 function App({ accent, brandName = DEFAULT_BRAND_NAME, showStats = true }: AppProps) {
+  return (
+    <ThemeProvider accent={accent}>
+      <AuthProvider>
+        <Corpus brandName={brandName} showStats={showStats} />
+      </AuthProvider>
+    </ThemeProvider>
+  );
+}
+
+function Corpus({ brandName, showStats }: { brandName: string; showStats: boolean }) {
+  const { phase, user, signOut } = useAuth();
+  /** FR-AUT-08's popover and FR-AUT-09's modal. Both are session UI, so they live here rather
+   *  than in the FR-CST-01 bag — the same reasoning R-58(5) applied to the theme. */
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [passwordOpen, setPasswordOpen] = useState(false);
+  /** NFR-A11Y-05 — R-72(5)'s success announcement for a change the modal reports by vanishing. */
+  const [announcement, setAnnouncement] = useState('');
   const [conversations, setConversations] = useState<SidebarConversation[]>(SAMPLE_CONVERSATIONS);
   const [activeId, setActiveId] = useState<string | null>(SAMPLE_CONVERSATIONS[0]?.id ?? null);
   const [transcripts, setTranscripts] = useState<Record<string, SampleChat>>(SAMPLE_TRANSCRIPTS);
@@ -169,6 +185,8 @@ function App({ accent, brandName = DEFAULT_BRAND_NAME, showStats = true }: AppPr
    * shown again. R-14 scopes the duration to the session; only a reload begins a new one.
    */
   const [sessionStartedAt] = useState(() => Date.now());
+  /** FR-CST-01's `docsOpen`. Both FR-SBR-05 and FR-CMP-02 open the same modal (FR-KBM-01). */
+  const [docsOpen, setDocsOpen] = useState(false);
 
   /**
    * `POST /api/v1/messages/{id}/feedback` with `{"feedback": "up" | "down" | null}` — the key is
@@ -251,15 +269,117 @@ function App({ accent, brandName = DEFAULT_BRAND_NAME, showStats = true }: AppPr
   // read the same numbers, so the panel cannot say a chat has room while the composer refuses it.
   const usage = chat.frozen ? FULL_USAGE : ROOMY_USAGE;
 
+  /**
+   * OI-31 / OI-36 (R-71(1)) — the client-side "a turn is in flight" signal, in ONE place.
+   *
+   * FR-MSG-05's typing indicator, FR-MSG-08's action bar and FR-KBM-07's four gated verbs are the
+   * same fact rendered three times, and R-43(4)'s server `409` is a fourth copy that can disagree
+   * with all of them. Naming it once here is what stops the modal inventing a second signal;
+   * T-513 replaces the right-hand side with the real chat stream's state and touches nothing else.
+   */
+  const turnInFlight = chat.typing;
+
+  /**
+   * The FR-KBM-* store. It owns `GET /documents`, the R-41 event stream and the four verbs —
+   * T-508 wires its own surface, which R-69(5) records as this project's convention.
+   *
+   * **The seeded document list is gone.** FR-CMP-06 requires the composer footer and FR-SBR-05's
+   * button to show the *same* number, and until T-509 supplies a token this is legitimately zero
+   * rather than a plausible five: a second source that happens to look right is exactly how the
+   * two stop agreeing.
+   */
+  // `enabled` rather than a conditional call: hooks cannot be conditional, so this runs during
+  // the `starting` phase too — and an unauthenticated `GET /documents` there answers 401, which
+  // FR-AUT-07's handler would read as "the session ended", signing out the very user whose
+  // session was in the middle of resuming.
+  const documents = useDocuments({
+    open: docsOpen,
+    conversationId: activeId,
+    turnInFlight,
+    enabled: phase === 'authenticated',
+  });
+  const mentionDocuments = toMentionDocuments(documents.rows, activeId);
+  const knowledgeBaseCount = documentCount(documents.rows, activeId);
+
+  const openKnowledgeBase = useCallback(() => setDocsOpen(true), []);
+
+  /**
+   * FR-AUT-06's (D), resolved by R-72(3): the conversation the user was in **is** restored
+   * after re-login — but only for the same user.
+   *
+   * Restoring is the default rather than the work, because this component stays mounted across
+   * the session drop (only what it *returns* changes), so `activeId` and the transcripts are
+   * still here. The work is the reset, and it is the half that matters: without it, a colleague
+   * signing in on the expiry screen would land in the previous user's chat pointer — which
+   * `404`s under R-54(1), but should never be attempted.
+   */
+  const lastUserId = useRef<string | null>(null);
+  useEffect(() => {
+    if (user === null) return;
+    const previous = lastUserId.current;
+    lastUserId.current = user.id;
+    if (previous === null || previous === user.id) return;
+    setConversations(SAMPLE_CONVERSATIONS);
+    setActiveId(SAMPLE_CONVERSATIONS[0]?.id ?? null);
+    setTranscripts(SAMPLE_TRANSCRIPTS);
+    setDocsOpen(false);
+    setUserMenuOpen(false);
+    setPasswordOpen(false);
+  }, [user]);
+
+  // FR-AUT-07's guard. `starting` renders nothing at all rather than a spinner: the session is
+  // resolved by one same-origin request, and a splash that appears and vanishes inside 50ms is
+  // more disruptive than a briefly empty page already painted in the right theme (R-58(1)).
+  if (phase === 'starting') return null;
+  if (phase !== 'authenticated' || user === null) {
+    return <LoginScreen brandName={brandName} version={GUI_VERSION} />;
+  }
+
+  const sidebarUser = {
+    initials: initials(user),
+    name: displayName(user),
+    version: GUI_VERSION,
+  };
+
   return (
-    <ThemeProvider accent={accent}>
+    <>
+      {/* NFR-A11Y-05. Outside the shell so it survives every surface being swapped, and
+          `aria-live="polite"` so it never interrupts. */}
+      <div className="visually-hidden" role="status" aria-live="polite">
+        {announcement}
+      </div>
       {/* Outside AppShell so it is an ancestor of BOTH the `chat` slot (where the chips are) and
           the `overlays` slot (where the FR-CIT-03 card renders). See CitationHoverProvider. */}
       <CitationHoverProvider>
         <AppShell
           brandName={brandName}
           showStats={showStats}
-          overlays={<CitationCard />}
+          overlays={
+            <>
+              <CitationCard />
+              {/* FR-AUT-09 — an overlay, unlike FR-AUT-08's popover, because it is a modal and
+                  is anchored to nothing. */}
+              {passwordOpen && (
+                <ChangePasswordModal
+                  onClose={() => setPasswordOpen(false)}
+                  onChanged={() => setAnnouncement(PASSWORD_CHANGED)}
+                />
+              )}
+              {docsOpen && (
+                <KnowledgeBaseModal
+                  store={documents}
+                  conversationId={activeId}
+                  onClose={() => setDocsOpen(false)}
+                  onCloudImport={() => {
+                    // FR-KBM-06 / R-63: T-512 owns the selection surface. Until it lands the
+                    // button presents FR-AUT-11's *unlinked* state, which is what the requirement
+                    // says it does for an account that has never been linked — and §8.52's rule
+                    // is that a prototype primary action is retargeted, never left inert.
+                  }}
+                />
+              )}
+            </>
+          }
           stats={
             <StatsPanel
               sessionStartedAt={sessionStartedAt}
@@ -278,20 +398,18 @@ function App({ accent, brandName = DEFAULT_BRAND_NAME, showStats = true }: AppPr
                 typing={chat.typing}
                 frozen={chat.frozen}
                 conversationId={activeId}
-                userInitials={SAMPLE_USER.initials}
+                userInitials={sidebarUser.initials}
                 onFeedback={onFeedback}
                 onRegenerate={onRegenerate}
               />
               <Composer
-                documents={SAMPLE_DOCUMENTS}
-                pending={chat.typing}
+                documents={mentionDocuments}
+                pending={turnInFlight}
                 usage={usage}
-                documentCount={SAMPLE_DOCUMENTS.length}
+                documentCount={knowledgeBaseCount}
+                knowledgeBaseOpen={docsOpen}
                 onSend={onSend}
-                onOpenKnowledgeBase={() => {
-                  // T-508 owns the §4.7 modal; FR-CMP-02's `+` is its second entry point
-                  // (FR-SBR-05's KB button is the first).
-                }}
+                onOpenKnowledgeBase={openKnowledgeBase}
               />
             </>
           }
@@ -304,16 +422,32 @@ function App({ accent, brandName = DEFAULT_BRAND_NAME, showStats = true }: AppPr
               onNewChat={onNewChat}
               onRename={onRename}
               onDelete={onDelete}
-              documentCount={5}
-              onOpenKnowledgeBase={() => {
-                // T-508 owns the §4.7 modal.
-              }}
-              user={SAMPLE_USER}
+              documentCount={knowledgeBaseCount}
+              onOpenKnowledgeBase={openKnowledgeBase}
+              user={sidebarUser}
+              onToggleUserMenu={() => setUserMenuOpen((open) => !open)}
+              userMenuOpen={userMenuOpen}
+              userMenu={
+                userMenuOpen && (
+                  <UserMenu
+                    email={user.email}
+                    onChangePassword={() => {
+                      setUserMenuOpen(false);
+                      setPasswordOpen(true);
+                    }}
+                    onSignOut={() => {
+                      setUserMenuOpen(false);
+                      void signOut();
+                    }}
+                    onClose={() => setUserMenuOpen(false)}
+                  />
+                )
+              }
             />
           }
         />
       </CitationHoverProvider>
-    </ThemeProvider>
+    </>
   );
 }
 

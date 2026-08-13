@@ -76,13 +76,37 @@ def test_every_issue_cited_in_the_tree_exists_in_the_manifest(
     assert unknown == [], f"cited but absent from the register: {unknown}"
 
 
+#: Numbers with no register row, each for a reason the spec states. This is the whole of the
+#: gap: everything else in the range must be present, so a *dropped* row still fails.
+#:
+#: - **10**: OI-01..OI-10 are recorded as §8.3 **prose**, not as tagged rows, so `spec_xref`
+#:   cannot see them. R-72(7) promoted OI-09 (it had to — code cites it) and deliberately left
+#:   the three still-open siblings where they are, naming the gap rather than sweeping it up.
+#:   OI-03 and OI-04 are outside the range this check covers; OI-10 falls inside it.
+#: - **11..14**: never assigned at all — the range was skipped when Rev 0.3 introduced rulings
+#:   R-11..R-14 (§8.3's numbering note).
+_ABSENT_BY_DESIGN = frozenset({10, 11, 12, 13, 14})
+
+
 def test_manifest_is_well_formed(manifest: Manifest) -> None:
     assert manifest.issues, "manifest carries no issues"
     assert set(manifest.issues.values()) <= set(STATUSES)
     assert manifest.revision
-    # The register is contiguous from OI-15; OI-11..14 were never assigned (§8.3 note).
     numbers = sorted(int(k[3:]) for k in manifest.issues)
-    assert numbers == list(range(numbers[0], numbers[-1] + 1)), "a register row is missing"
+    expected = [n for n in range(numbers[0], numbers[-1] + 1) if n not in _ABSENT_BY_DESIGN]
+    assert numbers == expected, "a register row is missing"
+
+
+def test_the_documented_gap_is_really_a_gap(manifest: Manifest) -> None:
+    """`_ABSENT_BY_DESIGN` must stay an exception list, never a place rows go to be forgotten.
+
+    Promoting one of those issues to a real row (as R-72(7) did for OI-09) has to fail here
+    until the number is removed from the set — otherwise the exception outlives its reason and
+    the contiguity check quietly stops covering it.
+    """
+    present = {int(k[3:]) for k in manifest.issues}
+    overlap = sorted(present & _ABSENT_BY_DESIGN)
+    assert overlap == [], f"OI-{overlap} now has a register row — drop it from _ABSENT_BY_DESIGN"
 
 
 def test_manifest_file_is_sorted_and_regenerable() -> None:

@@ -142,3 +142,81 @@ describe('dismissal', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 });
+
+describe('nesting — only the topmost dialog owns the keyboard', () => {
+  // T-508 is the first surface to nest one: the FR-KBM-01 modal renders FR-KBM-07's delete
+  // confirmation inside itself. Two capture-phase listeners on `document` fire in registration
+  // order and `stopPropagation` does not reach a sibling on the same node, so without the stack
+  // in Dialog.tsx the OUTER dialog answers Escape and the whole modal closes.
+  const Nested = ({
+    onOuterClose,
+    onInnerClose,
+    inner,
+  }: {
+    onOuterClose: () => void;
+    onInnerClose: () => void;
+    inner: boolean;
+  }) => (
+    <Dialog title="Knowledge base" onClose={onOuterClose}>
+      <button type="button">Close</button>
+      {inner && (
+        <Dialog title="Delete document?" onClose={onInnerClose}>
+          <button type="button">Cancel</button>
+          <button type="button">Delete</button>
+        </Dialog>
+      )}
+    </Dialog>
+  );
+
+  const openNested = () => {
+    const onOuterClose = vi.fn();
+    const onInnerClose = vi.fn();
+    const view = render(
+      <Nested onOuterClose={onOuterClose} onInnerClose={onInnerClose} inner={false} />,
+    );
+    // Focus the control that "opens" the confirmation, so the restore target is meaningful.
+    const closeButton = screen.getByRole('button', { name: 'Close' });
+    closeButton.focus();
+    view.rerender(<Nested onOuterClose={onOuterClose} onInnerClose={onInnerClose} inner />);
+    return { ...view, onOuterClose, onInnerClose, closeButton, Nested };
+  };
+
+  it('routes Escape to the inner dialog only', () => {
+    const { onOuterClose, onInnerClose } = openNested();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onInnerClose).toHaveBeenCalledTimes(1);
+    expect(onOuterClose).not.toHaveBeenCalled();
+  });
+
+  it('leaves the Tab trap to the inner dialog, and the outer moves no focus', () => {
+    // The final focus position ALONE does not discriminate here, and that is worth recording:
+    // the inner listener registers second, so it runs last, and its `!panel.contains(active)`
+    // escape clause repairs whatever the outer just did. Both handlers running therefore
+    // converges on the right element — via two `focus()` calls and a visible flicker.
+    // What the guard actually prevents is the outer's move happening at all, so that is what
+    // this asserts; without it, `Close` is focused mid-keystroke and this spy fires.
+    const { closeButton } = openNested();
+    const outerMove = vi.spyOn(closeButton, 'focus');
+
+    // `Delete` is the last focusable in the OUTER panel too (the inner is a descendant), so the
+    // outer's wrap-from-last branch is armed on this exact keystroke.
+    screen.getByRole('button', { name: 'Delete' }).focus();
+    fireEvent.keyDown(document, { key: 'Tab' });
+
+    expect(outerMove).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Cancel' }));
+  });
+
+  it('restores focus to the opener inside the outer dialog when the inner closes', () => {
+    const { rerender, onOuterClose, onInnerClose, closeButton } = openNested();
+    rerender(<Nested onOuterClose={onOuterClose} onInnerClose={onInnerClose} inner={false} />);
+    expect(document.activeElement).toBe(closeButton);
+  });
+
+  it('hands the keyboard back to the outer dialog once the inner unmounts', () => {
+    const { rerender, onOuterClose, onInnerClose } = openNested();
+    rerender(<Nested onOuterClose={onOuterClose} onInnerClose={onInnerClose} inner={false} />);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onOuterClose).toHaveBeenCalledTimes(1);
+  });
+});

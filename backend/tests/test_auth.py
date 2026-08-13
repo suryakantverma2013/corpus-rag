@@ -108,11 +108,62 @@ async def test_login_ok(
     assert resp.status_code == 200
     body = resp.json()
     assert body["access_token"] == access
-    assert body["refresh_token"] == "r1"
     assert body["token_type"] == "bearer"
     assert body["expires_in"] == 300
+    # R-72(1)/FR-AUT-07: the refresh token reaches the browser ONLY as an httpOnly cookie.
+    # A body copy would make the cookie decorative, so its absence is the requirement.
+    assert "refresh_token" not in body
+    cookie_name = get_settings().session.refresh_cookie_name
+    assert resp.cookies[cookie_name] == "r1"
     # The local user row is upserted (keyed to the Keycloak sub) and committed.
     assert await UserRepository(session).get(sub) is not None
+
+
+async def test_login_cookie_flags(
+    client: httpx.AsyncClient, make_token: Callable[..., str], respx_mock
+) -> None:
+    """The flags ARE the control. Read off the raw header, because `resp.cookies` discards
+    every attribute and would pass just as happily on a plain, script-readable cookie."""
+    kc = get_settings().keycloak
+    respx_mock.post(kc.token_endpoint).respond(
+        json={
+            "access_token": make_token(sub=uuid.uuid4(), email="admin@corpus.test"),
+            "refresh_token": "r1",
+            "expires_in": 300,
+            "refresh_expires_in": 1800,
+            "token_type": "Bearer",
+        }
+    )
+    resp = await client.post(
+        "/api/v1/auth/login", json={"email": "admin@corpus.test", "password": "pw"}
+    )
+    raw = resp.headers["set-cookie"]
+    assert "HttpOnly" in raw
+    assert "Secure" in raw
+    assert "SameSite=strict" in raw
+    assert "Path=/api/v1/auth" in raw
+    # The cookie expires with the credential it carries — Keycloak's own `refresh_expires_in`,
+    # which on the shipped realm is `ssoSessionIdleTimeout` (R-72(2)).
+    assert "Max-Age=1800" in raw
+
+
+async def test_login_cookie_without_refresh_expiry_is_a_session_cookie(
+    client: httpx.AsyncClient, make_token: Callable[..., str], respx_mock
+) -> None:
+    """No `refresh_expires_in` → no `Max-Age`, rather than a number we invented."""
+    kc = get_settings().keycloak
+    respx_mock.post(kc.token_endpoint).respond(
+        json={
+            "access_token": make_token(sub=uuid.uuid4(), email="admin@corpus.test"),
+            "refresh_token": "r1",
+            "expires_in": 300,
+            "token_type": "Bearer",
+        }
+    )
+    resp = await client.post(
+        "/api/v1/auth/login", json={"email": "admin@corpus.test", "password": "pw"}
+    )
+    assert "Max-Age" not in resp.headers["set-cookie"]
 
 
 async def test_login_invalid_credentials(client: httpx.AsyncClient, respx_mock) -> None:
@@ -143,9 +194,22 @@ async def test_login_locked_returns_429(client: httpx.AsyncClient, respx_mock) -
 # ---- /auth/refresh & /auth/logout -------------------------------------------
 
 
-async def test_refresh_ok(client: httpx.AsyncClient, respx_mock) -> None:
+def _cookie_name() -> str:
+    return get_settings().session.refresh_cookie_name
+
+
+def _with_cookie(client: httpx.AsyncClient, value: str) -> httpx.AsyncClient:
+    """Set the refresh cookie on the client rather than per request — httpx deprecates the
+    per-request form, and the jar is what a browser actually has."""
+    client.cookies.set(_cookie_name(), value)
+    return client
+
+
+async def test_refresh_reads_the_cookie_and_rotates_it(
+    client: httpx.AsyncClient, respx_mock
+) -> None:
     kc = get_settings().keycloak
-    respx_mock.post(kc.token_endpoint).respond(
+    route = respx_mock.post(kc.token_endpoint).respond(
         json={
             "access_token": "a2",
             "refresh_token": "r2",
@@ -153,23 +217,72 @@ async def test_refresh_ok(client: httpx.AsyncClient, respx_mock) -> None:
             "token_type": "Bearer",
         }
     )
-    resp = await client.post("/api/v1/auth/refresh", json={"refresh_token": "r1"})
+    resp = await _with_cookie(client, "r1").post("/api/v1/auth/refresh")
     assert resp.status_code == 200
-    assert resp.json()["refresh_token"] == "r2"
+    # The cookie, not a body, is what was presented upstream.
+    assert "refresh_token=r1" in route.calls.last.request.content.decode()
+    assert resp.json()["access_token"] == "a2"
+    assert "refresh_token" not in resp.json()
+    # Rotated: the response replaces the cookie, so an active client's cookie lifetime
+    # tracks the realm's idle timeout rather than the time of login.
+    assert resp.cookies[_cookie_name()] == "r2"
 
 
-async def test_refresh_invalid(client: httpx.AsyncClient, respx_mock) -> None:
+async def test_refresh_without_a_cookie_is_401(client: httpx.AsyncClient) -> None:
+    """No cookie is the ordinary first-visit case, and it must not reach Keycloak at all —
+    `respx_mock` is absent here, so any upstream call would fail the test."""
+    resp = await client.post("/api/v1/auth/refresh")
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "Invalid or expired session."
+
+
+async def test_refresh_invalid_clears_the_cookie(client: httpx.AsyncClient, respx_mock) -> None:
+    """A spent cookie must be taken away on the same response that rejects it.
+
+    THE POINT OF THIS TEST is that the handler *raises*, and FastAPI discards the injected
+    `Response` when it does — so a `response.delete_cookie()` written before the `raise` never
+    reaches the browser, and every later request would re-present a token that can only 401.
+    """
     kc = get_settings().keycloak
     respx_mock.post(kc.token_endpoint).respond(400, json={"error": "invalid_grant"})
-    resp = await client.post("/api/v1/auth/refresh", json={"refresh_token": "stale"})
+    resp = await _with_cookie(client, "stale").post("/api/v1/auth/refresh")
     assert resp.status_code == 401
+    raw = resp.headers["set-cookie"]
+    assert raw.startswith(f"{_cookie_name()}=")
+    assert "Max-Age=0" in raw or "expires=Thu, 01 Jan 1970" in raw.lower()
 
 
-async def test_logout_204(client: httpx.AsyncClient, respx_mock) -> None:
+async def test_logout_revokes_and_clears(client: httpx.AsyncClient, respx_mock) -> None:
     kc = get_settings().keycloak
-    respx_mock.post(kc.logout_endpoint).respond(204)
-    resp = await client.post("/api/v1/auth/logout", json={"refresh_token": "r1"})
+    route = respx_mock.post(kc.logout_endpoint).respond(204)
+    resp = await _with_cookie(client, "r1").post("/api/v1/auth/logout")
     assert resp.status_code == 204
+    assert "refresh_token=r1" in route.calls.last.request.content.decode()
+    assert "Max-Age=0" in resp.headers["set-cookie"]
+
+
+async def test_logout_without_a_cookie_is_204_and_calls_nothing(
+    client: httpx.AsyncClient,
+) -> None:
+    """Idempotent. No `respx_mock`, so an upstream call would fail rather than pass quietly."""
+    resp = await client.post("/api/v1/auth/logout")
+    assert resp.status_code == 204
+
+
+async def test_logout_clears_the_cookie_even_when_keycloak_is_down(
+    client: httpx.AsyncClient, respx_mock
+) -> None:
+    """FR-AUT-08: a user who clicked Sign out must end up signed out locally regardless.
+
+    The alternative — reporting 503 while leaving a live session cookie in the jar — is the
+    worst of both, and it is the shape you get for free if the clear is written onto the
+    injected `Response` instead of onto the exception.
+    """
+    kc = get_settings().keycloak
+    respx_mock.post(kc.logout_endpoint).respond(502)
+    resp = await _with_cookie(client, "r1").post("/api/v1/auth/logout")
+    assert resp.status_code == 503
+    assert "Max-Age=0" in resp.headers["set-cookie"]
 
 
 # ---- /auth/me ----------------------------------------------------------------

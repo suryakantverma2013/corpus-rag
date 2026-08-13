@@ -1,0 +1,179 @@
+/* FR-KBM-01/02/03/06. Transcribed per property from `RAG Chatbot.dc.html` lines 244–276 —
+   which, under R-66, has never rendered anywhere, so the declarations ARE the baseline and the
+   verification is a computed-value comparison in a real browser, not a screenshot diff. */
+
+/* Only the three properties `ui/Dialog` leaves to the caller. The overlay, background, border,
+   radius, shadow and 22px padding are Dialog's and must not be restated here — duplicating them
+   would double the padding and pin a second modal treatment beside the shared one. */
+.panel {
+  width: 520px;
+  max-width: calc(100vw - 32px);
+  max-height: 78vh;
+  overflow-y: auto;
+}
+
+/* 28px bordered square. A <button> inherits neither `font-family` nor `color` (the T-503
+   finding), so both are restated rather than assumed. */
+.close {
+  margin-left: auto;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-btn);
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background var(--motion-fast) ease;
+}
+
+.close:hover {
+  background: var(--panel2);
+}
+
+/* A <p> where the prototype has a <div>: the UA margin must therefore be reset, or the 4px the
+   prototype specifies becomes 4px plus 1em. The T-503/T-504/T-507 trap, in a fourth place. */
+.subtitle {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.notices:not(:empty) {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* R-71(1): a non-destructive notice, never an error. `--muted` on `--panel2` and deliberately
+   NOT `--eval-bad` — that red is FR-KBM-04's `Failed` label and must keep meaning "a document
+   failed", not "something you did was refused". */
+.paused,
+.notice {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-btn);
+  background: var(--panel2);
+  color: var(--muted);
+  font-size: 11.5px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.notice > span {
+  flex: 1;
+}
+
+.dismiss {
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+/* FR-KBM-03's group labels. An <h3> (Dialog's title is the <h2>), so the UA's own font-size,
+   font-weight and margin are all overridden. */
+.sectionLabel {
+  margin: 18px 0 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  color: var(--muted2);
+}
+
+/* A <ul> where the prototype has a <div>: the UA supplies markers and 40px of inline padding,
+   neither of which the prototype has. It is a list because NFR-A11Y-03 wants the semantics. */
+.list {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.empty {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--muted2);
+}
+
+/* An upload the server has accepted but the 1.5s poll has not yet reported. Deliberately not
+   styled as a document row: it is not one, it has no status of its own to show, and making it
+   look identical would imply the ingestion has begun. */
+.pending {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-card);
+  padding: 10px 12px;
+  color: var(--muted2);
+}
+
+.pendingName {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pendingState {
+  font-size: 10.5px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.footer {
+  margin-top: 14px;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.secondary,
+.primary {
+  padding: 8px 16px;
+  border-radius: var(--radius-btn);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background var(--motion-fast) ease;
+}
+
+.secondary {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  font-weight: 500;
+}
+
+.secondary:hover {
+  background: var(--panel2);
+}
+
+/* The prototype's accent primary. `#fff` is the one hard-coded colour in this sheet and is the
+   prototype's own — the same recorded exception as the composer's Send glyph and T-505's AI
+   avatar; NFR-A11Y-06 enumerates it among the accepted contrast failures. */
+.primary {
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  transition: filter var(--motion-fast) ease;
+}
+
+.primary:hover {
+  filter: brightness(1.1);
+}

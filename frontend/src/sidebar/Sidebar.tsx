@@ -9,6 +9,7 @@
  * Presentational: every mutation is a prop. T-513 owns wiring these to the conversations API
  * ("then wire generated TS client + SSE into all views"), so nothing here fetches.
  */
+import type { ReactNode } from 'react';
 import styles from './Sidebar.module.css';
 import { ConversationList } from './ConversationList';
 import type { SidebarConversation } from './conversations';
@@ -52,6 +53,15 @@ export interface SidebarProps {
   onToggleUserMenu?: () => void;
   /** Whether that popover is open, for `aria-expanded`. T-509's state. */
   userMenuOpen?: boolean;
+  /**
+   * FR-AUT-08's popover itself, rendered into the footer.
+   *
+   * A slot rather than a component import, for the reason `AppShell` uses slots: the sidebar
+   * stays presentational and knows nothing about sessions. It must render *here* rather than
+   * in the overlay layer because FR-AUT-08 anchors it to this row, and the footer is the
+   * `position: relative` box it is positioned against.
+   */
+  userMenu?: ReactNode;
 }
 
 export function Sidebar({
@@ -67,6 +77,7 @@ export function Sidebar({
   user,
   onToggleUserMenu,
   userMenuOpen = false,
+  userMenu,
 }: SidebarProps) {
   return (
     <>
@@ -100,6 +111,10 @@ export function Sidebar({
       />
 
       <div className={styles.footer}>
+        {/* FR-AUT-08. First in the footer's DOM order and absolutely positioned, so it does
+            not become a flex item and add a gap to the column. */}
+        {userMenu}
+
         {/* FR-SBR-05 */}
         <button type="button" className={styles.kbButton} onClick={onOpenKnowledgeBase}>
           <span className={styles.kbBullet} aria-hidden="true" />

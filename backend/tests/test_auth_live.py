@@ -95,11 +95,19 @@ async def _fresh_engine_per_test() -> AsyncIterator[None]:
 
 @pytest.fixture
 async def api() -> AsyncIterator[httpx.AsyncClient]:
-    """The real app — **no `get_session` override**, so every request commits for real."""
+    """The real app — **no `get_session` override**, so every request commits for real.
+
+    `https://`, not `http://`, and that is load-bearing rather than cosmetic: the R-72(1)
+    refresh cookie ships `Secure`, and httpx's `http.cookiejar` refuses to *send* a Secure
+    cookie over an http URL. (Chromium and Gecko both exempt `http://localhost`, which is why
+    the browser needs no such accommodation — but the jar does not.) Using https here keeps
+    the shipped `Secure=True` under test instead of relaxing it for the test's convenience;
+    `ASGITransport` ignores the scheme beyond putting it in the scope.
+    """
     await _require_realm()
     transport = httpx.ASGITransport(app=create_app())
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://live", timeout=30.0
+        transport=transport, base_url="https://live", timeout=30.0
     ) as client:
         yield client
 
@@ -242,20 +250,48 @@ async def test_change_password_round_trips(api: httpx.AsyncClient, admin_token: 
 
 
 async def test_refresh_then_logout_revokes(api: httpx.AsyncClient) -> None:
+    """The whole session lifecycle carried by the cookie jar alone (R-72(1)).
+
+    This is the one test that proves the client never needs to *see* a refresh token: nothing
+    below reads one out of a body, and `httpx`'s jar plays the browser's part — so if any leg
+    still depended on the removed body field it would fail here rather than in a mock.
+    """
+    cookie_name = get_settings().session.refresh_cookie_name
     login = await api.post(
         "/api/v1/auth/login", json={"email": ADMIN_EMAIL, "password": _live_password()}
     )
     assert login.status_code == 200
-    refreshed = await api.post(
-        "/api/v1/auth/refresh", json={"refresh_token": login.json()["refresh_token"]}
-    )
-    assert refreshed.status_code == 200
+    assert "refresh_token" not in login.json()
+    assert cookie_name in api.cookies
 
-    token = refreshed.json()["refresh_token"]
-    assert (await api.post("/api/v1/auth/logout", json={"refresh_token": token})).status_code == 204
-    assert (
-        await api.post("/api/v1/auth/refresh", json={"refresh_token": token})
-    ).status_code != 200
+    refreshed = await api.post("/api/v1/auth/refresh")
+    assert refreshed.status_code == 200
+    assert refreshed.json()["access_token"]
+
+    assert (await api.post("/api/v1/auth/logout")).status_code == 204
+    # Logout cleared the jar, so the follow-up presents no cookie at all — which is the same
+    # 401 a revoked one gets, and is what the browser will actually do.
+    assert cookie_name not in api.cookies
+    assert (await api.post("/api/v1/auth/refresh")).status_code == 401
+
+
+async def test_refresh_cookie_max_age_is_the_realm_idle_timeout(api: httpx.AsyncClient) -> None:
+    """R-72(2): OI-09's inactivity timeout is `ssoSessionIdleTimeout`, and the cookie tracks it.
+
+    Read from a live login rather than asserted against a literal — if an operator retunes the
+    realm, this follows them, and the point is precisely that no number of ours has to.
+    """
+    login = await api.post(
+        "/api/v1/auth/login", json={"email": ADMIN_EMAIL, "password": _live_password()}
+    )
+    assert login.status_code == 200
+    raw = login.headers["set-cookie"]
+    assert "HttpOnly" in raw and "Path=/api/v1/auth" in raw
+    max_age = int(raw.split("Max-Age=")[1].split(";")[0])
+    # The real invariant, and it is not a coincidence of the defaults: the refresh cookie must
+    # outlive the access token, or it expires before the first silent refresh is even due and
+    # every session ends after `expires_in` seconds regardless of activity.
+    assert max_age > login.json()["expires_in"]
 
 
 # --- the artifact itself ------------------------------------------------------

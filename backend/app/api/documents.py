@@ -45,9 +45,11 @@ from app.api.errors import (
     STORAGE_DOWN,
     TOO_LARGE,
     UNSUPPORTED_TYPE,
-    CloudLinkRequiredResponse,
+    DocumentConflictResponse,
+    ImportConflictResponse,
     cloud_link_required,
     error_responses,
+    processing_locked,
 )
 from app.api.events import SseFrame
 from app.auth.dependencies import (
@@ -114,10 +116,11 @@ _CLOUD_MISCONFIGURED = (  # TBD(§8.4) copy
 )
 _NOT_LINKED = NOT_LINKED_COPY
 _DRIVE_FORBIDDEN = ACCESS_REVOKED_COPY
-_PROCESSING_LOCKED = (  # TBD(§8.4) copy — FR-STA-02 / FR-ORC-04, R-43
-    "Knowledge-base actions are paused while a response is being generated. "
-    "Try again once the answer finishes."
-)
+#: R-71(1) makes this `409` a *reconciliation* signal rather than an error, so its body is
+#: object-shaped and carries `error_code: "PROCESSING_LOCKED"` — the client cannot branch on the
+#: copy (R-57(4)), and Replace in particular answers `409` for three different reasons. Copy and
+#: constructor live in `app/api/errors.py` beside the model, so the five raise sites below cannot
+#: drift; the string itself is still `TBD(§8.4)` — FR-STA-02 / FR-ORC-04, R-43.
 
 #: FR-STA-02's four gated verbs answer `409`, not `423` or `429`. `429` is disqualified
 #: outright — these routes already carry `@limiter.limit`, so the client could not tell a
@@ -159,7 +162,14 @@ class UploadResponse(BaseModel):
     response_model=UploadResponse,
     status_code=status.HTTP_202_ACCEPTED,
     responses={
-        status.HTTP_200_OK: {"description": "Duplicate checksum — not re-ingested."},
+        # The `model` is not decoration: `response_model` only describes the declared
+        # `status_code`, so without it this `200` publishes no schema at all and the generated
+        # client types its body as `never` — leaving T-508 unable to read `document_id` off the
+        # FR-KBM-08 duplicate it exists to report.
+        status.HTTP_200_OK: {
+            "model": UploadResponse,
+            "description": "Duplicate checksum — not re-ingested.",
+        },
         status.HTTP_202_ACCEPTED: {"description": "Accepted; ingestion queued."},
         **error_responses((404, "scope=chat naming no conversation of this caller's.")),
         **_UPLOAD_FAILURES,
@@ -190,7 +200,7 @@ async def upload_document(
             queue=queue,
         )
     except ProcessingLockedError as exc:
-        raise HTTPException(status.HTTP_409_CONFLICT, _PROCESSING_LOCKED) from exc
+        raise HTTPException(status.HTTP_409_CONFLICT, processing_locked()) from exc
     except (FileTooLargeError, ObjectTooLargeError) as exc:
         raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, _TOO_LARGE) from exc
     except UnsupportedFileTypeError as exc:
@@ -252,10 +262,13 @@ class ImportRequest(BaseModel):
     response_model=UploadResponse,
     status_code=status.HTTP_202_ACCEPTED,
     responses={
-        status.HTTP_200_OK: {"description": "Duplicate checksum — not re-ingested."},
+        status.HTTP_200_OK: {
+            "model": UploadResponse,
+            "description": "Duplicate checksum — not re-ingested.",
+        },
         status.HTTP_202_ACCEPTED: {"description": "Accepted; ingestion queued."},
         status.HTTP_409_CONFLICT: {
-            "model": CloudLinkRequiredResponse,
+            "model": ImportConflictResponse,
             "description": (
                 "No cloud account is linked, the provider revoked access, "
                 "or a response is generating."
@@ -329,7 +342,7 @@ async def import_document(
     except drive.DriveError as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, _DRIVE_DOWN) from exc
     except ProcessingLockedError as exc:
-        raise HTTPException(status.HTTP_409_CONFLICT, _PROCESSING_LOCKED) from exc
+        raise HTTPException(status.HTTP_409_CONFLICT, processing_locked()) from exc
     except (FileTooLargeError, ObjectTooLargeError) as exc:
         raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, _TOO_LARGE) from exc
     except UnsupportedFileTypeError as exc:
@@ -385,7 +398,10 @@ class RetryResponse(BaseModel):
     response_model=DeleteResponse,
     status_code=status.HTTP_202_ACCEPTED,
     responses={
-        status.HTTP_200_OK: {"description": "Already deleted — nothing queued."},
+        status.HTTP_200_OK: {
+            "model": DeleteResponse,
+            "description": "Already deleted — nothing queued.",
+        },
         status.HTTP_202_ACCEPTED: {"description": "Accepted; the document left retrieval."},
         **error_responses((404, "No such document for this caller.")),
         **_LOCKED_AND_LIMITED,
@@ -411,7 +427,7 @@ async def delete_document(
             queue=queue,
         )
     except ProcessingLockedError as exc:
-        raise HTTPException(status.HTTP_409_CONFLICT, _PROCESSING_LOCKED) from exc
+        raise HTTPException(status.HTTP_409_CONFLICT, processing_locked()) from exc
     except DocumentNotFoundError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, _DOCUMENT_NOT_FOUND) from exc
 
@@ -431,10 +447,11 @@ async def delete_document(
     status_code=status.HTTP_202_ACCEPTED,
     responses={
         status.HTTP_202_ACCEPTED: {"description": "Accepted; ingestion re-queued."},
-        **error_responses(
-            (404, "No such document for this caller."),
-            (409, "The document is not in FAILED, or a response is generating."),
-        ),
+        **error_responses((404, "No such document for this caller.")),
+        status.HTTP_409_CONFLICT: {
+            "model": DocumentConflictResponse,
+            "description": "The document is not in FAILED, or a response is generating.",
+        },
         **RATE_LIMITED,
     },
     summary="Retry a failed ingestion",
@@ -460,7 +477,7 @@ async def retry_document(
             queue=queue,
         )
     except ProcessingLockedError as exc:
-        raise HTTPException(status.HTTP_409_CONFLICT, _PROCESSING_LOCKED) from exc
+        raise HTTPException(status.HTTP_409_CONFLICT, processing_locked()) from exc
     except DocumentNotFoundError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, _DOCUMENT_NOT_FOUND) from exc
     except NotRetryableError as exc:
@@ -489,8 +506,11 @@ class DocumentResponse(BaseModel):
     **`current_version` is the version serving retrieval, not the version being built.**
     While a replace is in flight `latest_job_document_version` is `current_version + 1`,
     and that inequality is the only signal distinguishing "this document failed and is
-    silent" from "this document's replace failed and the previous version still answers"
-    (OI-29). The job's own status and progress are deliberately not denormalised here —
+    silent" from "this document's replace failed and the previous version still answers".
+    R-71(2) settles what the GUI does with it (OI-29, resolved): the row keeps `Failed` and
+    its Retry affordance, and the FR-KBM-04 meta line reads
+    `update failed, v{current_version} still answering`. The job's own status and progress
+    are deliberately not denormalised here —
     `GET /jobs/{id}` owns them, and a surface rendering two statuses read at two different
     moments will eventually render them disagreeing.
     """
@@ -701,9 +721,16 @@ type DocumentStreamFrame = Annotated[
 
 @dataclass(frozen=True, slots=True)
 class StreamScope:
-    """The resolved scope a document stream will report on."""
+    """The resolved scope a document stream will report on.
+
+    Three states, not two — `knowledge_base_id=None` is ambiguous on its own and that ambiguity
+    was a defect: it reads as *no filter* (the caller named no scope) and as *unresolved* (the
+    caller named a scope whose knowledge base does not exist yet). `empty` separates them, so
+    the second case reports nothing instead of everything.
+    """
 
     knowledge_base_id: uuid.UUID | None
+    empty: bool = False
 
 
 async def resolve_stream_scope(
@@ -734,9 +761,11 @@ async def resolve_stream_scope(
     except ConversationNotFoundError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, _CONVERSATION_NOT_FOUND) from exc
     # A scope that resolves to no knowledge base yet (nothing uploaded to it) still gets a
-    # stream: the KB is created on demand by the first upload, and a client that opened the
-    # modal a moment early must not be left without the events describing it.
-    return StreamScope(knowledge_base_id=knowledge_base_id)
+    # stream — the connection is the caller's live channel and refusing it would make opening
+    # the modal a moment early an error. But it reports the *empty* set, exactly as
+    # `list_documents` does for the same request, rather than falling back to the unfiltered
+    # read that `knowledge_base_id=None` otherwise means.
+    return StreamScope(knowledge_base_id=knowledge_base_id, empty=knowledge_base_id is None)
 
 
 async def hold_stream_slot(user: CurrentUser, settings: SettingsDep) -> AsyncIterator[None]:
@@ -814,6 +843,7 @@ async def stream_documents(
         sessionmaker,
         owner_id=user.id,
         knowledge_base_id=scope_.knowledge_base_id,
+        empty=scope_.empty,
         poll_interval=settings.sse.poll_interval_seconds,
         stall_after=settings.stall_after,
     )
@@ -865,16 +895,20 @@ async def get_document(
     response_model=ReplaceResponse,
     status_code=status.HTTP_202_ACCEPTED,
     responses={
-        status.HTTP_200_OK: {"description": "Identical bytes — nothing queued."},
+        status.HTTP_200_OK: {
+            "model": ReplaceResponse,
+            "description": "Identical bytes — nothing queued.",
+        },
         status.HTTP_202_ACCEPTED: {"description": "Accepted; the new version is queued."},
         **error_responses((404, "No such document for this caller.")),
         **_UPLOAD_FAILURES,
         **RATE_LIMITED,
         status.HTTP_409_CONFLICT: {
+            "model": DocumentConflictResponse,
             "description": (
                 "Not ACTIVE/FAILED, the bytes belong to another document, "
                 "or a response is generating."
-            )
+            ),
         },
     },
     summary="Replace a document with a new version",
@@ -903,7 +937,7 @@ async def replace_document(
             queue=queue,
         )
     except ProcessingLockedError as exc:
-        raise HTTPException(status.HTTP_409_CONFLICT, _PROCESSING_LOCKED) from exc
+        raise HTTPException(status.HTTP_409_CONFLICT, processing_locked()) from exc
     except DocumentNotFoundError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, _DOCUMENT_NOT_FOUND) from exc
     except NotReplaceableError as exc:

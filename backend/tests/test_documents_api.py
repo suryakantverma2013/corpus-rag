@@ -597,6 +597,12 @@ async def test_the_four_mutating_verbs_are_gated_while_a_response_generates(
     `409` rather than `429` because these routes already carry a slowapi limit and the
     client could not tell a throttle from a busy chat; rather than `423` because what is
     locked is the caller's session, not the document.
+
+    **The body is object-shaped and carries `error_code` (R-71(1), closing OI-31).** These
+    routes answer `409` for other reasons too — `NotRetryableError`, `NotReplaceableError`,
+    `DuplicateChecksumError` — and the GUI *reconciles* this one rather than rendering it as an
+    error, so it has to tell them apart. Asserting the code rather than a substring of the copy
+    is also what stops this test pinning a `# TBD(§8.4)` string that is expected to change.
     """
     owner, headers = await _caller(session, make_token)
     document = await _document(session, owner_id=owner, status=DocumentStatus.FAILED)
@@ -614,7 +620,9 @@ async def test_the_four_mutating_verbs_are_gated_while_a_response_generates(
         )
 
     assert response.status_code == 409, response.text
-    assert "paused" in response.json()["detail"]
+    detail = response.json()["detail"]
+    assert detail["error_code"] == "PROCESSING_LOCKED"
+    assert "paused" in detail["message"]
 
 
 @pytest.mark.usefixtures("offline_clients")

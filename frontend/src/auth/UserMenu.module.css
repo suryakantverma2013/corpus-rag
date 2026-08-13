@@ -1,0 +1,56 @@
+/* FR-AUT-08 — the user-menu popover, anchored above the FR-SBR-06 sidebar row.
+   Spec-authored (R-27); declarations from the login addendum's static demo. */
+
+.popover {
+  position: absolute;
+  /* The addendum anchors it to the sidebar footer: 56px clears the 26px avatar row plus the
+     footer's own padding, and 14px matches the footer's horizontal padding so the popover's
+     left edge lines up with the avatar rather than with the column. */
+  bottom: 56px;
+  left: 14px;
+  width: 240px;
+  box-sizing: border-box;
+  z-index: var(--z-menu);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pop);
+  box-shadow: var(--shadow);
+  padding: 6px;
+  --fade-up-duration: var(--motion-fast);
+}
+
+/* The signed-in email, bottom-bordered. `text-overflow: ellipsis` because an email is
+   arbitrary-length user data and the popover is a fixed 240px — without it a long address
+   either wraps the popover taller than its anchor allows or overflows it. */
+.email {
+  padding: 8px 10px 6px;
+  font-size: 11px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Real <button>s (NFR-A11Y-03), so `font`, `color`, `background` and `text-align` are all
+   restated — a button inherits none of them (the T-503 finding). */
+.item {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: none;
+  border-radius: var(--radius-btn);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--motion-fast) ease;
+}
+
+.item:hover {
+  background: var(--panel2);
+}

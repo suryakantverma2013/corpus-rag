@@ -9,16 +9,125 @@
  * the Vite dev server proxies `/api` and `/health` to reproduce that locally — which is why the
  * backend carries no CORS middleware and must not acquire one.
  *
- * Auth is deliberately absent: the bearer token, silent refresh and 401 handling are T-509's,
- * and belong in middleware here once the login flow exists.
- *
  * **The three SSE endpoints are not reachable through this client** — see `streamFrames`.
  */
 import createClient from 'openapi-fetch';
+import type { Middleware } from 'openapi-fetch';
 
+import { authHeaders, currentAccessToken, ensureFreshToken, reportUnauthorized } from './auth';
 import type { components, paths } from './schema';
 
 export const api = createClient<paths>({ baseUrl: '' });
+
+/**
+ * The routes that carry no bearer at all — so there is nothing to freshen.
+ *
+ * `refresh` being here is not an optimisation, it is required: it is reached through this same
+ * client, so freshening it would call the refresher from inside the refresher and await a
+ * promise that cannot settle until it returns. The symptom is a hung boot, not an error.
+ *
+ * **Not "everything under /auth"**: `/auth/me` and `/auth/change-password` are ordinary
+ * authenticated calls and must be freshened like any other.
+ */
+const UNAUTHENTICATED: readonly string[] = [
+  '/api/v1/auth/login',
+  '/api/v1/auth/refresh',
+  '/api/v1/auth/logout',
+];
+
+/**
+ * The routes whose 401 is *not* the end of the session — the correction FR-AUT-07 needs.
+ *
+ * Read literally ("any API 401 triggers the return-to-login flow") it signs the user out when
+ * `login` rejects a typo, and when `change-password` reports that the **current** password was
+ * wrong — the latter being an inline error FR-AUT-09 specifies, delivered instead by throwing
+ * the user back to a login screen.
+ *
+ * **A superset of the list above, and deliberately not the same list.** `change-password`
+ * belongs here and *not* there: its 401 means "wrong current password", but it still needs a
+ * live bearer, and skipping its renewal would let a stale token produce a 401 that this list
+ * then swallows — leaving the user with "Not authenticated" as an inline error and no way out.
+ */
+const SESSION_401_EXEMPT: readonly string[] = [...UNAUTHENTICATED, '/api/v1/auth/change-password'];
+
+/** Compares the *path*, never a substring: `startsWith` would exempt `/auth/login-history`,
+ *  and `includes` would exempt anything carrying `?next=/api/v1/auth/login`. */
+const pathIn = (list: readonly string[], url: string): boolean =>
+  list.includes(new URL(url, 'http://placeholder').pathname);
+
+/**
+ * The bearer header, on every request this client makes — renewed first if it is about to
+ * expire (R-72(2)).
+ *
+ * Registered here rather than left to the surfaces because T-508 authenticates its SSE stream
+ * (which cannot go through middleware at all) and would otherwise send its four mutations *un*
+ * authenticated — a split-brain that presents as a backend bug.
+ *
+ * `request.headers.set(...)` is **additive**, and that is load-bearing: `openapi-fetch` calls
+ * `fetch(Request)`, so a shim written as `fetch(url, {...init, headers})` replaces the
+ * Request's headers wholesale — stripping a multipart `Content-Type` *and its boundary*, which
+ * FastAPI answers with a 422 that looks nothing like a header problem (§8.58(9)).
+ */
+export const sessionMiddleware: Middleware = {
+  async onRequest({ request }) {
+    if (!pathIn(UNAUTHENTICATED, request.url)) await ensureFreshToken();
+    const token = currentAccessToken();
+    if (token !== null) request.headers.set('Authorization', `Bearer ${token}`);
+    return request;
+  },
+  onResponse({ request, response }) {
+    if (response.status === 401 && !pathIn(SESSION_401_EXEMPT, request.url)) {
+      reportUnauthorized();
+    }
+    return response;
+  },
+};
+
+/**
+ * Exported and then registered, rather than written inline, so it can be tested at all.
+ *
+ * `api` is built on `baseUrl: ''` (R-57's single origin), and `openapi-fetch` constructs a
+ * `Request` from the raw path — which the browser resolves against `location` and Node's
+ * `undici` rejects outright. So a test cannot reach this logic through `api`; it reaches it
+ * here instead, with a real `Request`. `client.test.ts` guards the registration below by
+ * reading this file, on the same reasoning as the `tokens.ts` cross-language guard (§8.56(3)).
+ */
+api.use(sessionMiddleware);
+
+/**
+ * An SSE endpoint answered with a non-2xx.
+ *
+ * A typed error rather than `new Error('stream failed: ' + status)`, because callers must branch
+ * on the status and matching a formatted message is the anti-pattern R-57(4) forbids for the two
+ * chat `409`s. The distinctions are real and lead to different behaviour: `429` is R-41(7)'s
+ * per-user stream cap, where retrying cannot free a slot another tab holds; `401` is T-509's; and
+ * `400`/`404` mean the request itself was wrong, so a reconnect loop is superstition.
+ */
+export class StreamError extends Error {
+  readonly status: number;
+  readonly body: string | null;
+
+  constructor(status: number, body: string | null) {
+    super(`stream failed: ${status}`);
+    this.name = 'StreamError';
+    this.status = status;
+    this.body = body;
+  }
+}
+
+/**
+ * An SSE path, checked against the generated `paths` at compile time.
+ *
+ * `streamFrames` takes a plain string because it is `fetch`, not `openapi-fetch` — so nothing
+ * otherwise stops a typo, or a route rename on the backend, from reaching production as a 404 at
+ * runtime. This is the cheapest way to put the one thing that *is* checkable under the generator.
+ */
+export function streamPath<P extends keyof paths & string>(path: P): P {
+  return path;
+}
+
+/** FR-KBM-09's live channel (R-41), consumed by T-508. */
+export const DOCUMENT_EVENTS_URL = streamPath('/api/v1/documents/events');
 
 /** One parsed SSE frame: the whole envelope, discriminated by `event`. */
 export type ChatFrame = components['schemas']['ChatStreamFrame'];
@@ -38,17 +147,29 @@ export type DocumentFrame = components['schemas']['DocumentStreamFrame'];
  *
  * Reconnect is the caller's: for the document stream a reconnect simply applies the fresh
  * `snapshot` every connect sends (R-41(6) — there is no `Last-Event-ID` replay).
+ *
+ * The `Authorization` header is applied here rather than by each caller, so the stream and the
+ * `api` client above can never disagree about who is calling. It is read **per connect attempt**,
+ * which is what lets a reconnect after a silent refresh pick up the new token.
  */
 export async function* streamFrames<T>(
   url: string,
   init: RequestInit = {},
 ): AsyncGenerator<T, void, undefined> {
+  // Per connect attempt, exactly as the header below is read per connect attempt: a stream
+  // opened with a token that expires in five seconds authenticates once and then holds a
+  // connection the server will not renew.
+  await ensureFreshToken();
   const response = await fetch(url, {
     ...init,
-    headers: { ...init.headers, Accept: 'text/event-stream' },
+    headers: { ...authHeaders(), ...init.headers, Accept: 'text/event-stream' },
   });
   if (!response.ok || !response.body) {
-    throw new Error(`stream failed: ${response.status}`);
+    // The body is read before throwing: it carries the server's `detail`, which is the copy the
+    // R-41(7) stream-cap notice renders. Reading it also releases the connection.
+    const body = await response.text().catch(() => null);
+    if (response.status === 401) reportUnauthorized();
+    throw new StreamError(response.status, body);
   }
 
   const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();

@@ -43,6 +43,7 @@ __all__ = [
     "MISCONFIGURED",
     "NOT_LINKED_COPY",
     "PROCESSING_LOCKED",
+    "PROCESSING_LOCKED_COPY",
     "QUOTA_EXCEEDED",
     "RATE_LIMITED",
     "STORAGE_DOWN",
@@ -54,11 +55,16 @@ __all__ = [
     "CloudLinkRequiredResponse",
     "ContextWindowExceededDetail",
     "ContextWindowExceededResponse",
+    "DocumentConflictResponse",
     "ErrorResponse",
+    "ImportConflictResponse",
     "NotLatestAnswerDetail",
     "NotLatestAnswerResponse",
+    "ProcessingLockedDetail",
+    "ProcessingLockedResponse",
     "cloud_link_required",
     "error_responses",
+    "processing_locked",
 ]
 
 
@@ -111,6 +117,33 @@ class NotLatestAnswerDetail(BaseModel):
     message: str
 
 
+class ProcessingLockedDetail(BaseModel):
+    """R-24 / R-43(4)'s gate on the four file verbs, with a code the client can branch on.
+
+    **Why a code and not just copy (R-71(1), OI-31).** These four routes answer `409` for more
+    than one reason — `NotRetryableError`, `NotReplaceableError` and `DuplicateChecksumError`
+    live on the same status — and R-71(1) makes the GUI *reconcile* an unpredicted lock `409`
+    rather than render it as an error: it disables its own affordances and clears them when the
+    turn ends. That reconciliation has to know which `409` arrived, and the only alternative is
+    matching on a `# TBD(§8.4)` string, which R-57(4) forbids in as many words. Three of the
+    four cases are derivable from the route and the row's state; **Replace is not** — it can
+    answer `409` from `ACTIVE`/`FAILED` for either reason — so without this the client is left
+    guessing on exactly the verb it cannot guess about.
+
+    A refusal about the caller's *session*, not a failure, so it carries no `FailureClass` —
+    the R-51(5) precedent, and the same reasoning that put `409` here rather than `423`/`429`.
+    """
+
+    error_code: Literal["PROCESSING_LOCKED"]
+    message: str
+
+
+class ProcessingLockedResponse(BaseModel):
+    """The wire body for R-24's gate."""
+
+    detail: ProcessingLockedDetail
+
+
 class CloudLinkRequiredDetail(BaseModel):
     """The caller's cloud drive needs attention before an import can run (T-214, FR-AUT-11).
 
@@ -159,6 +192,18 @@ class NotLatestAnswerResponse(BaseModel):
 #: nested literal without help, and this type is never *parsed* by us, only published.
 type ChatConflictResponse = ContextWindowExceededResponse | NotLatestAnswerResponse
 
+#: The `409` on `POST /documents/{id}/retry` and `.../replace`, which can be either.
+#:
+#: Retry answers `NotRetryableError` (plain copy) or the R-24 gate; Replace adds
+#: `DuplicateChecksumError` on top. Declaring the union is what makes R-71(1)'s reconciliation
+#: implementable: the client branches on `detail.error_code` being present and equal to
+#: `PROCESSING_LOCKED`, and renders `detail` otherwise. Publishing only `ErrorResponse` here
+#: would have typed the lock's object detail as a string.
+type DocumentConflictResponse = ProcessingLockedResponse | ErrorResponse
+
+#: The `409` on `POST /documents/import` — FR-AUT-11's two link codes, or the R-24 gate.
+type ImportConflictResponse = ProcessingLockedResponse | CloudLinkRequiredResponse
+
 
 def error_responses(*entries: tuple[int, str]) -> dict[int | str, dict[str, Any]]:
     """Build a ``responses=`` mapping of plain :class:`ErrorResponse` bodies.
@@ -202,9 +247,34 @@ UNSUPPORTED_TYPE = error_responses((415, "Not a supported document format (FR-KB
 QUOTA_EXCEEDED = error_responses((507, "FR-ERR-02 — the caller's storage quota is exhausted."))
 
 #: R-24 / R-43(4) — the processing lock, at exactly the four file verbs it gates.
-PROCESSING_LOCKED = error_responses(
-    (409, "R-24 — another file action is in flight for this caller.")
+#:
+#: Object-shaped since Rev 0.38 (R-71(1)): the GUI reconciles this `409` instead of rendering it
+#: as an error, which it can only do if it can tell this `409` from the others these routes
+#: answer. Built here rather than via `error_responses`, which is the plain-`ErrorResponse` helper.
+PROCESSING_LOCKED: dict[int | str, dict[str, Any]] = {
+    409: {
+        "model": ProcessingLockedResponse,
+        "description": "R-24 — a response is generating for this caller; retry when it finishes.",
+    }
+}
+
+#: The one copy, so the five raise sites cannot drift. TBD(§8.4) — FR-STA-02 / FR-ORC-04, R-43.
+PROCESSING_LOCKED_COPY = (
+    "Knowledge-base actions are paused while a response is being generated. "
+    "Try again once the answer finishes."
 )
+
+
+def processing_locked() -> Any:
+    """Build R-24's `409` detail payload.
+
+    Returns the *detail*, so the status stays visible at the raise site — `cloud_link_required`'s
+    shape, and constructed from the model rather than a dict literal for the same reason.
+    """
+    return ProcessingLockedDetail(
+        error_code="PROCESSING_LOCKED", message=PROCESSING_LOCKED_COPY
+    ).model_dump()
+
 
 # --- FR-AUT-11 / FR-KBM-10 (T-214) ----------------------------------------------------
 #
