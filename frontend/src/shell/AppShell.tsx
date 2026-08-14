@@ -17,8 +17,14 @@
 import type { ReactNode } from 'react';
 import styles from './AppShell.module.css';
 
-/** The <main> id, so the NFR-A11Y-04 bypass link has something to target. */
-const MAIN_ID = 'corpus-main';
+/**
+ * The <main> id, so the NFR-A11Y-04 bypass link has something to target.
+ *
+ * Exported since T-511: `App` also focuses this element when the login screen is replaced by
+ * the shell. Two callers, one id — a second literal is how the skip link and the sign-in
+ * hand-off drift onto different elements.
+ */
+export const MAIN_ID = 'corpus-main';
 
 export interface AppShellProps {
   /**

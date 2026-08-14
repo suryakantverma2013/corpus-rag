@@ -37,6 +37,49 @@ vi.mock('../kb/mutations', async (importOriginal) => ({
 }));
 vi.mock('../kb/useDocumentStream', () => ({ useDocumentStream: () => 'idle' }));
 
+/**
+ * T-513's stores fetch on mount too, and for the same reason they are mocked here: this file
+ * asks whether an unauthenticated app *calls the server at all*, so the transport has to be
+ * observable rather than real.
+ */
+const conversationRow = (id: string, title: string) => ({
+  id,
+  title,
+  archived: false,
+  created_at: '2026-07-16T09:12:00Z',
+  updated_at: id === 'chat-1' ? '2026-08-01T00:00:00Z' : '2026-07-01T00:00:00Z',
+  message_count: 2,
+});
+const listConversations = vi.fn(async () => ({
+  kind: 'ok' as const,
+  data: [
+    conversationRow('chat-1', 'Analyzing Market Trends'),
+    conversationRow('chat-2', 'Pricing'),
+  ],
+}));
+vi.mock('../chat/mutations', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  listConversations: () => listConversations(),
+  listMessages: async () => ({ kind: 'ok', data: [] }),
+  getConversation: async (id: string) => ({
+    kind: 'ok',
+    data: {
+      ...conversationRow(id, id === 'chat-1' ? 'Analyzing Market Trends' : 'Pricing'),
+      context: {
+        used_tokens: 0,
+        limit_tokens: 10_400,
+        remaining_tokens: 10_400,
+        percent_used: 0,
+        answer_reserve_tokens: 1_500,
+      },
+    },
+  }),
+}));
+vi.mock('../chat/useChatStream', () => ({
+  streamSend: async () => null,
+  streamRegenerate: async () => null,
+}));
+
 const App = (await import('../App')).default;
 
 const ME: Me = {
@@ -80,8 +123,15 @@ describe('FR-AUT-07 — the shell requires authentication', () => {
     await waitFor(() => expect(loginCard()).not.toBeNull());
 
     expect(shell()).toBeNull();
-    expect(screen.queryByRole('main')).toBeNull();
+    // The shell's own landmarks, identified by the labels only it supplies. `queryByRole('main')`
+    // used to stand in for this and no longer can: since T-511 the login screen is itself a
+    // <main>, because a page with no landmark at all gives a screen-reader user nothing to
+    // navigate to (axe: `landmark-one-main` + 8 × `region`). Asserting on the *labelled* shell
+    // landmarks says what this test means instead of relying on the login screen having none.
+    expect(screen.queryByRole('navigation', { name: 'Conversations' })).toBeNull();
     expect(screen.queryByRole('complementary')).toBeNull();
+    // ...and there is exactly one <main> — the login screen's — never two.
+    expect(screen.getAllByRole('main')).toHaveLength(1);
     // The substantive half: no authenticated request was even attempted.
     expect(listDocuments).not.toHaveBeenCalled();
   });
@@ -93,6 +143,21 @@ describe('FR-AUT-07 — the shell requires authentication', () => {
     expect(loginCard()).toBeNull();
     // FR-SBR-06 now reads `GET /auth/me`, not the prototype's sample identity.
     expect(screen.getByText('Maya Jensen')).not.toBeNull();
+  });
+
+  it('moves focus into the shell when it replaces the login screen (NFR-A11Y-04)', async () => {
+    // T-511, measured live: signing in swaps two entirely different trees, so the element that
+    // had focus is detached and `document.activeElement` falls back to <body> — leaving a
+    // keyboard user at the top of the document with no signal, and a screen-reader user with no
+    // cursor in the new page. <main> is the target because the skip link already uses it, so no
+    // new focusable element exists and no pixel moves (the ring is `:focus-visible`-only).
+    refreshSession.mockResolvedValue({ accessToken: 'a', expiresIn: 300 });
+    render(<App />);
+    await waitFor(() => expect(shell()).not.toBeNull());
+
+    const main = screen.getByRole('main');
+    await waitFor(() => expect(document.activeElement).toBe(main));
+    expect(document.activeElement).not.toBe(document.body);
   });
 
   it('replaces the login screen with the shell on a successful sign-in', async () => {
@@ -166,7 +231,10 @@ describe('FR-AUT-06 (D) — the active chat after re-login (R-72(3))', () => {
   it('restores the conversation the user was in when the SAME user signs back in', async () => {
     refreshSession.mockResolvedValue({ accessToken: 'a', expiresIn: 300 });
     render(<App />);
-    await waitFor(() => expect(shell()).not.toBeNull());
+    // The shell mounts before `GET /conversations` answers, so the header reads the untitled
+    // label for a frame. Waiting for the list is what makes `first` the *first conversation*
+    // rather than that placeholder — and the reset returns to it, not to the placeholder.
+    await waitFor(() => expect(header()).toBe('Analyzing Market Trends'));
     const first = header();
     await selectSecondConversation();
     const chosen = header();
@@ -181,7 +249,10 @@ describe('FR-AUT-06 (D) — the active chat after re-login (R-72(3))', () => {
     // the previous user's chat pointer — which 404s under R-54(1), but should never be tried.
     refreshSession.mockResolvedValue({ accessToken: 'a', expiresIn: 300 });
     render(<App />);
-    await waitFor(() => expect(shell()).not.toBeNull());
+    // The shell mounts before `GET /conversations` answers, so the header reads the untitled
+    // label for a frame. Waiting for the list is what makes `first` the *first conversation*
+    // rather than that placeholder — and the reset returns to it, not to the placeholder.
+    await waitFor(() => expect(header()).toBe('Analyzing Market Trends'));
     const first = header();
     await selectSecondConversation();
     expect(header()).not.toBe(first);

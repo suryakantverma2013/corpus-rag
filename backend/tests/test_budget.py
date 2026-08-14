@@ -220,10 +220,9 @@ def test_the_reserve_is_what_keeps_the_transcript_under_budget() -> None:
     answer then carries the conversation past it, with the block firing only on the *next*
     turn, after the budget was already breached.
     """
-    usage = ContextUsage(used_tokens=9_000, limit_tokens=10_400)
-    settings = _settings(window_tokens=10_400, answer_reserve_tokens=1_500)
+    usage = ContextUsage(used_tokens=9_000, limit_tokens=10_400, answer_reserve_tokens=1_500)
 
-    check = check_submission(usage, "short question", settings=settings)
+    check = check_submission(usage, "short question")
 
     assert check.projected_tokens == 9_000 + check.query_tokens + 1_500
     assert not check.allowed
@@ -233,10 +232,9 @@ def test_the_reserve_is_what_keeps_the_transcript_under_budget() -> None:
 
 def test_a_projection_landing_exactly_on_the_limit_is_allowed() -> None:
     """Ties are permissive — R-44's rule, and R-49(4)'s disposition at the gate."""
-    settings = _settings(window_tokens=10_000, answer_reserve_tokens=1_500)
-    usage = ContextUsage(used_tokens=8_400, limit_tokens=10_000)
+    usage = ContextUsage(used_tokens=8_400, limit_tokens=10_000, answer_reserve_tokens=1_500)
 
-    check = check_submission(usage, _100_TOKENS, settings=settings)
+    check = check_submission(usage, _100_TOKENS)
 
     assert check.projected_tokens == 10_000
     assert check.allowed
@@ -245,16 +243,19 @@ def test_a_projection_landing_exactly_on_the_limit_is_allowed() -> None:
 
 def test_a_normal_turn_in_a_fresh_chat_is_allowed() -> None:
     """The reserve must not make the *first* message of a chat unsendable."""
-    settings = _settings()
-    usage = ContextUsage(used_tokens=0, limit_tokens=settings.context.window_tokens)
-    assert check_submission(usage, "What is the refund window?", settings=settings).allowed
+    context = _settings().context
+    usage = ContextUsage(
+        used_tokens=0,
+        limit_tokens=context.window_tokens,
+        answer_reserve_tokens=context.answer_reserve_tokens,
+    )
+    assert check_submission(usage, "What is the refund window?").allowed
 
 
 def test_overflow_reports_how_far_over_the_projection_lands() -> None:
-    settings = _settings(window_tokens=2_000, answer_reserve_tokens=1_500)
-    usage = ContextUsage(used_tokens=480, limit_tokens=2_000)
+    usage = ContextUsage(used_tokens=480, limit_tokens=2_000, answer_reserve_tokens=1_500)
 
-    check = check_submission(usage, _100_TOKENS, settings=settings)
+    check = check_submission(usage, _100_TOKENS)
 
     assert not check.allowed
     assert check.projected_tokens == 480 + 100 + 1_500
@@ -267,14 +268,17 @@ def test_overflow_reports_how_far_over_the_projection_lands() -> None:
 def test_the_card_never_shows_a_negative_remainder_or_over_100_percent() -> None:
     """A conversation can legitimately sit over budget — the reserve bounds the *next* turn,
     and a long answer can still land above the line. The card shows a full bar, not a debt."""
-    usage = ContextUsage(used_tokens=12_000, limit_tokens=10_400)
+    usage = ContextUsage(used_tokens=12_000, limit_tokens=10_400, answer_reserve_tokens=1_500)
     assert usage.remaining_tokens == 0
     assert usage.percent_used == 100.0
 
 
 def test_percent_used_matches_the_progress_fill() -> None:
-    assert ContextUsage(used_tokens=3_800, limit_tokens=10_400).percent_used == 36.5
-    assert ContextUsage(used_tokens=0, limit_tokens=10_400).percent_used == 0.0
+    def at(used: int) -> ContextUsage:
+        return ContextUsage(used_tokens=used, limit_tokens=10_400, answer_reserve_tokens=1_500)
+
+    assert at(3_800).percent_used == 36.5
+    assert at(0).percent_used == 0.0
 
 
 # --- settings guards ----------------------------------------------------------
@@ -305,6 +309,60 @@ def test_there_is_no_context_enabled_switch() -> None:
     assert "enabled" not in ContextSettings.model_fields
 
 
+# --- the reserve is one number, not two (T-513) --------------------------------
+
+
+async def test_usage_carries_the_configured_reserve(session: AsyncSession) -> None:
+    """`ContextWindowResponse` publishes this so the GUI can reproduce `check_submission`.
+
+    It has to come from the same read as the limit, or the operator can raise one and not the
+    other and nothing reports it.
+    """
+    conversation = await _conversation(session)
+    settings = _settings(window_tokens=10_400, answer_reserve_tokens=2_000)
+
+    usage = await conversation_usage(session, conversation.id, settings=settings)
+
+    assert usage.answer_reserve_tokens == 2_000
+    assert usage.limit_tokens == 10_400
+
+
+def test_the_checks_read_the_reserve_off_usage_not_off_settings() -> None:
+    """The guarantee the published field exists for, stated as a test.
+
+    Both projections must move when `usage.answer_reserve_tokens` moves and there is no
+    `Settings` in sight — that is what makes the number the client is told the number the
+    server decided with (R-51(2)). If either function reached for `get_settings()` instead,
+    these two would agree and the wire would be lying.
+    """
+    lean = ContextUsage(used_tokens=8_000, limit_tokens=10_000, answer_reserve_tokens=1_000)
+    fat = ContextUsage(used_tokens=8_000, limit_tokens=10_000, answer_reserve_tokens=2_000)
+
+    assert check_submission(lean, _100_TOKENS).allowed
+    assert not check_submission(fat, _100_TOKENS).allowed
+    assert (
+        check_submission(fat, _100_TOKENS).projected_tokens
+        - check_submission(lean, _100_TOKENS).projected_tokens
+        == 1_000
+    )
+
+    assert (
+        check_regeneration(fat, _100_TOKENS).projected_tokens
+        - check_regeneration(lean, _100_TOKENS).projected_tokens
+        == 1_000
+    )
+
+
+def test_the_reserve_has_no_default() -> None:
+    """A default is how a caller silently disagrees with the operator's configuration.
+
+    The value is floored at `LLM_MAX_OUTPUT_TOKENS` by `Settings._coherent`, so a plausible
+    literal here would be wrong in a way nothing would report.
+    """
+    with pytest.raises(TypeError):
+        ContextUsage(used_tokens=0, limit_tokens=10_400)  # type: ignore[call-arg]
+
+
 # --- FR-MSG-08 Regenerate's own projection (T-404) ----------------------------
 
 
@@ -317,15 +375,14 @@ def test_a_full_chat_can_still_regenerate_its_last_answer() -> None:
     Regenerate in: the full one. A control that fails exactly when it is needed is the
     false-positive failure R-44 calls worse than no control.
     """
-    settings = _settings(window_tokens=10_400, answer_reserve_tokens=1_500)
-    usage = ContextUsage(used_tokens=10_000, limit_tokens=10_400)
+    usage = ContextUsage(used_tokens=10_000, limit_tokens=10_400, answer_reserve_tokens=1_500)
     replaced = "x" * 8_000  # 2,000 tokens under the shared rule
 
-    check = check_regeneration(usage, replaced, settings=settings)
+    check = check_regeneration(usage, replaced)
 
     assert check.allowed
     assert check.projected_tokens == 10_000 - 2_000 + 1_500
-    assert not check_submission(usage, "", settings=settings).allowed, (
+    assert not check_submission(usage, "").allowed, (
         "the submission projection is what this exists to replace"
     )
 
@@ -333,10 +390,9 @@ def test_a_full_chat_can_still_regenerate_its_last_answer() -> None:
 def test_a_regenerate_is_still_refused_when_the_replacement_cannot_fit() -> None:
     """The refusal is real, not theoretical: a near-ceiling chat whose last answer is shorter
     than the reserve genuinely has no room for a new one."""
-    settings = _settings(window_tokens=10_400, answer_reserve_tokens=1_500)
-    usage = ContextUsage(used_tokens=10_300, limit_tokens=10_400)
+    usage = ContextUsage(used_tokens=10_300, limit_tokens=10_400, answer_reserve_tokens=1_500)
 
-    check = check_regeneration(usage, "x" * 40, settings=settings)  # 10 tokens
+    check = check_regeneration(usage, "x" * 40)  # 10 tokens
 
     assert not check.allowed
     assert check.overflow_tokens > 0
@@ -345,10 +401,9 @@ def test_a_regenerate_is_still_refused_when_the_replacement_cannot_fit() -> None
 def test_the_regenerate_check_reports_the_real_usage_not_the_adjusted_one() -> None:
     """The `409` body feeds the FR-ANL-03 card, and a card showing a number the meter never
     displays would read as a bug in the meter."""
-    settings = _settings(window_tokens=10_400, answer_reserve_tokens=1_500)
-    usage = ContextUsage(used_tokens=20_000, limit_tokens=10_400)
+    usage = ContextUsage(used_tokens=20_000, limit_tokens=10_400, answer_reserve_tokens=1_500)
 
-    check = check_regeneration(usage, _100_TOKENS, settings=settings)
+    check = check_regeneration(usage, _100_TOKENS)
 
     assert check.usage.used_tokens == 20_000
     assert check.projected_tokens == 20_000 - 100 + 1_500
@@ -357,10 +412,9 @@ def test_the_regenerate_check_reports_the_real_usage_not_the_adjusted_one() -> N
 
 def test_a_regenerate_projection_landing_exactly_on_the_limit_is_allowed() -> None:
     """Ties permissive, matching `check_submission` — the same rule, not a second one."""
-    settings = _settings(window_tokens=10_000, answer_reserve_tokens=1_500)
-    usage = ContextUsage(used_tokens=8_600, limit_tokens=10_000)
+    usage = ContextUsage(used_tokens=8_600, limit_tokens=10_000, answer_reserve_tokens=1_500)
 
-    check = check_regeneration(usage, _100_TOKENS, settings=settings)
+    check = check_regeneration(usage, _100_TOKENS)
 
     assert check.projected_tokens == 10_000
     assert check.allowed

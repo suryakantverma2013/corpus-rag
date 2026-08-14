@@ -5,8 +5,9 @@
  * The second of `<main>`'s three flex children. `AppShell` supplies only the column direction, so
  * this owns its own `flex`, padding and overflow — see `AppShellProps.chat`.
  *
- * Presentational: every mutation is a prop, and `App` holds the seeded state until T-513 swaps
- * the data source for the generated client. T-503's shape.
+ * Presentational: every mutation is a prop and nothing here fetches. `App` holds the state,
+ * which since T-513 is the chat store's rather than a seed's — this file did not change for
+ * that, which is the point of the shape (T-503's).
  */
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import styles from './MessageList.module.css';

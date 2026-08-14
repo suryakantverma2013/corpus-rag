@@ -10,7 +10,7 @@ const CONVERSATIONS: SidebarConversation[] = [
     archived: false,
     created_at: '2026-07-16T09:12:00Z',
     updated_at: '2026-07-16T09:12:00Z',
-    messageCount: 2,
+    message_count: 2,
   },
 ];
 

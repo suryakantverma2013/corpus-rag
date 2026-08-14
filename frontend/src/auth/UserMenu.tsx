@@ -48,6 +48,17 @@ export function UserMenu({ email, onChangePassword, onSignOut, onClose }: UserMe
         handlers.current.onClose();
         return;
       }
+      // NFR-A11Y-04 (T-511). Tab is not part of a menu's own keyboard contract, so without
+      // this the browser walks focus straight out of the popover while it stays open —
+      // measured live: focus landed on the trigger with the menu still rendered behind it.
+      // An open menu that no longer holds focus is indistinguishable from a stuck overlay.
+      // `preventDefault` then close: the cleanup below returns focus to the opener, so the
+      // user resumes from the control they opened, exactly as Escape leaves them.
+      if (event.key === 'Tab') {
+        event.preventDefault();
+        handlers.current.onClose();
+        return;
+      }
       if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
       const list = items();
       const at = list.indexOf(document.activeElement as HTMLButtonElement);

@@ -38,11 +38,49 @@ function doc(overrides: Partial<DocumentEvent> = {}): DocumentEvent {
   };
 }
 
+/** The FR-KBM-10 picker's two stores, shut. T-512's own surface is tested in
+ *  `cloud/CloudImportDialog.test.tsx`; what this file cares about is that the modal composes it
+ *  and that nothing else moved. */
+function cloudProps(open = false) {
+  return {
+    open,
+    files: {
+      files: [],
+      loading: false,
+      loadingMore: false,
+      loaded: true,
+      canLoadMore: false,
+      linkRequired: null,
+      notice: null,
+      search: '',
+      setSearch: vi.fn(),
+      loadMore: vi.fn(),
+      dismissNotice: vi.fn(),
+    },
+    link: {
+      linked: true,
+      account: 'person@example.com',
+      loaded: true,
+      notice: null,
+      refresh: vi.fn(),
+      beginLink: vi.fn(async () => undefined),
+      unlink: vi.fn(async () => true),
+      dismissNotice: vi.fn(),
+    },
+    onClose: vi.fn(),
+  };
+}
+
 function setup(
   store: Partial<DocumentsStore> = {},
-  props: { conversationId?: string | null } = {},
+  props: { conversationId?: string | null; cloudOpen?: boolean } = {},
 ) {
   const upload = vi.fn();
+  const importFile = vi.fn(async () => ({
+    kind: 'accepted' as const,
+    documentId: 'd9',
+    status: 'QUEUED' as const,
+  }));
   const act = vi.fn();
   const dismissNotice = vi.fn();
   const onClose = vi.fn();
@@ -55,19 +93,22 @@ function setup(
     notice: null,
     paused: false,
     upload,
+    importFile,
     act,
     dismissNotice,
     ...store,
   };
+  const cloud = cloudProps(props.cloudOpen ?? false);
   render(
     <KnowledgeBaseModal
       store={full}
       conversationId={'conversationId' in props ? props.conversationId! : 'c1'}
       onClose={onClose}
       onCloudImport={onCloudImport}
+      cloud={cloud}
     />,
   );
-  return { upload, act, dismissNotice, onClose, onCloudImport };
+  return { upload, importFile, act, dismissNotice, onClose, onCloudImport, cloud };
 }
 
 const rowFor = (name: string) => screen.getByText(name).closest('li') as HTMLElement;

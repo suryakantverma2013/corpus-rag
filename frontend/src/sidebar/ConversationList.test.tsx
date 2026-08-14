@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ConversationList } from './ConversationList';
 import type { SidebarConversation } from './conversations';
 
@@ -9,7 +9,7 @@ const conversation = (id: string, title: string | null, count = 2): SidebarConve
   archived: false,
   created_at: '2026-07-16T09:12:00Z',
   updated_at: '2026-07-16T09:12:00Z',
-  messageCount: count,
+  message_count: count,
 });
 
 const CONVERSATIONS = [
@@ -24,7 +24,7 @@ function list(overrides: Partial<React.ComponentProps<typeof ConversationList>> 
     activeId: 'a',
     onSelect: vi.fn(),
     onRename: vi.fn(),
-    onDelete: vi.fn(),
+    onDelete: vi.fn(async () => null),
     ...overrides,
   };
   return { ...render(<ConversationList {...props} />), props };
@@ -134,6 +134,22 @@ describe('FR-SBR-07 the overflow control', () => {
     expect(document.activeElement).toBe(rename);
     fireEvent.keyDown(menu, { key: 'ArrowUp' });
     expect(document.activeElement).toBe(del);
+  });
+
+  it('closes on Tab rather than letting focus walk out of an open menu (NFR-A11Y-04)', () => {
+    // T-511, measured live: the items are ordinary tab stops and this handler only fires while
+    // focus is INSIDE the menu, so tabbing off the last item left the menu open with focus on
+    // an unrelated conversation row — and Escape then went to that row instead, so the popover
+    // could not be dismissed from the keyboard at all. Tab now dismisses it, as the ARIA menu
+    // pattern expects, and focus returns to the trigger exactly as Escape leaves it.
+    list();
+    const menu = openMenu('Analyzing Market Trends');
+    fireEvent.keyDown(menu, { key: 'Tab' });
+
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(document.activeElement).toBe(
+      screen.getByRole('button', { name: 'Actions for Analyzing Market Trends' }),
+    );
   });
 
   it('closes on Escape and returns focus to the trigger', () => {
@@ -269,13 +285,28 @@ describe('FR-SBR-07 delete', () => {
     expect(props.onDelete).not.toHaveBeenCalled();
   });
 
-  it('deletes on confirm', () => {
+  it('deletes on confirm', async () => {
     const { props } = list();
     const dialog = askDelete('Analyzing Market Trends');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
 
     expect(props.onDelete).toHaveBeenCalledWith('a');
-    expect(screen.queryByRole('dialog')).toBeNull();
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  it('keeps the dialog open and shows the server copy when the delete is refused', async () => {
+    // R-54(5) — the thread purge runs before the commit, so a `503` leaves the chat intact and
+    // the retry meaningful. Dismissing the dialog would put the row back in the list with no
+    // explanation, and the sidebar has no other surface to give one on.
+    const refused = "Couldn't delete this chat just now. Please try again shortly.";
+    const { props } = list({ onDelete: vi.fn(async () => refused) });
+    const dialog = askDelete('Analyzing Market Trends');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
+
+    await waitFor(() => expect(screen.getByRole('dialog').textContent).toContain(refused));
+    expect(props.onDelete).toHaveBeenCalledWith('a');
+    // Still offering the action that failed, because trying again is what R-54(5) expects.
+    expect(within(screen.getByRole('dialog')).getByRole('button', { name: 'Delete' })).toBeTruthy();
   });
 
   it('does nothing on cancel', () => {

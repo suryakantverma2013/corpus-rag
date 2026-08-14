@@ -318,9 +318,7 @@ def test_the_service_account_can_resolve_the_broker_client() -> None:
     `KeycloakClient.admin_get_client_uuid` therefore raises on the empty list instead of
     treating it as absence, and this test keeps the role that makes the list non-empty.
     """
-    account = next(
-        u for u in _REALM["users"] if u["username"] == "service-account-corpus-backend"
-    )
+    account = next(u for u in _REALM["users"] if u["username"] == "service-account-corpus-backend")
     assert "view-clients" in account["clientRoles"]["realm-management"], (
         "the backend's service account cannot resolve the `broker` client, so it cannot grant "
         "`read-token` and every link would be inert — see T-214"

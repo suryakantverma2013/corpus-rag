@@ -305,6 +305,22 @@ async def test_realm_artifact_imports_and_works() -> None:
     realm, which a hand-fix in the admin console can silently keep working while the artifact
     everyone else imports stays broken.
 
+    **Do not pin `id` on the seeded admin user — it was tried and it breaks this test.**
+    The artifact declares no `id` for `admin@corpus.local`, so every import mints a fresh
+    `sub`; because R-28 keys the local mirror on `sub` while `users.email` is unique, a
+    re-import strands the previous row and the next login fails with `uq_users_email`
+    (recovered by re-pointing the local row's id and its five referring tables — `audit_log`,
+    `conversations`, `documents`, `knowledge_bases`, `processing_locks`, all `NO ACTION`, so
+    neither a plain `DELETE` nor a plain `UPDATE users.id` will do it).
+
+    Pinning the id looks like the obvious fix and is **mutually exclusive with this test**:
+    Keycloak user ids are unique **across realms, not within one**, so importing this
+    artifact into a throwaway realm while the live `corpus` realm already holds that id
+    answers `409 {"errorMessage":"Duplicate resource error"}`. Trading a recoverable
+    operational step for a permanently red guard is the wrong way round — the same shape as
+    `addReadTokenRoleOnCreate` versus `linkOnly` in §8.53, where two documented settings
+    turned out to cancel each other.
+
     Needs master credentials since creating a realm is not something the `corpus` service
     account may do. **Two accepted spellings, and that is a fix rather than laxity:** this
     gate read only `KC_ADMIN_USER`/`KC_ADMIN_PASSWORD` while `.env` has carried the very same

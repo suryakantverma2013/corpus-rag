@@ -94,6 +94,29 @@ async def test_create_returns_the_new_chat_with_an_empty_context_meter(
     assert body["context"]["used_tokens"] == 0
     assert body["context"]["limit_tokens"] > 0
     assert body["context"]["remaining_tokens"] == body["context"]["limit_tokens"]
+    assert body["message_count"] == 0
+
+
+async def test_the_meter_publishes_the_answer_reserve_the_server_checks_with(
+    client: httpx.AsyncClient, session: AsyncSession, make_token: Callable[..., str]
+) -> None:
+    """T-513/§8.56(4) — without this the GUI cannot reproduce `check_submission`.
+
+    The composer blocks *before* a request exists (R-51(6)), so it must project
+    `used + query + reserve` itself. Asserted against the live setting rather than a literal:
+    a hard-coded 1,500 here would keep passing while an operator raised
+    `LLM_MAX_OUTPUT_TOKENS` and the browser started accepting what the server refuses.
+    """
+    from app.config import get_settings
+
+    _, headers = await _caller(session, make_token)
+
+    response = await client.post("/api/v1/conversations", json={}, headers=headers)
+
+    assert response.status_code == 201
+    reserve = response.json()["context"]["answer_reserve_tokens"]
+    assert reserve == get_settings().context.answer_reserve_tokens
+    assert reserve > 0
 
 
 async def test_the_context_meter_counts_the_transcript_not_the_model_s_usage(
@@ -142,6 +165,50 @@ async def test_list_is_sidebar_ordered_and_scoped_to_the_caller(
     ids = [row["id"] for row in response.json()]
     assert ids[:2] == [str(newer.id), str(older.id)]
     assert str(foreign.id) not in ids
+
+
+async def test_every_list_row_carries_its_own_message_count(
+    client: httpx.AsyncClient, session: AsyncSession, make_token: Callable[..., str]
+) -> None:
+    """T-407 — FR-SBR-03's "· N messages", on rows the client never opens.
+
+    The counts differ per row *and* a stranger's messages sit in the same table, so a
+    subquery that lost its correlation would answer the same (wrong) number everywhere.
+    """
+    owner, headers = await _caller(session, make_token)
+    stranger, _ = await _caller(session, make_token)
+    empty = await _conversation(session, owner_id=owner, title="empty")
+    busy = await _conversation(session, owner_id=owner, title="busy")
+    noisy = await _conversation(session, owner_id=stranger, title="not yours")
+    for conversation, count in ((busy, 3), (noisy, 7)):
+        for _ in range(count):
+            session.add(
+                Message(conversation_id=conversation.id, role=MessageRole.USER, content="hi")
+            )
+    await session.flush()
+
+    response = await client.get("/api/v1/conversations", headers=headers)
+
+    rows = {row["id"]: row["message_count"] for row in response.json()}
+    assert rows[str(busy.id)] == 3
+    assert rows[str(empty.id)] == 0
+    assert str(noisy.id) not in rows
+
+
+async def test_the_detail_routes_carry_the_count_too(
+    client: httpx.AsyncClient, session: AsyncSession, make_token: Callable[..., str]
+) -> None:
+    """The field is total, never optional — a row that sometimes has a count would render
+    `· 0 messages` for a chat that has two, which is worse than blank because it is plausible."""
+    owner, headers = await _caller(session, make_token)
+    conversation = await _conversation(session, owner_id=owner)
+    for _ in range(2):
+        session.add(Message(conversation_id=conversation.id, role=MessageRole.USER, content="hi"))
+    await session.flush()
+
+    response = await client.get(f"/api/v1/conversations/{conversation.id}", headers=headers)
+
+    assert response.json()["message_count"] == 2
 
 
 async def test_rename_updates_the_title_and_the_sidebar_order(

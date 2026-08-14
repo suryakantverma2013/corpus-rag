@@ -57,6 +57,18 @@ export type UploadScope = Schemas['DocumentResponse']['scope'];
 export type Token = Schemas['TokenResponse'];
 export type Me = Schemas['MeResponse'];
 
+// --- cloud-drive import (FR-KBM-10, FR-AUT-11) ---
+/** One row of the FR-KBM-10 selection surface. Metadata only — no URL and nothing that
+ *  points at bytes; the `file_id` goes back to the import route and the backend resolves it
+ *  against the provider's fixed host (R-63(6)(1)). */
+export type DriveFile = Schemas['DriveFileResponse'];
+export type DriveListing = Schemas['DriveListResponse'];
+export type LinkStatus = Schemas['LinkStatusResponse'];
+export type LinkStart = Schemas['LinkStartResponse'];
+/** One member today. NFR-CMP-02: v1 commits to Google Drive and the *mechanism* is what is
+ *  provider-agnostic, so this widens when a realm gains a second identity provider. */
+export type CloudProvider = Schemas['CloudProvider'];
+
 // --- errors ---
 /** The ordinary `{detail: string}` body. Render `detail`; never branch on it. */
 export type ApiError = Schemas['ErrorResponse'];
@@ -64,6 +76,21 @@ export type ApiError = Schemas['ErrorResponse'];
 export type ContextWindowExceeded = Schemas['ContextWindowExceededResponse'];
 export type NotLatestAnswer = Schemas['NotLatestAnswerResponse'];
 export type ProcessingLocked = Schemas['ProcessingLockedResponse'];
+/** FR-AUT-11's refusal — `ACCOUNT_NOT_LINKED` or `CLOUD_ACCESS_REVOKED`. */
+export type CloudLinkRequired = Schemas['CloudLinkRequiredResponse'];
+/** The import route's `409` is a union of the two above: the R-24 lock, or a link problem. */
+export type ImportConflict = Schemas['ImportConflictResponse'];
 
-export { api, streamFrames, StreamError, DOCUMENT_EVENTS_URL } from './client';
+// --- config (FR-SYS-03 / FR-ANL-02) ---
+export type Config = Schemas['ConfigResponse'];
+
+export {
+  api,
+  streamFrames,
+  StreamError,
+  expandPath,
+  DOCUMENT_EVENTS_URL,
+  CHAT_SEND_PATH,
+  CHAT_REGENERATE_PATH,
+} from './client';
 export { authHeaders, currentAccessToken, setAccessToken } from './auth';

@@ -1,0 +1,302 @@
+/* FR-KBM-10's selection surface.
+
+   The prototype has NO markup for this surface at all — the docx row it derives from describes
+   "a secondary interface" and nothing more — so unlike the rest of §4.7 there is nothing to
+   transcribe per property. It is therefore built from the KB modal's own geometry and the shared
+   tokens, under NFR-VIS-01's Rev 0.5 carve-out (the same footing R-71(3) put the upload-scope
+   control on): every value below is either a token, or a literal already carried by the row and
+   panel this surface sits beside, so no new visual vocabulary is introduced. */
+
+/* Only the four properties `ui/Dialog` leaves to the caller. Everything else — the overlay,
+   background, border, radius, shadow and 22px padding — is Dialog's and must not be restated.
+   560px against FR-KBM-01's 520: the row carries a third cell (the import state) that the
+   document row does not, and the panel this one covers is 520 content-box, so an identical width
+   would leave a 46px band of the modal showing on one side only. */
+.panel {
+  width: 560px;
+  max-width: calc(100vw - 32px);
+  max-height: 78vh;
+  overflow-y: auto;
+}
+
+/* Matches the KB modal's ✕ exactly — same element, one surface up. A <button> inherits neither
+   `font-family` nor `color` (the T-503 finding), so both are restated rather than assumed. */
+.close {
+  margin-left: auto;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-btn);
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background var(--motion-fast) ease;
+}
+
+.close:hover {
+  background: var(--panel2);
+}
+
+/* FR-AUT-11's account line. A <p>, so the UA margin must be reset or the 4px becomes 4px plus
+   1em — the T-503/T-504/T-507/T-508 trap, in a fifth place. */
+.account {
+  margin: 4px 0 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.address {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+}
+
+/* Not `--eval-bad`: unlinking is reversible and destroys nothing (FR-AUT-11 — imported documents
+   are copies and survive it), so painting it as destructive would overstate what it does. The
+   ConfirmDialog is where the consequence is spelled out. */
+.unlink {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.notices:not(:empty) {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* R-71(1)'s rule one surface over: a non-destructive notice, never an error. Deliberately NOT
+   `--eval-bad` — an unlinked account is the ordinary state of every user who has not asked for
+   Drive, and FR-AUT-11 makes it an affordance rather than a fault. */
+.paused,
+.notice {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-btn);
+  background: var(--panel2);
+  color: var(--muted);
+  font-size: 11.5px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.notice > span {
+  flex: 1;
+}
+
+.relink,
+.dismiss {
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+/* `box-sizing` is load-bearing: there is no reset anywhere in this codebase, so `width: 100%`
+   plus horizontal padding overflows the panel (the T-502 finding). */
+.search {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 14px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-btn);
+  background: var(--panel2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+}
+
+.search::placeholder {
+  color: var(--muted2);
+}
+
+.search:focus-within {
+  border-color: var(--accent);
+}
+
+/* FR-KBM-03's group-label treatment, so this list reads as a sibling of the two above it. */
+.heading {
+  margin-top: 18px;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  color: var(--muted2);
+}
+
+.formats {
+  margin-left: auto;
+  letter-spacing: 0;
+  flex-shrink: 0;
+}
+
+/* A <ul> where a naive transcription would use a <div>: the UA supplies markers and 40px of
+   inline padding, neither of which belongs here. It is a list because NFR-A11Y-03 wants the
+   semantics, and a listbox because the mention menu is the precedent that requirement names. */
+.list {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.empty {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--muted2);
+}
+
+/* The FR-KBM-04 row recipe, restyled onto a <button>. `width: 100%` + `box-sizing` for the same
+   reason as the search field; `text-align: left` because a button centres its content; and
+   font-family/size/colour because a button inherits none of them. */
+.row {
+  box-sizing: border-box;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  padding: 10px 12px;
+  background: var(--panel2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--motion-fast) ease;
+}
+
+/* Hover and virtual focus paint identically — the pointer and the arrow keys must not disagree
+   about which row is active (the mention menu's rule). */
+.row:hover:not([aria-disabled='true']),
+.row[data-active='true'] {
+  background: var(--panel);
+  border-color: var(--accent);
+}
+
+/* An imported row, or one paused by R-71(1). Greyed and kept in place rather than removed: a row
+   that vanished on success would take the confirmation with it. */
+.row[aria-disabled='true'] {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* 34px, matching the KB document row exactly — these two lists sit in the same modal and a badge
+   that changed width between them would read as a different kind of thing. */
+.badge {
+  font-size: 9.5px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: var(--radius-chip);
+  padding: 2px 5px;
+  width: 34px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+/* `min-width: 0` is what makes the ellipsis work — without it the flex item refuses to shrink
+   below its content's intrinsic width, so a long filename pushes the state label out of the
+   panel instead of truncating. */
+.body {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.name {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.meta {
+  font-size: 11px;
+  color: var(--muted2);
+}
+
+.state {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+/* The KB row's `Ready` accent, for the same reason: this file is now in the knowledge base. */
+.done {
+  color: var(--accent);
+}
+
+.more {
+  margin-top: 8px;
+  padding: 8px 16px;
+  border-radius: var(--radius-btn);
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--motion-fast) ease;
+}
+
+.more:hover {
+  background: var(--panel2);
+}
+
+.footer {
+  margin-top: 14px;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* The KB modal's ghost button, unchanged. There is no accent-primary here: the primary action of
+   this surface is a row, and a second filled button in the footer would compete with it. */
+.secondary {
+  padding: 8px 16px;
+  border-radius: var(--radius-btn);
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--motion-fast) ease;
+}
+
+.secondary:hover {
+  background: var(--panel2);
+}

@@ -134,10 +134,22 @@ export function Dialog({ title, onClose, panelClassName, headerAction, children 
   return (
     // The overlay is not a button and takes no keyboard handler: Escape already closes the
     // dialog from anywhere, so an overlay tab stop would be a duplicate control that also
-    // breaks the trap. `jsx-a11y` would flag a click handler here if it were enabled; the
-    // element is deliberately inert to assistive technology (`aria-hidden` is wrong — it is a
-    // sibling of the panel, not an ancestor), and the click is a pointer convenience only.
+    // breaks the trap. The element is deliberately inert to assistive technology
+    // (`aria-hidden` is wrong — it is a sibling of the panel, not an ancestor), and the click
+    // is a pointer convenience only.
+    //
+    // T-511 enabled `jsx-a11y`, which this comment already predicted would flag it. The
+    // suppression is deliberate and is the narrow kind: the rules stay ON repo-wide, because
+    // they are what mechanise NFR-A11Y-03's "click handlers on <div> are prohibited" for every
+    // future component. This is the one sanctioned exception, and it costs no keyboard user
+    // anything — every action the overlay offers is reachable by Escape.
+    // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
     <div className={styles.overlay} onClick={onClose} data-testid="dialog-overlay">
+      {/* The panel's `onClick` below is not an activation — it is the absence of one, stopping
+          the overlay's close handler (the prototype's `stopProp`). The directive sits here
+          rather than beside the attribute because oxlint anchors its report at the opening
+          tag, so a comment inside the attribute list is never on the reported line. */}
+      {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions */}
       <div
         ref={panelRef}
         className={
@@ -149,7 +161,6 @@ export function Dialog({ title, onClose, panelClassName, headerAction, children 
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        // Clicks inside must not reach the overlay's close handler (the prototype's `stopProp`).
         onClick={(event) => event.stopPropagation()}
       >
         {headerAction === undefined ? (

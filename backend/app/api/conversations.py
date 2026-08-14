@@ -23,6 +23,7 @@ from app.auth.dependencies import CurrentUser, DbSession, SettingsDep
 from app.config import Settings
 from app.db.models.conversation import Conversation
 from app.db.repositories.conversations import ConversationRepository
+from app.db.repositories.messages import MessageRepository
 from app.rag.budget import ContextUsage, conversation_usage
 from app.services import conversations as conversations_service
 from app.services.conversations import ThreadDeletionError
@@ -55,14 +56,30 @@ class ContextWindowResponse(BaseModel):
     limit_tokens: int
     remaining_tokens: int
     percent_used: float
+    answer_reserve_tokens: int = Field(
+        description=(
+            "The headroom FR-STA-04's projection reserves for the reply "
+            "(`CONTEXT_ANSWER_RESERVE_TOKENS`, floored at `LLM_MAX_OUTPUT_TOKENS`). Published "
+            "so the GUI can reproduce the server's admission decision *before* a request "
+            "exists (R-51(3)/(6)) — without it the composer accepts what the server refuses "
+            "the moment an operator raises the answer ceiling."
+        )
+    )
 
     @classmethod
     def of(cls, usage: ContextUsage) -> ContextWindowResponse:
+        """A pure projection of :class:`~app.rag.budget.ContextUsage`.
+
+        Deliberately takes no `Settings`: the reserve is read off the same object
+        `check_submission` reads it from, so the number published here cannot drift from the
+        number the admission check used.
+        """
         return cls(
             used_tokens=usage.used_tokens,
             limit_tokens=usage.limit_tokens,
             remaining_tokens=usage.remaining_tokens,
             percent_used=usage.percent_used,
+            answer_reserve_tokens=usage.answer_reserve_tokens,
         )
 
 
@@ -74,6 +91,24 @@ class ConversationResponse(BaseModel):
     archived: bool
     created_at: datetime
     updated_at: datetime
+    message_count: int = Field(
+        description=(
+            "How many messages this chat holds — FR-SBR-03's `· N messages`, on every row "
+            "including the ones the sidebar never opens."
+        )
+    )
+    """FR-SBR-03's per-row count (T-407).
+
+    **This is not a crack in the rule that keeps `context` off the list route.** That omission
+    is R-51(4): the meter is derived by reading every `messages.content` in the chat, so a list
+    would read every transcript the caller owns. A `COUNT(*)` over an indexed foreign key reads
+    **no content at all**, so the argument does not carry over — which is worth saying here,
+    because the next reader will assume it does.
+
+    Total rather than optional: a row that sometimes has a count and sometimes does not would
+    make the sidebar render `· 0 messages` for a chat that has ten, which is worse than blank
+    because it is plausible.
+    """
 
 
 class ConversationDetailResponse(ConversationResponse):
@@ -83,6 +118,9 @@ class ConversationDetailResponse(ConversationResponse):
     the meter is derived from every `messages.content` in the chat (R-51(4) — usage is
     computed, never stored), so putting it on a list would read the full transcript of every
     conversation in the sidebar to render a card FR-ANL-03 shows for the *active* one.
+
+    `message_count`, inherited from the base, is the one count that *is* on the list route —
+    see its docstring for why the same objection does not apply to it.
     """
 
     context: ContextWindowResponse
@@ -106,13 +144,14 @@ class RenameConversationRequest(BaseModel):
         return title
 
 
-def _to_response(conversation: Conversation) -> ConversationResponse:
+def _to_response(conversation: Conversation, message_count: int) -> ConversationResponse:
     return ConversationResponse(
         id=conversation.id,
         title=conversation.title,
         archived=conversation.archived,
         created_at=conversation.created_at,
         updated_at=conversation.updated_at,
+        message_count=message_count,
     )
 
 
@@ -120,8 +159,11 @@ async def _detail(
     session: AsyncSession, conversation: Conversation, settings: Settings
 ) -> ConversationDetailResponse:
     usage = await conversation_usage(session, conversation.id, settings=settings)
+    # A second small aggregate beside the meter, which has already read the whole transcript
+    # of this one conversation — so the count is the cheaper of the two by a wide margin.
+    message_count = await MessageRepository(session).count_by_conversation(conversation.id)
     return ConversationDetailResponse(
-        **_to_response(conversation).model_dump(),
+        **_to_response(conversation, message_count).model_dump(),
         context=ContextWindowResponse.of(usage),
     )
 
@@ -162,9 +204,13 @@ async def list_conversations(user: CurrentUser, session: DbSession) -> list[Conv
 
     A bare array, matching `GET /documents` (R-40(5)); no paging, because the sidebar renders
     the whole list and a user's chat count is bounded by how many they have made.
+
+    Each row carries `message_count` (T-407) from a correlated `COUNT(*)`, so FR-SBR-03's
+    "· N messages" is true on rows the client has never opened. See the field's docstring for
+    why this does not reopen the R-51(4) argument that keeps `context` off this route.
     """
-    conversations = await ConversationRepository(session).list_by_owner(user.id)
-    return [_to_response(conversation) for conversation in conversations]
+    counted = await ConversationRepository(session).list_by_owner_with_counts(user.id)
+    return [_to_response(conversation, count) for conversation, count in counted]
 
 
 @router.get(

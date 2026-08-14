@@ -54,10 +54,22 @@ class ContextUsage:
     `used_tokens` is conversation length per R-30 — every `messages.content` in this chat,
     user turns and assistant replies alike (R-30(1) names both). Per-chat, so a new chat
     starts at zero (OI-16, resolved Rev 0.6.1).
+
+    **`answer_reserve_tokens` lives here rather than being re-read from settings by each
+    check, and that is the point of it being a field.** T-513 publishes it on
+    `ContextWindowResponse` so the browser can reproduce :func:`check_submission` before a
+    request exists (R-51(2)/(3), §8.56(4)) — and holding it on the same object the checks
+    read makes *the number the client is told* provably *the number the server decided with*.
+    Two readers of one setting is how those quietly become two numbers.
+
+    **No default.** A default is exactly how a caller silently disagrees with the operator's
+    configuration; the value is floored at `LLM_MAX_OUTPUT_TOKENS` by `Settings._coherent`,
+    so a plausible-looking literal here would be wrong in a way nothing would report.
     """
 
     used_tokens: int
     limit_tokens: int
+    answer_reserve_tokens: int
 
     @property
     def remaining_tokens(self) -> int:
@@ -105,15 +117,14 @@ async def conversation_usage(
     settings = settings or get_settings()
     contents = await MessageRepository(session).list_contents(conversation_id)
     used = sum(estimate_tokens(content) for content in contents)
-    return ContextUsage(used_tokens=used, limit_tokens=settings.context.window_tokens)
+    return ContextUsage(
+        used_tokens=used,
+        limit_tokens=settings.context.window_tokens,
+        answer_reserve_tokens=settings.context.answer_reserve_tokens,
+    )
 
 
-def check_submission(
-    usage: ContextUsage,
-    query: str,
-    *,
-    settings: Settings | None = None,
-) -> SubmissionCheck:
+def check_submission(usage: ContextUsage, query: str) -> SubmissionCheck:
     """Decide FR-STA-04 for `query` against `usage`. Pure — no I/O, no clock.
 
     The projection is `used + query + answer reserve`. The reserve is what makes the promise
@@ -124,10 +135,12 @@ def check_submission(
     **The comparison is `>`, not `>=`** — a projection landing exactly on the limit is inside
     it. Ties are permissive, on R-44's standing rule that a control which refuses legitimate
     use is worse than no control, and the same disposition R-49(4) took at the gate.
+
+    The reserve is read off `usage`, not off settings — see :class:`ContextUsage`. That is
+    what makes this function take no `Settings` at all and be pure in the literal sense.
     """
-    settings = settings or get_settings()
     query_tokens = estimate_tokens(query)
-    projected = usage.used_tokens + query_tokens + settings.context.answer_reserve_tokens
+    projected = usage.used_tokens + query_tokens + usage.answer_reserve_tokens
     return SubmissionCheck(
         allowed=projected <= usage.limit_tokens,
         projected_tokens=projected,
@@ -136,12 +149,7 @@ def check_submission(
     )
 
 
-def check_regeneration(
-    usage: ContextUsage,
-    replaced: str,
-    *,
-    settings: Settings | None = None,
-) -> SubmissionCheck:
+def check_regeneration(usage: ContextUsage, replaced: str) -> SubmissionCheck:
     """Decide FR-STA-04 for an FR-MSG-08 Regenerate. Pure — no I/O, no clock (T-404).
 
     :func:`check_submission` is the wrong instrument here and would double-count twice over.
@@ -162,12 +170,11 @@ def check_regeneration(
     answer is shorter than the reserve genuinely has no room for a new one. Ties are permissive,
     matching :func:`check_submission`.
     """
-    settings = settings or get_settings()
     replaced_tokens = estimate_tokens(replaced)
     # Floored at zero: `usage` is read in a separate statement from the row, so a concurrent
     # delete could in principle make the subtraction exceed the total. A negative projection
     # would silently allow anything.
-    projected = max(0, usage.used_tokens - replaced_tokens) + settings.context.answer_reserve_tokens
+    projected = max(0, usage.used_tokens - replaced_tokens) + usage.answer_reserve_tokens
     return SubmissionCheck(
         allowed=projected <= usage.limit_tokens,
         projected_tokens=projected,

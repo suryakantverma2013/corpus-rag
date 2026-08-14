@@ -161,6 +161,28 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/config': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Deployment configuration
+     * @description FR-SYS-03's model id.
+     *
+     *     `user` is unused and is the point: it is the dependency that makes this authenticated.
+     */
+    get: operations['get_config'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/users': {
     parameters: {
       query?: never;
@@ -491,6 +513,10 @@ export interface paths {
      *
      *     A bare array, matching `GET /documents` (R-40(5)); no paging, because the sidebar renders
      *     the whole list and a user's chat count is bounded by how many they have made.
+     *
+     *     Each row carries `message_count` (T-407) from a correlated `COUNT(*)`, so FR-SBR-03's
+     *     "· N messages" is true on rows the client has never opened. See the field's docstring for
+     *     why this does not reopen the R-51(4) argument that keeps `context` off this route.
      */
     get: operations['list_conversations'];
     put?: never;
@@ -913,6 +939,17 @@ export interface components {
      */
     CloudProvider: 'google';
     /**
+     * ConfigResponse
+     * @description Deployment configuration the GUI renders. One field today, by design.
+     */
+    ConfigResponse: {
+      /**
+       * Chat Model
+       * @description The configured answer model (`OPENAI_CHAT_MODEL`), for FR-ANL-02's MODEL card. The *configured* id, not the one that answered any particular turn — that is `MessageResponse.model_name`, which the GUI prefers where it exists.
+       */
+      chat_model: string;
+    };
+    /**
      * ContextWindowExceededDetail
      * @description FR-STA-04's refusal (R-51(5)), on both `send` and `regenerate`.
      *
@@ -965,6 +1002,11 @@ export interface components {
       remaining_tokens: number;
       /** Percent Used */
       percent_used: number;
+      /**
+       * Answer Reserve Tokens
+       * @description The headroom FR-STA-04's projection reserves for the reply (`CONTEXT_ANSWER_RESERVE_TOKENS`, floored at `LLM_MAX_OUTPUT_TOKENS`). Published so the GUI can reproduce the server's admission decision *before* a request exists (R-51(3)/(6)) — without it the composer accepts what the server refuses the moment an operator raises the answer ceiling.
+       */
+      answer_reserve_tokens: number;
     };
     /**
      * ConversationDetailResponse
@@ -974,6 +1016,9 @@ export interface components {
      *     the meter is derived from every `messages.content` in the chat (R-51(4) — usage is
      *     computed, never stored), so putting it on a list would read the full transcript of every
      *     conversation in the sidebar to render a card FR-ANL-03 shows for the *active* one.
+     *
+     *     `message_count`, inherited from the base, is the one count that *is* on the list route —
+     *     see its docstring for why the same objection does not apply to it.
      */
     ConversationDetailResponse: {
       /**
@@ -995,6 +1040,11 @@ export interface components {
        * Format: date-time
        */
       updated_at: string;
+      /**
+       * Message Count
+       * @description How many messages this chat holds — FR-SBR-03's `· N messages`, on every row including the ones the sidebar never opens.
+       */
+      message_count: number;
       context: components['schemas']['ContextWindowResponse'];
     };
     /**
@@ -1021,6 +1071,11 @@ export interface components {
        * Format: date-time
        */
       updated_at: string;
+      /**
+       * Message Count
+       * @description How many messages this chat holds — FR-SBR-03's `· N messages`, on every row including the ones the sidebar never opens.
+       */
+      message_count: number;
     };
     /** CreateConversationRequest */
     CreateConversationRequest: {
@@ -2211,6 +2266,44 @@ export interface operations {
       };
       /** @description The identity provider is unreachable (R-28). */
       503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+    };
+  };
+  get_config: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ConfigResponse'];
+        };
+      };
+      /** @description Missing, malformed or expired bearer token, or no local user record. */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description The account is deactivated, or the operation is administrator-only (NFR-SEC-01). */
+      403: {
         headers: {
           [name: string]: unknown;
         };

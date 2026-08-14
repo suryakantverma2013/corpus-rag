@@ -61,7 +61,14 @@ export function LoginScreen({ brandName, version }: LoginScreenProps) {
   }
 
   return (
-    <div className={styles.screen}>
+    // <main>, not <div> (NFR-A11Y-03, T-511). This screen replaces the whole shell, so while
+    // it is mounted the document had NO landmark at all and every one of its elements sat
+    // outside one — axe reported `landmark-one-main` plus eight `region` violations here and
+    // one on the shell. A screen-reader user navigating by landmark found nothing to jump to.
+    // `<main>` rather than wrapping the card, because the centring flex container IS the page;
+    // the element is block-level either way and the class carries all the layout, so this
+    // costs no pixel (NFR-VIS-01) — it changes only the accessibility tree.
+    <main className={styles.screen}>
       {/* FR-AUT-06. Rendered above the card, and only after a real session ended — never on a
           first visit, where the server's 401 means "no session" rather than "expired".
           `role="status"` so it is announced rather than silently appearing (NFR-A11Y-05). */}
@@ -91,8 +98,15 @@ export function LoginScreen({ brandName, version }: LoginScreenProps) {
             className={styles.input}
             type="email"
             autoComplete="username"
-            // FR-AUT-02. The one autofocus in the product: this screen has a single obvious
-            // starting point and no content above it to skip past.
+            // FR-AUT-02 mandates this by name ("Email is autofocused"), and it is the one
+            // autofocus in the product: a full-screen sign-in form has no content above the
+            // field to skip past and no other plausible starting point. T-502 predicted this
+            // exact suppression when it deferred enabling the plugin to T-511.
+            //
+            // The directive sits on the attribute rather than above the tag because that is
+            // where oxlint anchors THIS rule — unlike the interaction rules, which anchor at
+            // the opening tag. Both forms are needed; neither works in the other's place.
+            // eslint-disable-next-line jsx-a11y/no-autofocus
             autoFocus
             required
             disabled={pending}
@@ -166,6 +180,6 @@ export function LoginScreen({ brandName, version }: LoginScreenProps) {
         <div className={styles.footer}>{FORGOT_PASSWORD}</div>
         <div className={`${styles.version} mono`}>{version}</div>
       </form>
-    </div>
+    </main>
   );
 }

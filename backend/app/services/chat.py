@@ -187,7 +187,7 @@ async def record_question(
     repo = MessageRepository(session)
 
     usage = await conversation_usage(session, conversation.id, settings=settings)
-    check = check_submission(usage, query, settings=settings)
+    check = check_submission(usage, query)
     if not check.allowed:
         raise ContextWindowExceededError(check)
 
@@ -254,7 +254,7 @@ async def resolve_regeneration(
         raise NotLatestAnswerError
 
     usage = await conversation_usage(session, conversation_id, settings=settings)
-    check = check_regeneration(usage, answer.content, settings=settings)
+    check = check_regeneration(usage, answer.content)
     if not check.allowed:
         raise ContextWindowExceededError(check)
 

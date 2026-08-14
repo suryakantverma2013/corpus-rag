@@ -45,8 +45,16 @@ export interface ConversationListProps {
   onSelect: (id: string) => void;
   /** FR-SBR-07 — `PATCH /conversations/{id}`. Never called with an unchanged or empty title. */
   onRename: (id: string, title: string) => void;
-  /** FR-SBR-07 — `DELETE /conversations/{id}`, after the confirmation below. */
-  onDelete: (id: string) => void;
+  /**
+   * FR-SBR-07 — `DELETE /conversations/{id}`, after the confirmation below.
+   *
+   * Resolves to `null` when the chat is gone, or to the server's copy when it is not: R-54(5)
+   * purges the LangGraph thread *before* committing, so a checkpointer outage answers `503`
+   * with the conversation **intact** and the retry meaningful. The confirmation stays open and
+   * shows that copy — a row that silently refuses to disappear reads as a defect, and the
+   * sidebar has no other surface to say so on.
+   */
+  onDelete: (id: string) => Promise<string | null>;
 }
 
 export function ConversationList({
@@ -72,6 +80,8 @@ export function ConversationList({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
   const [pendingDelete, setPendingDelete] = useState<SidebarConversation | null>(null);
+  /** The server's copy when a delete was refused — rendered in the dialog's own body. */
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   /** The `⋯` button that opened the current menu, so closing can return focus to it — without
    *  this, dismissing the menu with Escape drops focus to <body> (NFR-A11Y-04). */
@@ -155,6 +165,17 @@ export function ConversationList({
       event.preventDefault();
       event.stopPropagation();
       closeMenu(true);
+    } else if (event.key === 'Tab') {
+      // NFR-A11Y-04 (T-511). Tab is not part of the menu's contract, and this handler only
+      // sees keys while focus is *inside* the menu — so letting Tab through walked focus out
+      // of the last item and left the menu open with no way to dismiss it from the keyboard:
+      // Escape was then delivered to whatever the browser had focused instead, and this
+      // handler never ran again. Measured live: focus on an unrelated conversation row, menu
+      // still open, Escape inert. (The user menu had the same escape but survived it, because
+      // its listener is on `document` — the two menus were built differently, which is exactly
+      // the kind of gap that only shows up in an end-to-end sweep.)
+      event.preventDefault();
+      closeMenu(true);
     } else if (event.key === 'ArrowDown') {
       event.preventDefault();
       items[(index + 1) % items.length]?.focus();
@@ -207,7 +228,7 @@ export function ConversationList({
                     <span className={styles.title}>{title}</span>
                     <span className={styles.meta}>
                       <span className="mono">{formatConversationDate(conversation)}</span>
-                      <span>{formatMessageCount(conversation.messageCount)}</span>
+                      <span>{formatMessageCount(conversation.message_count)}</span>
                     </span>
                   </button>
 
@@ -250,6 +271,12 @@ export function ConversationList({
                       style={{ left: `${menuPos.left}px`, top: `${menuPos.top}px` }}
                       role="menu"
                       aria-label={`Actions for ${title}`}
+                      // -1, so the container is focusable without becoming a tab stop. The
+                      // menu carries an interactive role and a key handler, and a focusable
+                      // container is what the ARIA menu pattern expects of that pair; it also
+                      // gives focus somewhere to land if an item is removed while the menu is
+                      // open. `jsx-a11y/interactive-supports-focus` flags the absence.
+                      tabIndex={-1}
                       onKeyDown={onMenuKeyDown}
                     >
                       <button
@@ -287,14 +314,26 @@ export function ConversationList({
       {pendingDelete !== null && (
         <ConfirmDialog
           title={CONFIRM_TITLE}
-          body={CONFIRM_BODY}
+          body={deleteError ?? CONFIRM_BODY}
           confirmLabel={CONFIRM_DELETE}
           cancelLabel={CONFIRM_CANCEL}
-          onCancel={() => setPendingDelete(null)}
+          onCancel={() => {
+            setPendingDelete(null);
+            setDeleteError(null);
+          }}
           onConfirm={() => {
             const target = pendingDelete;
-            setPendingDelete(null);
-            onDelete(target.id);
+            void onDelete(target.id).then((failure) => {
+              // Closed only on success. The dialog is the one surface this flow has, so a
+              // refusal that dismissed it would leave the row back in the list with no
+              // explanation of why (R-54(5)).
+              if (failure === null) {
+                setPendingDelete(null);
+                setDeleteError(null);
+              } else {
+                setDeleteError(failure);
+              }
+            });
           }}
         />
       )}

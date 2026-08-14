@@ -86,6 +86,40 @@ export function outgoingText(value: string): string {
 }
 
 /**
+ * Which documents the sent text mentions — `SendMessageRequest.document_ids` (FR-RET-04).
+ *
+ * Recovered from the text rather than tracked as the user types, because `insertMention` is not
+ * the only way a mention reaches the box: the value is a controlled `<textarea>`, so a user can
+ * paste, retype or delete one, and a parallel list of "ids I inserted" would drift from what is
+ * actually written. The text is the thing the user can see, so it is the thing that decides.
+ *
+ * **Longest name first**, which is the whole subtlety: `insertMention` writes `@${name}`, so with
+ * documents called `Q3` and `Q3.pdf`, scanning in list order lets `@Q3` claim the prefix of
+ * `@Q3.pdf` and the wrong document is sent. Sorting by descending length makes the most specific
+ * name win, and each match is consumed so a shorter name cannot re-match inside it.
+ *
+ * R-46(1) makes mentions **narrow** the retrieval scope rather than boost it, and they are AND-ed
+ * with the FR-ORC-06 scope server-side — so a stale id here retrieves nothing rather than
+ * widening anything. That is what makes recovering ids from text safe.
+ */
+export function mentionedIds(text: string, documents: readonly MentionDocument[]): string[] {
+  const found: string[] = [];
+  let remaining = text;
+  for (const document of [...documents].sort((a, b) => b.name.length - a.name.length)) {
+    const token = `@${document.name}`;
+    const at = remaining.indexOf(token);
+    if (at === -1) continue;
+    found.push(document.id);
+    // Blank the match out so a shorter name cannot match inside what a longer one claimed.
+    remaining =
+      remaining.slice(0, at) + ' '.repeat(token.length) + remaining.slice(at + token.length);
+  }
+  // List order, not match order: the wire is a set and the server AND-s it, so the only thing
+  // ordering could do is make two identical requests compare unequal in a test.
+  return documents.filter((document) => found.includes(document.id)).map((document) => document.id);
+}
+
+/**
  * The active-row index after an arrow key, for NFR-A11Y-03's listbox contract.
  *
  * Wraps at both ends, and **starts at the first row from `-1`** on ArrowDown / the last on

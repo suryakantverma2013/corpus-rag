@@ -12,6 +12,7 @@ import type { Document, DocumentEvent } from '../api';
 import type { DocumentAction } from './documents';
 
 const uploadDocument = vi.fn();
+const importDocument = vi.fn();
 const deleteDocument = vi.fn();
 const retryDocument = vi.fn();
 const replaceDocument = vi.fn();
@@ -19,6 +20,7 @@ const listDocuments = vi.fn(async () => [] as Document[]);
 
 vi.mock('./mutations', () => ({
   uploadDocument: (...a: unknown[]) => uploadDocument(...a),
+  importDocument: (...a: unknown[]) => importDocument(...a),
   deleteDocument: (...a: unknown[]) => deleteDocument(...a),
   retryDocument: (...a: unknown[]) => retryDocument(...a),
   replaceDocument: (...a: unknown[]) => replaceDocument(...a),
@@ -237,5 +239,97 @@ describe('the session gate (T-509, FR-AUT-07)', () => {
 
     rerender({ enabled: true });
     await waitFor(() => expect(listDocuments).toHaveBeenCalledTimes(1));
+  });
+});
+
+describe('FR-KBM-10 — the import takes the upload’s path (T-512)', () => {
+  const driveFile = {
+    file_id: 'f1',
+    name: 'Q3 report.pdf',
+    mime_type: 'application/pdf',
+    size_bytes: 10,
+    modified_time: null,
+  };
+
+  it('shows a pending entry named after the Drive file, then hands off on the server’s id', async () => {
+    importDocument.mockResolvedValue({ kind: 'accepted', documentId: 'd7', status: 'QUEUED' });
+    const { result } = renderHook(() =>
+      useDocuments({ open: true, conversationId: 'c1', turnInFlight: false, enabled: true }),
+    );
+
+    await act(async () => {
+      await result.current.importFile(driveFile, 'global');
+    });
+    // Not an optimistic document row: reconciling one would need the filename as identity, which
+    // R-40/FR-KBM-08 reject in as many words.
+    expect(result.current.pending).toHaveLength(1);
+    expect(result.current.pending[0]).toMatchObject({
+      filename: 'Q3 report.pdf',
+      documentId: 'd7',
+    });
+
+    act(() => dispatch?.({ type: 'snapshot', documents: [doc({ document_id: 'd7' })] }));
+    await waitFor(() => expect(result.current.pending).toHaveLength(0));
+  });
+
+  it('sends the file id and the scope, and a conversation only for scope=chat', async () => {
+    importDocument.mockResolvedValue({ kind: 'accepted', documentId: 'd7', status: 'QUEUED' });
+    const { result } = renderHook(() =>
+      useDocuments({ open: true, conversationId: 'c1', turnInFlight: false, enabled: true }),
+    );
+
+    await act(async () => {
+      await result.current.importFile(driveFile, 'chat');
+    });
+    expect(importDocument).toHaveBeenCalledWith('f1', 'chat', 'c1');
+  });
+
+  it('drops the pending entry when the import was refused', async () => {
+    importDocument.mockResolvedValue({ kind: 'refused', detail: 'Too large.', status: 413 });
+    const { result } = renderHook(() =>
+      useDocuments({ open: true, conversationId: null, turnInFlight: false, enabled: true }),
+    );
+
+    await act(async () => {
+      await result.current.importFile(driveFile, 'global');
+    });
+    expect(result.current.pending).toHaveLength(0);
+    // The server's copy, verbatim — the import inherits R-33's whole response contract.
+    expect(result.current.notice).toBe('Too large.');
+  });
+
+  it('reconciles the R-24 lock exactly as an upload does', async () => {
+    importDocument.mockResolvedValue({ kind: 'locked', detail: 'busy' });
+    const { result } = renderHook(() =>
+      useDocuments({ open: true, conversationId: null, turnInFlight: false, enabled: true }),
+    );
+
+    await act(async () => {
+      await result.current.importFile(driveFile, 'global');
+    });
+    expect(result.current.paused).toBe(true);
+    // R-71(1): reconciled, never rendered as an error.
+    expect(result.current.notice).toBeNull();
+  });
+
+  it('sets NO modal notice for a link problem — the picker owns that state', async () => {
+    importDocument.mockResolvedValue({
+      kind: 'link-required',
+      code: 'ACCOUNT_NOT_LINKED',
+      detail: 'not linked',
+    });
+    const { result } = renderHook(() =>
+      useDocuments({ open: true, conversationId: null, turnInFlight: false, enabled: true }),
+    );
+
+    let outcome;
+    await act(async () => {
+      outcome = await result.current.importFile(driveFile, 'global');
+    });
+    // The action that answers it (Re-link) is a control only the picker has, so saying it here
+    // would repeat it in the surface behind the one the user is looking at.
+    expect(result.current.notice).toBeNull();
+    expect(outcome).toMatchObject({ kind: 'link-required' });
+    expect(result.current.pending).toHaveLength(0);
   });
 });

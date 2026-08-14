@@ -232,6 +232,9 @@ describe('StatsPanel — component invariants', () => {
     // The bars restate text rendered beside them. A polite region anywhere in this subtree would
     // read the FR-ANL-01 clock aloud once a second, for ever.
     expect([...code.matchAll(/aria-hidden="true"/g)]).toHaveLength(4);
+    // The fifth is conditional — the CONTEXT WINDOW card's em dash before its first read
+    // (T-513's `usage: null`), hidden only while the caption is saying the same thing in words.
+    expect(code).toMatch(/aria-hidden=\{usage === null \? 'true' : undefined\}/);
     expect(code).not.toMatch(/aria-live|role="(status|alert)"/);
   });
 

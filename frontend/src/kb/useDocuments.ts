@@ -5,16 +5,18 @@
  * of FR-CST-01 state and hands it down as props, and the three consumers here — the modal,
  * FR-SBR-05's sidebar count and FR-CMP-06's composer footer — are all one hop from it. R-58(5)
  * made `theme` a provider because it is read at arbitrary depth by components that must not
- * receive it as a prop; nothing here is. A context would also be a shape T-513 might have to
- * unpick when it consolidates the in-flight signal.
+ * receive it as a prop; nothing here is. T-513 kept the shape when it added the chat store
+ * beside this one: `turnInFlight` is still a prop from the composition root, which is what makes
+ * OI-31's "one signal" checkable in one file.
  */
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 
-import type { DocumentEvent, UploadScope } from '../api';
+import type { DocumentEvent, DriveFile, UploadScope } from '../api';
 import { EMPTY_DOCUMENTS, actionBlock, documentsReducer, impliesProcessingLock } from './documents';
 import type { RowAction } from './documents';
 import {
   deleteDocument,
+  importDocument,
   listDocuments,
   replaceDocument,
   retryDocument,
@@ -51,6 +53,14 @@ export interface DocumentsStore {
   /** R-71(1) — FR-KBM-07's four verbs are unavailable, and the modal says so. */
   readonly paused: boolean;
   upload: (files: readonly File[], scope: UploadScope) => void;
+  /**
+   * FR-KBM-10's one-time copy (T-512), resolving to what happened so the picker can mark the
+   * row and surface the two FR-AUT-11 `409`s. Everything else about it — the pending entry, the
+   * hand-off on `document_id`, the notice, the R-24 pause — is the upload path unchanged, which
+   * is what makes an imported document indistinguishable from an uploaded one *in the GUI* and
+   * not merely in the database.
+   */
+  importFile: (file: DriveFile, scope: UploadScope) => Promise<Outcome>;
   act: (document: DocumentEvent, action: RowAction, file?: File) => void;
   dismissNotice: () => void;
 }
@@ -177,6 +187,12 @@ export function useDocuments({
             setNotice(outcome.detail);
           }
           return outcome;
+        case 'link-required':
+          // Not a notice here: the picker owns this state entirely, because the action that
+          // answers it (Re-link) is a control only that surface has. Setting the modal's one
+          // notice slot as well would say the same thing twice, in the surface behind the one
+          // the user is looking at.
+          return outcome;
         case 'invalid':
           setNotice(INVALID_NOTICE);
           return outcome;
@@ -189,25 +205,52 @@ export function useDocuments({
     [],
   );
 
+  /**
+   * Show a pending entry for a file on its way in, and hand it off — or drop it — on the answer.
+   *
+   * Shared by the FR-KBM-05 drop zone and FR-KBM-10's import because the bookkeeping is the same
+   * fact in both cases: a file the user has committed to, which is not a document yet and must
+   * never be rendered as one (the R-40/FR-KBM-08 "filename is not identity" rule). Two copies of
+   * this would be two chances to get the hand-off key wrong, and the wrong key is the defect the
+   * live pass caught in T-508.
+   */
+  const track = useCallback(
+    async (filename: string, run: () => Promise<Outcome>): Promise<Outcome> => {
+      nextLocalId.current += 1;
+      const localId = `pending-${nextLocalId.current}`;
+      setPending((current) => [...current, { localId, filename, documentId: null }]);
+      const applied = applyOutcome(await run(), 'upload', null);
+      setPending((current) =>
+        applied.kind === 'accepted' || applied.kind === 'duplicate'
+          ? current.map((entry) =>
+              entry.localId === localId ? { ...entry, documentId: applied.documentId } : entry,
+            )
+          : current.filter((entry) => entry.localId !== localId),
+      );
+      return applied;
+    },
+    [applyOutcome],
+  );
+
   const upload = useCallback(
     (files: readonly File[], scope: UploadScope) => {
       for (const file of files) {
-        nextLocalId.current += 1;
-        const localId = `upload-${nextLocalId.current}`;
-        setPending((current) => [...current, { localId, filename: file.name, documentId: null }]);
-        void uploadDocument(file, scope, conversationId).then((outcome) => {
-          const applied = applyOutcome(outcome, 'upload', null);
-          setPending((current) =>
-            applied.kind === 'accepted' || applied.kind === 'duplicate'
-              ? current.map((entry) =>
-                  entry.localId === localId ? { ...entry, documentId: applied.documentId } : entry,
-                )
-              : current.filter((entry) => entry.localId !== localId),
-          );
-        });
+        void track(file.name, () => uploadDocument(file, scope, conversationId));
       }
     },
-    [applyOutcome, conversationId],
+    [conversationId, track],
+  );
+
+  /**
+   * The import is the upload, one route over — so it takes the same path through this store.
+   *
+   * Unlike `upload` it resolves, because the picker stays open and has to mark the row it just
+   * imported and render FR-AUT-11's two `409`s; the drop zone has nothing to say afterwards.
+   */
+  const importFile = useCallback(
+    (file: DriveFile, scope: UploadScope): Promise<Outcome> =>
+      track(file.name, () => importDocument(file.file_id, scope, conversationId)),
+    [conversationId, track],
   );
 
   const act = useCallback(
@@ -256,6 +299,7 @@ export function useDocuments({
     notice: notice ?? (connection === 'capped' ? STREAM_CAPPED_NOTICE : null),
     paused: turnInFlight || serverSaysBusy,
     upload,
+    importFile,
     act,
     dismissNotice: useCallback(() => setNotice(null), []),
   };

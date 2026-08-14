@@ -6,8 +6,8 @@
  * element's declarations across two stylesheets would need a wrapper the prototype does not
  * have. Everything below is the column's contents, which the prototype pads block by block.
  *
- * Presentational: every mutation is a prop. T-513 owns wiring these to the conversations API
- * ("then wire generated TS client + SSE into all views"), so nothing here fetches.
+ * Presentational: every mutation is a prop and nothing here fetches. The conversations API is
+ * reached through `useConversations`, which `App` owns (T-513).
  */
 import type { ReactNode } from 'react';
 import styles from './Sidebar.module.css';
@@ -35,7 +35,9 @@ export interface SidebarProps {
   onSelect: (id: string) => void;
   onNewChat: () => void;
   onRename: (id: string, title: string) => void;
-  onDelete: (id: string) => void;
+  /** FR-SBR-07 — resolves to the server's copy when the delete was refused. See
+   *  `ConversationListProps.onDelete`. */
+  onDelete: (id: string) => Promise<string | null>;
   /** FR-SBR-05 — global documents + the active chat's attachments (the same count FR-CMP-06's
    *  composer footer shows, since both name the FR-ORC-06 retrieval scope). */
   documentCount: number;

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.db.models.conversation import Conversation
+from app.db.models.message import Message
 from app.db.repositories.base import BaseRepository
 
 
@@ -27,6 +28,37 @@ class ConversationRepository(BaseRepository[Conversation]):
             .order_by(Conversation.updated_at.desc(), Conversation.created_at.desc())
         )
         return list((await self.session.scalars(stmt)).all())
+
+    async def list_by_owner_with_counts(
+        self, owner_id: uuid.UUID
+    ) -> list[tuple[Conversation, int]]:
+        """:meth:`list_by_owner`, plus each chat's message count.
+
+        T-407 — FR-SBR-03's "· N messages", on every sidebar row.
+
+        A **correlated scalar subquery**, not a ``LEFT JOIN … GROUP BY``. The join form has to
+        group by every selected ``Conversation`` column, so adding a column to the model
+        silently changes the grouping; the subquery is one expression that composes with the
+        existing ``order_by`` and leaves the projection alone. ``ix_messages_conversation_id_seq``
+        serves it.
+
+        Separate from :meth:`list_by_owner` rather than replacing it — the conversations
+        service and `_owned_or_404` want the entity, and widening a return type used for
+        ownership checks to buy a number the sidebar needs is the wrong trade.
+        """
+        counted = (
+            select(func.count())
+            .select_from(Message)
+            .where(Message.conversation_id == Conversation.id)  # correlated
+            .scalar_subquery()
+        )
+        stmt = (
+            select(Conversation, counted)
+            .where(Conversation.owner_id == owner_id)
+            .order_by(Conversation.updated_at.desc(), Conversation.created_at.desc())
+        )
+        rows = await self.session.execute(stmt)
+        return [(conversation, count) for conversation, count in rows.all()]
 
     async def get_owned(
         self, conversation_id: uuid.UUID, *, owner_id: uuid.UUID

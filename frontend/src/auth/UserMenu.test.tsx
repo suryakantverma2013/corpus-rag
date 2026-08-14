@@ -61,6 +61,18 @@ describe('closing (FR-AUT-08)', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('closes on Tab, so focus never leaves an open menu behind (NFR-A11Y-04)', () => {
+    // T-511, measured live: the items are ordinary tab stops, so tabbing past the last one put
+    // focus back on the trigger with the menu still rendered around it. This menu survived that
+    // better than the sidebar's — its listener is on `document`, so Escape still worked — but
+    // an open menu that no longer holds focus is a stuck overlay either way. Both menus now
+    // dismiss on Tab; they were built differently, which is why only an end-to-end sweep found
+    // the pair.
+    const { onClose } = mount();
+    fireEvent.keyDown(document, { key: 'Tab' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('closes on an outside pointer-down', () => {
     const { onClose } = mount();
     fireEvent.pointerDown(document.body);

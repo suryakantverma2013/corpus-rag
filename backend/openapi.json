@@ -382,6 +382,53 @@
         ]
       }
     },
+    "/api/v1/config": {
+      "get": {
+        "tags": [
+          "config"
+        ],
+        "summary": "Deployment configuration",
+        "description": "FR-SYS-03's model id.\n\n`user` is unused and is the point: it is the dependency that makes this authenticated.",
+        "operationId": "get_config",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/users": {
       "post": {
         "tags": [
@@ -2513,7 +2560,7 @@
           "conversations"
         ],
         "summary": "List the caller's chats",
-        "description": "FR-SBR-03 sidebar order — most recently updated first.\n\nA bare array, matching `GET /documents` (R-40(5)); no paging, because the sidebar renders\nthe whole list and a user's chat count is bounded by how many they have made.",
+        "description": "FR-SBR-03 sidebar order — most recently updated first.\n\nA bare array, matching `GET /documents` (R-40(5)); no paging, because the sidebar renders\nthe whole list and a user's chat count is bounded by how many they have made.\n\nEach row carries `message_count` (T-407) from a correlated `COUNT(*)`, so FR-SBR-03's\n\"· N messages\" is true on rows the client has never opened. See the field's docstring for\nwhy this does not reopen the R-51(4) argument that keeps `context` off this route.",
         "operationId": "list_conversations",
         "responses": {
           "200": {
@@ -3753,6 +3800,21 @@
         "title": "CloudProvider",
         "description": "Providers a user may link.\n\nOne member, and NFR-CMP-02 says exactly that: v1 commits to Google Drive, and the\n*mechanism* is what is provider-agnostic — Keycloak brokers the token, so a second\nprovider is a realm identity provider plus a file-listing adapter. Modelling it as an\nenum keeps the provider a validated path segment rather than free text reaching a URL,\nwhich is the R-63(6)(1) discipline applied one level up from the file id."
       },
+      "ConfigResponse": {
+        "properties": {
+          "chat_model": {
+            "type": "string",
+            "title": "Chat Model",
+            "description": "The configured answer model (`OPENAI_CHAT_MODEL`), for FR-ANL-02's MODEL card. The *configured* id, not the one that answered any particular turn — that is `MessageResponse.model_name`, which the GUI prefers where it exists."
+          }
+        },
+        "type": "object",
+        "required": [
+          "chat_model"
+        ],
+        "title": "ConfigResponse",
+        "description": "Deployment configuration the GUI renders. One field today, by design."
+      },
       "ContextWindowExceededDetail": {
         "properties": {
           "error_code": {
@@ -3818,6 +3880,11 @@
           "percent_used": {
             "type": "number",
             "title": "Percent Used"
+          },
+          "answer_reserve_tokens": {
+            "type": "integer",
+            "title": "Answer Reserve Tokens",
+            "description": "The headroom FR-STA-04's projection reserves for the reply (`CONTEXT_ANSWER_RESERVE_TOKENS`, floored at `LLM_MAX_OUTPUT_TOKENS`). Published so the GUI can reproduce the server's admission decision *before* a request exists (R-51(3)/(6)) — without it the composer accepts what the server refuses the moment an operator raises the answer ceiling."
           }
         },
         "type": "object",
@@ -3825,7 +3892,8 @@
           "used_tokens",
           "limit_tokens",
           "remaining_tokens",
-          "percent_used"
+          "percent_used",
+          "answer_reserve_tokens"
         ],
         "title": "ContextWindowResponse",
         "description": "The FR-ANL-03 CONTEXT WINDOW card, for one conversation (R-51 binds T-401 to carry it).\n\n**This is conversation length, not model cost.** R-30 counts history + the current query\nand excludes the system prompt and the retrieved chunks, so a turn's real\n`messages.prompt_tokens` will routinely exceed `used_tokens` — correctly, because they\nmeasure different quantities (R-51(1)). Nothing may derive one from the other."
@@ -3862,6 +3930,11 @@
             "format": "date-time",
             "title": "Updated At"
           },
+          "message_count": {
+            "type": "integer",
+            "title": "Message Count",
+            "description": "How many messages this chat holds — FR-SBR-03's `· N messages`, on every row including the ones the sidebar never opens."
+          },
           "context": {
             "$ref": "#/components/schemas/ContextWindowResponse"
           }
@@ -3873,10 +3946,11 @@
           "archived",
           "created_at",
           "updated_at",
+          "message_count",
           "context"
         ],
         "title": "ConversationDetailResponse",
-        "description": "A single conversation, with the FR-ANL-03 meter.\n\nCarried on the single-conversation responses only. The list route omits it deliberately:\nthe meter is derived from every `messages.content` in the chat (R-51(4) — usage is\ncomputed, never stored), so putting it on a list would read the full transcript of every\nconversation in the sidebar to render a card FR-ANL-03 shows for the *active* one."
+        "description": "A single conversation, with the FR-ANL-03 meter.\n\nCarried on the single-conversation responses only. The list route omits it deliberately:\nthe meter is derived from every `messages.content` in the chat (R-51(4) — usage is\ncomputed, never stored), so putting it on a list would read the full transcript of every\nconversation in the sidebar to render a card FR-ANL-03 shows for the *active* one.\n\n`message_count`, inherited from the base, is the one count that *is* on the list route —\nsee its docstring for why the same objection does not apply to it."
       },
       "ConversationResponse": {
         "properties": {
@@ -3909,6 +3983,11 @@
             "type": "string",
             "format": "date-time",
             "title": "Updated At"
+          },
+          "message_count": {
+            "type": "integer",
+            "title": "Message Count",
+            "description": "How many messages this chat holds — FR-SBR-03's `· N messages`, on every row including the ones the sidebar never opens."
           }
         },
         "type": "object",
@@ -3917,7 +3996,8 @@
           "title",
           "archived",
           "created_at",
-          "updated_at"
+          "updated_at",
+          "message_count"
         ],
         "title": "ConversationResponse",
         "description": "One conversation. `id` is also the LangGraph `thread_id` (FR-PER-02)."

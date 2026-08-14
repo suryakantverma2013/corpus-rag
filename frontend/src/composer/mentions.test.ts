@@ -11,6 +11,7 @@ import {
   CHAT_SCOPE_META,
   hasMentionTrigger,
   insertMention,
+  mentionedIds,
   mentionMeta,
   nextActiveIndex,
   outgoingText,
@@ -124,5 +125,52 @@ describe('nextActiveIndex (NFR-A11Y-03)', () => {
 
   it('stays at -1 for an empty list', () => {
     expect(nextActiveIndex(-1, 1, 0)).toBe(-1);
+  });
+});
+
+describe('mentionedIds — SendMessageRequest.document_ids (FR-RET-04, R-46(1))', () => {
+  const q3 = doc({ id: 'q3', name: 'Q3' });
+  const q3pdf = doc({ id: 'q3pdf', name: 'Q3.pdf' });
+  const runbook = doc({ id: 'rb', name: 'Onboarding Playbook.docx' });
+
+  it('finds nothing in ordinary prose', () => {
+    expect(mentionedIds('What is the refund window?', [q3, runbook])).toEqual([]);
+  });
+
+  it('finds one mention', () => {
+    expect(mentionedIds(insertMention('summarise ', 'Q3'), [q3, runbook])).toEqual(['q3']);
+  });
+
+  it('finds several', () => {
+    const text = insertMention(insertMention('compare ', 'Q3'), 'Onboarding Playbook.docx');
+    expect(mentionedIds(text, [q3, runbook])).toEqual(['q3', 'rb']);
+  });
+
+  it('matches a name containing spaces', () => {
+    // `insertMention` writes the whole filename, spaces and all — there is no word boundary
+    // to lean on, which is why this scans for the literal token.
+    expect(mentionedIds('see @Onboarding Playbook.docx please', [runbook])).toEqual(['rb']);
+  });
+
+  it('prefers the longest name, so a prefix cannot steal the match', () => {
+    // The defect list order would produce: `@Q3.pdf` contains `@Q3`, so scanning in order
+    // sends the wrong document and the user is answered from a file they did not name.
+    expect(mentionedIds('see @Q3.pdf', [q3, q3pdf])).toEqual(['q3pdf']);
+    expect(mentionedIds('see @Q3.pdf', [q3pdf, q3])).toEqual(['q3pdf']);
+  });
+
+  it('still finds both when both are mentioned', () => {
+    expect(mentionedIds('@Q3 versus @Q3.pdf', [q3, q3pdf]).sort()).toEqual(['q3', 'q3pdf']);
+  });
+
+  it('ignores a document that is not in scope', () => {
+    // The menu only offers the FR-ORC-06 scope, so a name typed by hand for a document the
+    // caller cannot see must not become an id. The server AND-s the filter anyway (R-46(1)),
+    // but sending it would be a request we know is meaningless.
+    expect(mentionedIds('see @Secret_Plans.pdf', [q3])).toEqual([]);
+  });
+
+  it('returns ids in list order, not match order', () => {
+    expect(mentionedIds('@Onboarding Playbook.docx then @Q3', [q3, runbook])).toEqual(['q3', 'rb']);
   });
 });

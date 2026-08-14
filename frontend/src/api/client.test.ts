@@ -15,7 +15,14 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { sessionMiddleware } from './client';
+import {
+  CHAT_REGENERATE_PATH,
+  CHAT_SEND_PATH,
+  StreamError,
+  expandPath,
+  sessionMiddleware,
+  streamFrames,
+} from './client';
 import { registerTokenRefresher, registerUnauthorizedHandler, setAccessToken } from './auth';
 import { readSource, stripTsComments } from '../test/css-source';
 
@@ -158,6 +165,68 @@ describe('the 401 policy (FR-AUT-07, corrected)', () => {
     await receive('/api/v1/users', 403);
     await receive('/api/v1/documents', 409);
     expect(expired).not.toHaveBeenCalled();
+  });
+});
+
+describe('expandPath', () => {
+  it('fills a template segment', () => {
+    expect(expandPath(CHAT_SEND_PATH, { conversation_id: 'abc' })).toBe(
+      '/api/v1/conversations/abc/messages',
+    );
+    expect(expandPath(CHAT_REGENERATE_PATH, { message_id: 'm1' })).toBe(
+      '/api/v1/messages/m1/regenerate',
+    );
+  });
+
+  it('encodes the value so it cannot escape its segment', () => {
+    expect(expandPath(CHAT_REGENERATE_PATH, { message_id: '../../documents' })).toBe(
+      '/api/v1/messages/..%2F..%2Fdocuments/regenerate',
+    );
+  });
+
+  it('throws on a missing parameter rather than emitting a literal brace', () => {
+    // A `{message_id}` left in the URL reaches the server as a 404 whose cause is invisible.
+    expect(() => expandPath(CHAT_REGENERATE_PATH, {})).toThrow('message_id');
+  });
+});
+
+describe('StreamError', () => {
+  it('carries Retry-After off a 429, which is unreachable anywhere else', async () => {
+    // `streamFrames` consumes and discards the Response, so a caller holding only the error
+    // knew the status and the body and nothing about when to try again (NFR-SEC-07).
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response('{"detail":"slow down"}', { status: 429, headers: { 'Retry-After': '30' } }),
+      ),
+    );
+    try {
+      await streamFrames('/api/v1/documents/events').next();
+      expect.unreachable('a 429 must throw');
+    } catch (error) {
+      expect(error).toBeInstanceOf(StreamError);
+      expect((error as StreamError).status).toBe(429);
+      expect((error as StreamError).retryAfter).toBe('30');
+      expect((error as StreamError).body).toContain('slow down');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('is null when the server sent no header', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('{}', { status: 404 })),
+    );
+    try {
+      await streamFrames('/api/v1/documents/events').next();
+      expect.unreachable('a 404 must throw');
+    } catch (error) {
+      expect((error as StreamError).retryAfter).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

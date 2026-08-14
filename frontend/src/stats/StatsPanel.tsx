@@ -2,8 +2,9 @@
  * The §4.6 stats panel — FR-ANL-01..05, the third FR-LAY-01 region.
  *
  * Presentational in the T-503 sense: every value is a prop or is derived from one by `stats.ts`,
- * and nothing here fetches. T-513 owns the data layer and swaps `App`'s seeds for the API without
- * touching a derivation.
+ * and nothing here fetches. T-513 swapped `App`'s seeds for the API without touching a single
+ * derivation — the one change it needed here was `usage: null`, for the round trip before the
+ * server has been read.
  *
  * **The root is a fragment, and that is load-bearing.** `AppShell`'s `.stats` already owns the
  * column's width, border, background, 18px padding, `overflow-y` *and its 14px gap*, so the six
@@ -64,6 +65,16 @@ const EVAL_INDICATIVE_NOTE = 'Indicative judge scores, not exact measurements.';
  */
 const NOT_SCORED = 'not scored';
 
+/**
+ * The FR-ANL-03 card before its first read. `TBD(§8.4)`.
+ *
+ * Also spec-authored, and for the same reason: the prototype simulates the meter locally, so it
+ * has no "not read yet" state and §9 has no string for one. Deliberately not "0.0K / 10.4K" —
+ * the limit is a server value too, and stating a number nobody has read is the failure the
+ * em dash exists to avoid.
+ */
+const NOT_LOADED = 'Reading the conversation…'; // TBD(§8.4)
+
 /** FR-ANL-01's ticker. The prototype's `setInterval(…, 1000)`. */
 const TICK_MS = 1_000;
 
@@ -81,8 +92,13 @@ export interface StatsPanelProps {
   /**
    * FR-ANL-03's meter. **The same object the composer projects FR-STA-04 against**, so the two
    * cannot disagree about how full the conversation is.
+   *
+   * `null` for the one round trip between activating a chat and `GET /conversations/{id}`
+   * landing — the meter is server-derived (R-51(4)) and cannot be computed here, so there is
+   * genuinely nothing to show yet. Passing `{used: 0, limit: 0}` instead would render a *full*
+   * bar, because `percentUsed` answers 100 for a zero limit.
    */
-  usage: ContextUsage;
+  usage: ContextUsage | null;
   /** FR-ANL-02 / FR-SYS-03 — the model id. Never null: `App` supplies the configured fallback. */
   modelName: string;
 }
@@ -148,17 +164,27 @@ function StatCard({ label, value }: { label: string; value: string }) {
  * would announce the same percentage a third time, as a widget. The board's "give them accessible
  * text" is discharged by *guaranteeing the text*, not by duplicating it.
  */
-function ContextMeter({ usage }: { usage: ContextUsage }) {
+function ContextMeter({ usage }: { usage: ContextUsage | null }) {
   return (
     <div className={`${styles.card} ${styles.panelCard}`}>
       <div className={styles.cardHeader}>
         <h2 className={styles.cardLabel}>{CONTEXT_LABEL}</h2>
-        <span className={`${styles.tokens} mono`}>{tokensLabel(usage)}</span>
+        {/* The dash is aria-hidden because the caption below says the same thing in words,
+            under exactly the same condition — the treatment `EvalAverages` gives its own. */}
+        <span className={`${styles.tokens} mono`} aria-hidden={usage === null ? 'true' : undefined}>
+          {usage === null ? EM_DASH : tokensLabel(usage)}
+        </span>
       </div>
       <div className={styles.track} aria-hidden="true">
-        <div className={styles.fill} style={{ width: `${percentUsed(usage)}%` }} />
+        {/* No fill until the meter has been read, on `MetricRow`'s rule one card over: a
+            zero-width fill would be a claim, and `{used:0, limit:0}` is worse than a claim —
+            `percentUsed` answers **100** for a zero limit, so the bar would flash *full*, which
+            is the frozen state inverted. The track keeps the card's height either way. */}
+        {usage !== null && (
+          <div className={styles.fill} style={{ width: `${percentUsed(usage)}%` }} />
+        )}
       </div>
-      <div className={styles.caption}>{contextCaption(usage)}</div>
+      <div className={styles.caption}>{usage === null ? NOT_LOADED : contextCaption(usage)}</div>
     </div>
   );
 }

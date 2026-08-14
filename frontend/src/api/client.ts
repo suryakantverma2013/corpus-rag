@@ -106,12 +106,22 @@ api.use(sessionMiddleware);
 export class StreamError extends Error {
   readonly status: number;
   readonly body: string | null;
+  /**
+   * The `Retry-After` header, when the server sent one — NFR-SEC-07's 429 does.
+   *
+   * Read here because it is unreachable anywhere else: the response object is consumed and
+   * discarded inside `streamFrames`, so a caller holding only the error had the status and the
+   * body and nothing about *when*. Kept as the raw header value rather than parsed seconds —
+   * the header admits an HTTP-date too, and no surface renders a countdown (R-72(4)).
+   */
+  readonly retryAfter: string | null;
 
-  constructor(status: number, body: string | null) {
+  constructor(status: number, body: string | null, retryAfter: string | null = null) {
     super(`stream failed: ${status}`);
     this.name = 'StreamError';
     this.status = status;
     this.body = body;
+    this.retryAfter = retryAfter;
   }
 }
 
@@ -126,8 +136,34 @@ export function streamPath<P extends keyof paths & string>(path: P): P {
   return path;
 }
 
+/**
+ * Fill a path template's `{param}` segments.
+ *
+ * `streamPath` checks the *template* against the generated `paths`; the two chat streams are
+ * parameterised, so something has to interpolate — and interpolating at each call site is how one
+ * of them quietly stops encoding. `encodeURIComponent` per value, so an id that is not a UUID
+ * cannot escape its segment.
+ */
+export function expandPath<P extends keyof paths & string>(
+  template: P,
+  params: Readonly<Record<string, string>>,
+): string {
+  return template.replace(/\{(\w+)\}/g, (whole, name: string) => {
+    const value = params[name];
+    // A missing parameter must not silently produce a literal `{id}` in a URL — that reaches
+    // the server as a 404 whose cause is invisible.
+    if (value === undefined) throw new Error(`expandPath: no value for ${whole} in ${template}`);
+    return encodeURIComponent(value);
+  });
+}
+
 /** FR-KBM-09's live channel (R-41), consumed by T-508. */
 export const DOCUMENT_EVENTS_URL = streamPath('/api/v1/documents/events');
+
+/** FR-CMP-03's send (R-54(2)) and FR-MSG-08's Regenerate (R-56) — one frame shape, two routes.
+ *  Templates, not URLs: expand them with {@link expandPath}. */
+export const CHAT_SEND_PATH = streamPath('/api/v1/conversations/{conversation_id}/messages');
+export const CHAT_REGENERATE_PATH = streamPath('/api/v1/messages/{message_id}/regenerate');
 
 /** One parsed SSE frame: the whole envelope, discriminated by `event`. */
 export type ChatFrame = components['schemas']['ChatStreamFrame'];
@@ -169,7 +205,7 @@ export async function* streamFrames<T>(
     // R-41(7) stream-cap notice renders. Reading it also releases the connection.
     const body = await response.text().catch(() => null);
     if (response.status === 401) reportUnauthorized();
-    throw new StreamError(response.status, body);
+    throw new StreamError(response.status, body, response.headers.get('Retry-After'));
   }
 
   const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();

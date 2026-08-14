@@ -113,3 +113,34 @@ describe('the rest of the table', () => {
     });
   });
 });
+
+describe('FR-KBM-10 — the import route’s other 409 (T-512)', () => {
+  // `ImportConflictResponse` is a union: the same status carries "a turn is running" and "your
+  // Drive is not connected", and they have different actions, so both branches must survive.
+  it.each(['ACCOUNT_NOT_LINKED', 'CLOUD_ACCESS_REVOKED'])(
+    'reads %s as link-required, carrying the code and the server’s copy',
+    (code) => {
+      const outcome = classify(
+        {
+          status: 409,
+          error: { detail: { error_code: code, message: 'server copy', provider: 'google' } },
+        },
+        FALLBACK,
+      );
+      expect(outcome).toEqual({ kind: 'link-required', code, detail: 'server copy' });
+    },
+  );
+
+  it('still reads the processing lock, which shares the status', () => {
+    const outcome = classify(
+      { status: 409, error: { detail: { error_code: 'PROCESSING_LOCKED', message: 'busy' } } },
+      FALLBACK,
+    );
+    expect(outcome).toEqual({ kind: 'locked', detail: 'busy' });
+  });
+
+  it('claims neither for a 409 it cannot identify', () => {
+    const outcome = classify({ status: 409, error: { detail: 'Duplicate bytes.' } }, FALLBACK);
+    expect(outcome).toEqual({ kind: 'refused', detail: 'Duplicate bytes.', status: 409 });
+  });
+});

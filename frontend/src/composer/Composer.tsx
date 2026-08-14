@@ -1,8 +1,9 @@
 /**
  * §4.4 — the composer: FR-CMP-01..06, NFR-USE-03, and FR-STA-04's pre-submission block.
  *
- * Presentational in the T-503 sense — every mutation is a prop and nothing here fetches; T-513
- * owns wiring `onSend` to `POST /conversations/{id}/messages`. The composer's *own* state (the
+ * Presentational in the T-503 sense — every mutation is a prop and nothing here fetches;
+ * `onSend` reaches `POST /conversations/{id}/messages` through the chat store (T-513), and
+ * `usage` is `ContextWindowResponse`, `null` until it is read. The composer's *own* state (the
  * draft, whether the menu is open, which row is virtually focused) lives here rather than in
  * `App`: FR-CST-01 lists `composer` and `mentionOpen` as client state, and R-58(5)'s rule is
  * about not threading state through the shell, not about hoisting every input.
@@ -50,12 +51,17 @@ export interface ComposerProps {
   /** FR-CMP-03 — a reply is in flight, so a send is ignored. Same flag as FR-MSG-05's dots. */
   pending: boolean;
   /**
-   * FR-STA-04 / R-51(3). `used` and `limit` are the server's (`ContextWindowResponse`);
-   * `reserve` is `CONTEXT_ANSWER_RESERVE_TOKENS`, which the projection needs and which the
-   * response does not yet carry — see the task note. Passed in rather than assumed so this
-   * component applies the server's rule and never its own.
+   * FR-STA-04 / R-51(3) — all three numbers are the server's, off `ContextWindowResponse`.
+   *
+   * `reserve` is `CONTEXT_ANSWER_RESERVE_TOKENS`, which the projection needs and which T-513
+   * added to that response for exactly this: without it the browser cannot reproduce
+   * `check_submission`, and would start accepting what the server refuses the moment an
+   * operator raised `LLM_MAX_OUTPUT_TOKENS`. Passed in rather than assumed so this component
+   * applies the server's rule and never its own.
+   *
+   * `null` while the meter is unread — see `overBudget` below for why that is permissive.
    */
-  usage: { used: number; limit: number; reserve: number };
+  usage: { used: number; limit: number; reserve: number } | null;
   /** FR-CMP-06's count: global documents + the active chat's attachments (same as FR-SBR-05). */
   documentCount: number;
   onSend: (text: string) => void;
@@ -91,7 +97,11 @@ export function Composer({
   // FR-STA-04, run on the draft as it is typed — the same rule as `check_submission`, which is
   // what R-51(2) requires and `tokens.ts` explains. The server stays authoritative; this only
   // stops a request that would certainly be refused (R-51(6)).
-  const overBudget = !projectSubmission(value, usage).allowed;
+  // Permissive while the meter is unknown — the one round trip after activating a chat. R-44's
+  // standing rule: a control that refuses legitimate use is worse than no control, and the
+  // server refuses anyway (R-51(5)), so the cost of being wrong here is one recoverable `409`
+  // against a composer that would otherwise be dead on arrival in every new chat.
+  const overBudget = usage !== null && !projectSubmission(value, usage).allowed;
   const blocked = sendBlock(value, { pending, overBudget });
 
   const closeMenu = useCallback(() => {

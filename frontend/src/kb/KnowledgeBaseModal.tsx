@@ -12,6 +12,9 @@
 import { useState } from 'react';
 
 import type { DocumentEvent, UploadScope } from '../api';
+import { CloudImportDialog } from '../cloud/CloudImportDialog';
+import type { CloudFilesStore } from '../cloud/useCloudFiles';
+import type { CloudLinkStore } from '../cloud/useCloudLink';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { Dialog } from '../ui/Dialog';
 import { DocumentRow } from './DocumentRow';
@@ -53,8 +56,21 @@ export interface KnowledgeBaseModalProps {
   /** FR-KBM-03's second section, and the target of a `scope=chat` upload. */
   conversationId: string | null;
   onClose: () => void;
-  /** FR-KBM-06. T-512 owns the picker; until then this presents the FR-AUT-11 unlinked state. */
+  /**
+   * FR-KBM-06's button (T-512). It has two behaviours and the requirement fixes which: open the
+   * FR-KBM-10 picker, or — "when the user has not yet linked an account" — initiate FR-AUT-11
+   * linking. The branch is `App`'s, because the linked state is read there and is also what the
+   * `?link=` return acts on.
+   */
   onCloudImport: () => void;
+  /** The FR-KBM-10 stores, and whether the picker is open. Owned by `App` beside `docsOpen`,
+   *  because the `?link=` return has to be able to open this surface on a cold page load. */
+  cloud: {
+    open: boolean;
+    files: CloudFilesStore;
+    link: CloudLinkStore;
+    onClose: () => void;
+  };
 }
 
 export function KnowledgeBaseModal({
@@ -62,6 +78,7 @@ export function KnowledgeBaseModal({
   conversationId,
   onClose,
   onCloudImport,
+  cloud,
 }: KnowledgeBaseModalProps) {
   const [scope, setScope] = useState<UploadScope>('global');
   const [pendingDelete, setPendingDelete] = useState<DocumentEvent | null>(null);
@@ -161,6 +178,21 @@ export function KnowledgeBaseModal({
           {CLOUD}
         </button>
       </div>
+
+      {/* Nested inside this dialog, not beside it: the user reached the picker from the footer
+          below and returns here, and the file they import appears in the lists above — so this
+          modal stays mounted and visible behind it. T-508's dialog stack is what makes that
+          safe; before it, Escape here closed both surfaces at once. */}
+      {cloud.open && (
+        <CloudImportDialog
+          files={cloud.files}
+          link={cloud.link}
+          scope={scope}
+          paused={store.paused}
+          onImport={store.importFile}
+          onClose={cloud.onClose}
+        />
+      )}
 
       {pendingDelete !== null && (
         <ConfirmDialog

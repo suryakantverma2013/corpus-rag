@@ -198,6 +198,41 @@ describe('focus ring (NFR-A11Y-02, R-59)', () => {
     expect(code).not.toMatch(/outline:\s*none/);
     expect(code).not.toMatch(/outline:\s*0\b/);
   });
+
+  it('permits `outline: none` in exactly three places, each of which relocates the indicator', () => {
+    // NFR-A11Y-02 says `outline: none` "shall not appear in the codebase", and three stylesheets
+    // contain it. Each is deliberate and compensated — the composer moves the indicator to the
+    // bar's `:focus-within` accent border, and the two auth field rules use the `:focus`
+    // border-colour change FR-AUT-02 specifies by name — but until T-511 that reasoning lived
+    // only in per-component comments, and the repo-wide rule the requirement states was
+    // enforced over this ONE file. A rule with unwritten exceptions is not a rule.
+    //
+    // So the exceptions are enumerated here, where adding a fourth is a visible decision rather
+    // than a local judgement call. R-75 writes the same carve-out into the requirement.
+    const SANCTIONED = new Set([
+      'src/composer/Composer.module.css',
+      'src/auth/LoginScreen.module.css',
+      'src/auth/ChangePasswordModal.module.css',
+    ]);
+
+    const sheets = readdirSync('src', { recursive: true, encoding: 'utf8' })
+      .filter((f) => f.endsWith('.css'))
+      .map((f) => `src/${f}`.replaceAll('\\', '/'));
+    expect(sheets.length).toBeGreaterThan(8);
+
+    const offenders = sheets.filter((file) =>
+      /outline:\s*(none|0\b)/.test(stripBlockComments(readSource(file))),
+    );
+    expect(new Set(offenders)).toEqual(SANCTIONED);
+
+    // ...and each one must still show focus somewhere, or the exception is just a removal.
+    for (const file of SANCTIONED) {
+      const sheet = stripBlockComments(readSource(file));
+      expect(sheet, `${file} clears its outline without relocating the indicator`).toMatch(
+        /:focus(-within|-visible)?[^{]*\{[^}]*(border-color|box-shadow|outline)/,
+      );
+    }
+  });
 });
 
 describe('scrollbar gate (NFR-USE-05, R-58(3), corrected by R-60)', () => {

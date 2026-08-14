@@ -1,24 +1,47 @@
 /**
- * Seeded transcripts, standing in for `GET /api/v1/conversations/{id}/messages` until T-513.
+ * Transcript fixtures — the §4.3 branch matrix, in one place.
  *
- * The T-503 convention, one directory on: shaped as the **generated** `Message` model so the swap
- * is a data-source change rather than a type change, with every mutation shaped as the API call
- * that replaces it. No timer and no simulated stream — the seed models the *effect* of a call;
- * the intermediate `stage` frames belong to T-513.
+ * These drove `App.tsx` until T-513 wired the real API; they are kept because between them they
+ * cover every branch the surface has and rebuilding that inside five test files is how the
+ * branches quietly stop being covered: citations with and without a score (R-47(2)), both eval
+ * metrics and one (R-50(3)), an empty chat, an abstention (a real, rateable row), a degraded
+ * failure (no row, no action bar), a turn in flight, and a frozen conversation.
  *
- * Extracted from `App.tsx` rather than inlined there because between them these cover every
- * branch the §4.3 surface has, and that is more data than a composition root should carry:
- * citations with and without a score, both eval metrics and one, an empty chat, an abstention, a
- * degraded failure, the typing state and a frozen conversation.
+ * **In `src/test/` on purpose.** That directory is excluded from `tsconfig.app.json` and
+ * included by `tsconfig.test.json`, so a fixture here *cannot* be imported by shipping code —
+ * the guarantee that actually matters once the seeds are no longer the product's data source.
+ * It is not a `*.test.ts`, so Vitest does not collect it (`css-source.ts`'s precedent).
+ *
+ * `typing` and `frozen` are still here and are still fixture-only: in production both are
+ * derived — `typing` from the chat store's turn, `frozen` from `isFrozen(usage)` — but a test
+ * that wants the frozen surface should be able to say so in one word.
  */
-import type { CitationSegment, Message, Segment } from '../api';
-import type { TranscriptEntry } from './messages';
+import type { ContextWindow, CitationSegment, Message, Segment } from '../api';
+import type { TranscriptEntry } from '../chat/messages';
 
 export interface SampleChat {
   entries: TranscriptEntry[];
   typing: boolean;
   frozen: boolean;
+  /** The FR-ANL-03 meter this chat would read back, as `ConversationDetailResponse.context`. */
+  usage: ContextWindow;
 }
+
+/** Room to spare, and the boundary at which no message of any length fits (R-67(1)). */
+export const ROOMY_USAGE: ContextWindow = {
+  used_tokens: 240,
+  limit_tokens: 10_400,
+  remaining_tokens: 10_160,
+  percent_used: 2.3,
+  answer_reserve_tokens: 1_500,
+};
+export const FULL_USAGE: ContextWindow = {
+  used_tokens: 8_900,
+  limit_tokens: 10_400,
+  remaining_tokens: 1_500,
+  percent_used: 85.6,
+  answer_reserve_tokens: 1_500,
+};
 
 let seq = 0;
 
@@ -27,19 +50,6 @@ function user(text: string): TranscriptEntry {
   return {
     message: { id: `u${seq}`, role: 'user', segs: [{ text }], created_at: '2026-07-16T09:12:00Z' },
   };
-}
-
-/**
- * A user turn created at runtime by FR-CMP-03's send, rather than seeded.
- *
- * Shares `user()` and its counter so a sent message is indistinguishable from a seeded one —
- * the id is local and provisional either way, and T-513 replaces both with the row the send
- * route returns. `created_at` is stamped rather than fixed because this one really did just
- * happen; the seeds keep their frozen dates so the transcript reads the same on every run.
- */
-export function asked(text: string): TranscriptEntry {
-  const entry = user(text);
-  return { ...entry, message: { ...entry.message, created_at: new Date().toISOString() } };
 }
 
 function ai(segs: Segment[], extra: Partial<Message> = {}, outcome?: TranscriptEntry['outcome']) {
@@ -138,7 +148,7 @@ export function regenerated(message: Message): Message {
   return { ...message, segs: REGENERATED, evaluation: null, feedback: null };
 }
 
-export const SAMPLE_TRANSCRIPTS: Record<string, SampleChat> = {
+export const TRANSCRIPT_FIXTURES: Record<string, SampleChat> = {
   // Citations, both eval metrics, and the whole FR-MSG-07 surface in one answer.
   'sample-analyzing-market-trends': {
     entries: [
@@ -147,6 +157,7 @@ export const SAMPLE_TRANSCRIPTS: Record<string, SampleChat> = {
     ],
     typing: false,
     frozen: false,
+    usage: ROOMY_USAGE,
   },
 
   // A plain answer (no citations, no evaluation → no source line, no chip row), then an answer
@@ -173,10 +184,16 @@ export const SAMPLE_TRANSCRIPTS: Record<string, SampleChat> = {
     ],
     typing: false,
     frozen: false,
+    usage: ROOMY_USAGE,
   },
 
   // FR-MSG-02.
-  'sample-customer-persona-refinement': { entries: [], typing: false, frozen: false },
+  'sample-customer-persona-refinement': {
+    entries: [],
+    typing: false,
+    frozen: false,
+    usage: ROOMY_USAGE,
+  },
 
   // An abstention — a real, stored, rateable row (R-54(3) keeps only `error` out of `messages`)
   // — followed by a degraded failure, which has no row and therefore no action bar.
@@ -211,6 +228,7 @@ export const SAMPLE_TRANSCRIPTS: Record<string, SampleChat> = {
     ],
     typing: false,
     frozen: false,
+    usage: ROOMY_USAGE,
   },
 
   // FR-MSG-05, and FR-MSG-01's fourth scroll trigger.
@@ -218,6 +236,7 @@ export const SAMPLE_TRANSCRIPTS: Record<string, SampleChat> = {
     entries: [user('Draft the Q4 forecast narrative from the market report.')],
     typing: true,
     frozen: false,
+    usage: ROOMY_USAGE,
   },
 
   // FR-STA-04 / R-67 — frozen, not broken.
@@ -234,5 +253,6 @@ export const SAMPLE_TRANSCRIPTS: Record<string, SampleChat> = {
     ],
     typing: false,
     frozen: true,
+    usage: FULL_USAGE,
   },
 };

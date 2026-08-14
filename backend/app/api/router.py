@@ -8,10 +8,13 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api import audit, auth, cloud, conversations, documents, jobs, messages, users
+from app.api import audit, auth, cloud, config, conversations, documents, jobs, messages, users
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
+# FR-SYS-03's configured model id (T-513) — deployment configuration the GUI renders, kept off
+# `MeResponse`, which describes the caller rather than the deployment.
+api_router.include_router(config.router)
 api_router.include_router(users.router)
 api_router.include_router(audit.router)
 api_router.include_router(documents.router)

@@ -4,20 +4,44 @@
 import type { Conversation } from '../api';
 
 /**
- * A conversation as the sidebar renders it: the generated API model plus the message count.
+ * A conversation as the sidebar renders it — the generated API model, unadorned.
  *
- * **`messageCount` is not on `ConversationResponse` and has to be supplied by the caller**,
- * because FR-SBR-03 requires "· N messages" on *every* row while `GET /api/v1/conversations`
- * returns no count at all. It cannot be derived client-side either — only the active chat's
- * messages are ever loaded, so every other row would render "· 0 messages", which is worse
- * than wrong: it is plausible. Recorded as **T-407** (add `message_count` to the list route);
- * until that lands, T-513's wiring has nothing truthful to pass here.
- *
- * Deliberately an intersection rather than a redeclared interface, so a change to the
- * generated model reaches this file as a type error (the frontend-dev "never hand-write a
- * response type" rule).
+ * It was `Conversation & { messageCount: number }` until T-407 put `message_count` on
+ * `ConversationResponse`. FR-SBR-03 requires "· N messages" on *every* row, and the count
+ * cannot be derived client-side — only the active chat's messages are ever loaded, so every
+ * other row would have rendered "· 0 messages", which is worse than wrong because it is
+ * plausible. Now the server sends it and the alias is a rename, kept because "the sidebar's
+ * row model" is worth naming even when it happens to equal the response.
  */
-export type SidebarConversation = Conversation & { messageCount: number };
+export type SidebarConversation = Conversation;
+
+/**
+ * FR-SBR-03 sidebar order, reproducing `ConversationRepository.list_by_owner`.
+ *
+ * The client needs its own copy because the list is mutated locally between fetches — a
+ * rename moves a row and a send touches `updated_at` — and re-fetching the whole list to
+ * learn an order we can compute is a round trip for nothing. Non-mutating: `sort` in place
+ * would rewrite React state a caller still holds.
+ *
+ * Compares parsed instants, not the strings. ISO-8601 does happen to sort lexicographically,
+ * but only while every value carries the same offset and the same fractional precision — and
+ * `created_at` and `updated_at` come from two different server clocks (`now()` and
+ * `clock_timestamp()`), so that is an assumption about serialisation, not about time.
+ * `created_at` breaks a genuine tie, exactly as the repository's `order_by` does.
+ */
+export function sortConversations(
+  conversations: readonly SidebarConversation[],
+): SidebarConversation[] {
+  const at = (value: string): number => {
+    const parsed = Date.parse(value);
+    // An unparseable timestamp sorts oldest rather than poisoning every comparison it takes
+    // part in: `NaN` makes the comparator return `NaN`, which leaves the order unspecified.
+    return Number.isNaN(parsed) ? -Infinity : parsed;
+  };
+  return [...conversations].sort(
+    (a, b) => at(b.updated_at) - at(a.updated_at) || at(b.created_at) - at(a.created_at),
+  );
+}
 
 /**
  * FR-SBR-02's title for a chat that has none.

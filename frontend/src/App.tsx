@@ -3,13 +3,19 @@
  * (§4.8) and composes the FR-LAY-01 shell inside it (R-58(5)).
  *
  * This is the composition root: it is where the FR-SYS-04 defaults resolve, where T-503..T-508
- * fill the shell's slots, and where T-509 branches between the §4.17 login screen and the
- * shell.
+ * fill the shell's slots, and where T-509 branches between the §4.17 login screen and the shell.
  *
- * **The FR-CST-01 state below is local and seeded.** T-513 owns wiring the generated client
- * into every view; until then the sidebar is driven from `useState` so its behaviour is
- * buildable and testable. Every mutation here is the shape of the API call that replaces it —
- * `onRename` is `PATCH /conversations/{id}`, `onDelete` is `DELETE /conversations/{id}`.
+ * **Every surface now runs on the server (T-513).** The seeded conversations, the seeded
+ * transcripts, the local `nextId` counter and the two hard-coded usage figures are gone; four
+ * stores stand in their place — `useConversations` (the FR-SBR-03 list), `useChat` (the §4.3
+ * transcript, the turn and the FR-ANL-03 meter), `useDocuments` (the FR-KBM-* set, T-508's) and
+ * `useConfig` (FR-SYS-03's model id). What is left here is composition: `activeId`, the session
+ * UI flags, and the two arrows the stores cannot draw between themselves.
+ *
+ * **The one binding worth naming is `turnInFlight`** — OI-31/R-71(1)'s "a response is
+ * generating", read from the chat store and handed to `useDocuments` so the KB modal's four
+ * verbs, FR-MSG-05's dots and FR-MSG-08's action bar are the same fact rather than three. A
+ * source guard in `App.test.tsx` pins it.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ThemeProvider } from './theme/ThemeProvider';
@@ -20,23 +26,26 @@ import { UserMenu } from './auth/UserMenu';
 import { PASSWORD_CHANGED } from './auth/copy';
 import { displayName, initials } from './auth/identity';
 import { useAuth } from './auth/useAuth';
-import { AppShell } from './shell/AppShell';
+import { AppShell, MAIN_ID } from './shell/AppShell';
 import { Sidebar } from './sidebar/Sidebar';
 import { ChatHeader } from './chat/ChatHeader';
 import { CitationCard } from './chat/CitationCard';
 import { CitationHoverProvider } from './chat/CitationHoverProvider';
 import { MessageList } from './chat/MessageList';
-import { SAMPLE_TRANSCRIPTS, asked, regenerated } from './chat/sampleTranscripts';
-import type { SampleChat } from './chat/sampleTranscripts';
+import { useChat, toProjection } from './chat/useChat';
 import { Composer } from './composer/Composer';
+import { mentionedIds } from './composer/mentions';
+import { readLinkReturn } from './cloud/cloud';
+import { useCloudFiles } from './cloud/useCloudFiles';
+import { useCloudLink } from './cloud/useCloudLink';
 import { KnowledgeBaseModal } from './kb/KnowledgeBaseModal';
 import { documentCount, toMentionDocuments } from './kb/documents';
 import { useDocuments } from './kb/useDocuments';
 import { StatsPanel } from './stats/StatsPanel';
 import { modelNameOf } from './stats/stats';
-import { displayTitle, nextActiveId, UNTITLED_CONVERSATION } from './sidebar/conversations';
-import type { SidebarConversation } from './sidebar/conversations';
-import type { Feedback, Message } from './api';
+import { useConfig } from './stats/useConfig';
+import { displayTitle, nextActiveId } from './sidebar/conversations';
+import { useConversations } from './sidebar/useConversations';
 
 /**
  * FR-SYS-04 / §9. The only place this literal exists on the JS side.
@@ -51,84 +60,24 @@ const DEFAULT_BRAND_NAME = 'Corpus';
  *  Product metadata, not session data — it is the same string signed in or out. */
 const GUI_VERSION = 'v1.4';
 
-/** Sample conversations, standing in for `GET /api/v1/conversations` until T-513. Shaped as
- *  the generated `Conversation` model so the swap is a data-source change, not a type change. */
-const SAMPLE_CONVERSATIONS: SidebarConversation[] = [
-  seed('Analyzing Market Trends', '2026-07-16T09:12:00Z', 2),
-  seed('Product Launch Strategy', '2026-07-14T16:40:00Z', 4),
-  seed('Customer Persona Refinement', '2026-07-11T11:05:00Z', 0),
-  seed('Pricing Experiment Review', '2026-07-08T08:30:00Z', 4),
-  // Added by T-505 so the §4.3 states that only exist in a live turn — the FR-MSG-05 indicator
-  // and FR-STA-04's frozen conversation — are reachable before T-513 wires the API.
-  seed('Q4 Forecast Draft', '2026-07-06T15:20:00Z', 1),
-  seed('Vendor Security Review', '2026-07-02T10:00:00Z', 4),
-];
-
-/** A conversation with no seeded transcript — every chat created by FR-SBR-02's New chat — shows
- *  the FR-MSG-02 empty state, which is exactly what a new chat should show. */
-const EMPTY_CHAT: SampleChat = { entries: [], typing: false, frozen: false };
-
 /**
- * Seeded FR-ANL-03 usage for the FR-STA-04 projection, standing in for `ContextWindowResponse`.
+ * FR-AUT-11's three return outcomes, announced on the NFR-A11Y-05 live region. TBD(§8.4).
  *
- * **The derivation runs backwards here on purpose, and T-513 reverses it.** Real usage comes
- * from the server and `frozen` is derived from it (`isFrozen`); until then the seed carries
- * `frozen` and the usage is derived from *that*, so the composer's block and T-505's frozen
- * notice cannot disagree in the meantime. `8_900 + 1_500 = 10_400` is exactly the boundary at
- * which no message of any length fits (R-67(1)).
- */
-const ROOMY_USAGE = { used: 240, limit: 10_400, reserve: 1_500 };
-const FULL_USAGE = { used: 8_900, limit: 10_400, reserve: 1_500 };
-
-/**
- * FR-ANL-02 / FR-SYS-03 — the configured chat model, standing in for the API until T-513.
+ * They are announced rather than rendered as a notice because the surfaces themselves already
+ * carry the visible answer: on success the picker opens listing files, and on either failure the
+ * FR-KBM-06 button is still offering to link. What the live region adds is the half a sighted
+ * user gets from that change of state and a screen-reader user otherwise would not — the page
+ * has just reloaded, so there is no transition for it to infer.
  *
- * **No route carries it.** `MeResponse` has no model field and the only model string on the wire
- * is `MessageResponse.model_name`, which is per answer — so a chat with no AI turn yet has
- * nothing to read. This is the backend default (`OpenAISettings.chat_model`), and the seeded
- * answers in `sampleTranscripts.ts` carry the same id, which is why the card does not change when
- * the user opens a conversation that has been answered. Flagged for T-513 alongside
- * `answer_reserve_tokens`.
+ * `denied` is the user's own cancellation at the consent screen and says so; `failed` is
+ * everything else, and deliberately does not speculate about the cause, which the GUI never
+ * learns (the vocabulary is three words wide).
  */
-const SAMPLE_MODEL_NAME = 'gpt-4o';
-
-/**
- * Replace one AI message wherever it lives, leaving every other conversation untouched.
- *
- * Keyed on the message rather than the conversation because both routes address a message id and
- * carry no conversation — T-513 will hand this the route's own `200` body instead.
- */
-function patchMessage(
-  transcripts: Record<string, SampleChat>,
-  messageId: string,
-  patch: (message: Message) => Message,
-): Record<string, SampleChat> {
-  const next: Record<string, SampleChat> = {};
-  for (const [id, chat] of Object.entries(transcripts)) {
-    next[id] = {
-      ...chat,
-      entries: chat.entries.map((entry) =>
-        entry.message.id === messageId &&
-        entry.message.role === 'ai' &&
-        'created_at' in entry.message
-          ? { ...entry, message: patch(entry.message) }
-          : entry,
-      ),
-    };
-  }
-  return next;
-}
-
-function seed(title: string, updatedAt: string, messageCount: number): SidebarConversation {
-  return {
-    id: `sample-${title.toLowerCase().replaceAll(' ', '-')}`,
-    title,
-    archived: false,
-    created_at: updatedAt,
-    updated_at: updatedAt,
-    messageCount,
-  };
-}
+const LINK_RETURN_COPY = {
+  linked: 'Google Drive connected.',
+  failed: 'Connecting Google Drive did not complete.',
+  denied: 'Connecting Google Drive was cancelled.',
+} as const;
 
 export interface AppProps {
   /**
@@ -173,10 +122,8 @@ function Corpus({ brandName, showStats }: { brandName: string; showStats: boolea
   const [passwordOpen, setPasswordOpen] = useState(false);
   /** NFR-A11Y-05 — R-72(5)'s success announcement for a change the modal reports by vanishing. */
   const [announcement, setAnnouncement] = useState('');
-  const [conversations, setConversations] = useState<SidebarConversation[]>(SAMPLE_CONVERSATIONS);
-  const [activeId, setActiveId] = useState<string | null>(SAMPLE_CONVERSATIONS[0]?.id ?? null);
-  const [transcripts, setTranscripts] = useState<Record<string, SampleChat>>(SAMPLE_TRANSCRIPTS);
-  const nextId = useRef(0);
+  /** The one fact both stores read and neither owns. */
+  const [activeId, setActiveId] = useState<string | null>(null);
   /**
    * FR-CST-01's session `startTime`, driving FR-ANL-01's DURATION.
    *
@@ -187,131 +134,212 @@ function Corpus({ brandName, showStats }: { brandName: string; showStats: boolea
   const [sessionStartedAt] = useState(() => Date.now());
   /** FR-CST-01's `docsOpen`. Both FR-SBR-05 and FR-CMP-02 open the same modal (FR-KBM-01). */
   const [docsOpen, setDocsOpen] = useState(false);
+  /** FR-KBM-10's picker. Here rather than inside the modal because the `?link=` return has to
+   *  open it on a cold page load, before the modal exists. */
+  const [cloudOpen, setCloudOpen] = useState(false);
 
   /**
-   * `POST /api/v1/messages/{id}/feedback` with `{"feedback": "up" | "down" | null}` — the key is
-   * required and `null` is FR-MSG-06's third state, which is how the toggle clears. The route
-   * answers `200` with the full message, so replacing the row locally is the same shape.
-   */
-  const onFeedback = useCallback((messageId: string, feedback: Feedback | null) => {
-    setTranscripts((current) => patchMessage(current, messageId, (m) => ({ ...m, feedback })));
-  }, []);
-
-  /**
-   * `POST /api/v1/messages/{id}/regenerate` — an SSE stream identical in shape to a send (T-513
-   * consumes it). R-56(2)/(3): the row is replaced **in place**, keeping its id, and `evaluation`
-   * and `feedback` are cleared in the same write.
-   */
-  const onRegenerate = useCallback((messageId: string) => {
-    setTranscripts((current) => patchMessage(current, messageId, regenerated));
-  }, []);
-
-  /**
-   * FR-CMP-03 — append the user's turn and show the FR-MSG-05 indicator.
+   * FR-AUT-11's return leg, read ONCE at mount.
    *
-   * `POST /api/v1/conversations/{id}/messages`, an SSE stream (T-513 consumes it). **The
-   * indicator does not clear**, because nothing answers yet: T-505 deliberately seeds no timer
-   * and no simulated stream ("the seed models the *effect* of a call"), and inventing a canned
-   * reply here would be a second fake backend for T-513 to delete. So this is the honest
-   * pre-wiring state — the request was made and nothing has replied — and FR-CMP-03's "shows
-   * the typing indicator until the response arrives" is satisfied as literally as it can be.
+   * Keycloak sends the browser to `CLOUD_RETURN_URL?link=linked|failed|denied` — a full page
+   * load, not a route change — so this is the only signal that the user has come back from
+   * linking. Read in a `useState` initializer rather than an effect because StrictMode runs
+   * effects twice (§8.59) and the strip below would make the second pass see nothing; taking it
+   * at first render means the value is captured before anything can remove it.
    */
-  const onSend = useCallback(
-    (text: string) => {
-      if (activeId === null) return;
-      setTranscripts((current) => {
-        const chat = current[activeId] ?? EMPTY_CHAT;
-        return {
-          ...current,
-          [activeId]: { ...chat, entries: [...chat.entries, asked(text)], typing: true },
-        };
-      });
+  const [linkReturn, setLinkReturn] = useState(() => readLinkReturn(window.location.search));
+
+  // `enabled` rather than a conditional call, on all four stores: hooks cannot be conditional,
+  // so these run during the `starting` phase too — and an unauthenticated call there answers
+  // 401, which FR-AUT-07's handler would read as "the session ended", signing out the very
+  // user whose session was in the middle of resuming (§8.59).
+  const authenticated = phase === 'authenticated';
+
+  const conversations = useConversations({ enabled: authenticated });
+
+  /**
+   * The two arrows the stores cannot draw between themselves.
+   *
+   * A finished turn moves the sidebar row (`updated_at`, the message count) and a 404 removes
+   * it — both are facts the chat store learns and the list store owns. Passing them through
+   * here is one hop and saves a third GET; a shared context would be the alternative, and
+   * `useDocuments`' docstring already argues against introducing one.
+   */
+  const onTurnSettled = useCallback(
+    (id: string, updated: { updatedAt: string; messageCount: number }) => {
+      conversations.patch(id, updated);
     },
-    [activeId],
+    [conversations],
   );
-
-  // FR-SBR-02 — prepends an empty chat and activates it, showing the empty state.
-  const onNewChat = useCallback(() => {
-    const created = seed(UNTITLED_CONVERSATION, new Date().toISOString(), 0);
-    // `seed` derives its id from the title, so every "New chat" would collide. A counter
-    // rather than `crypto.randomUUID()`: that is undefined outside a secure context, so it
-    // would throw on an HTTP LAN deployment. The real id comes from
-    // `POST /api/v1/conversations` in T-513.
-    nextId.current += 1;
-    const conversation = { ...created, id: `new-${nextId.current}` };
-    setConversations((current) => [conversation, ...current]);
-    setActiveId(conversation.id);
-  }, []);
-
-  const onRename = useCallback((id: string, title: string) => {
-    setConversations((current) => current.map((c) => (c.id === id ? { ...c, title } : c)));
-  }, []);
-
-  // FR-SBR-07 — "if it was active, selects the next conversation or the empty state".
-  // Two separate updaters, deliberately: calling `setActiveId` inside the `setConversations`
-  // updater would be a side effect in a function StrictMode invokes twice.
-  const onDelete = useCallback(
+  const onMissing = useCallback(
     (id: string) => {
-      setActiveId((active) => (active === id ? nextActiveId(conversations, id) : active));
-      setConversations((current) => current.filter((c) => c.id !== id));
+      conversations.forget(id);
+      setActiveId((current) => (current === id ? nextActiveId(conversations.rows, id) : current));
     },
     [conversations],
   );
 
-  // FR-HDR-01. `undefined` once the last conversation is deleted (FR-SBR-07 leaves `activeId`
-  // null), which `ChatHeader` renders as the untitled-chat label — see `ChatHeaderProps.title`.
-  const activeConversation = conversations.find((c) => c.id === activeId);
-
-  // A chat with no seeded transcript — every FR-SBR-02 New chat — shows the empty state.
-  const chat = (activeId === null ? undefined : transcripts[activeId]) ?? EMPTY_CHAT;
-
-  // ONE expression, two consumers: the FR-ANL-03 meter and the composer's FR-STA-04 projection
-  // read the same numbers, so the panel cannot say a chat has room while the composer refuses it.
-  const usage = chat.frozen ? FULL_USAGE : ROOMY_USAGE;
+  const chat = useChat({
+    conversationId: activeId,
+    enabled: authenticated,
+    onTurnSettled,
+    onMissing,
+  });
 
   /**
    * OI-31 / OI-36 (R-71(1)) — the client-side "a turn is in flight" signal, in ONE place.
    *
-   * FR-MSG-05's typing indicator, FR-MSG-08's action bar and FR-KBM-07's four gated verbs are the
-   * same fact rendered three times, and R-43(4)'s server `409` is a fourth copy that can disagree
-   * with all of them. Naming it once here is what stops the modal inventing a second signal;
-   * T-513 replaces the right-hand side with the real chat stream's state and touches nothing else.
+   * FR-MSG-05's typing indicator, FR-MSG-08's action bar and FR-KBM-07's four gated verbs are
+   * the same fact rendered three times, and R-43(4)'s server `409` is a fourth copy that can
+   * disagree with all of them. It is per **user**, not per conversation, because that is what
+   * the R-24 lock is keyed on — the server refuses a document verb while a turn runs in a
+   * *different* chat, so a per-chat signal here would disagree with the `409` it pre-empts.
    */
-  const turnInFlight = chat.typing;
+  const turnInFlight = chat.turnInFlight;
 
   /**
    * The FR-KBM-* store. It owns `GET /documents`, the R-41 event stream and the four verbs —
    * T-508 wires its own surface, which R-69(5) records as this project's convention.
-   *
-   * **The seeded document list is gone.** FR-CMP-06 requires the composer footer and FR-SBR-05's
-   * button to show the *same* number, and until T-509 supplies a token this is legitimately zero
-   * rather than a plausible five: a second source that happens to look right is exactly how the
-   * two stop agreeing.
    */
-  // `enabled` rather than a conditional call: hooks cannot be conditional, so this runs during
-  // the `starting` phase too — and an unauthenticated `GET /documents` there answers 401, which
-  // FR-AUT-07's handler would read as "the session ended", signing out the very user whose
-  // session was in the middle of resuming.
   const documents = useDocuments({
     open: docsOpen,
     conversationId: activeId,
     turnInFlight,
-    enabled: phase === 'authenticated',
+    enabled: authenticated,
   });
   const mentionDocuments = toMentionDocuments(documents.rows, activeId);
   const knowledgeBaseCount = documentCount(documents.rows, activeId);
 
+  const config = useConfig({ enabled: authenticated });
+
+  /** FR-AUT-11's linked state, and FR-KBM-10's file list. The link status is read whenever there
+   *  is a session; the list only while the picker is open, because it spends a third party's
+   *  quota against a rate limit shared with import. */
+  const cloudLink = useCloudLink({ enabled: authenticated });
+  const cloudFiles = useCloudFiles({ active: cloudOpen && authenticated });
+
   const openKnowledgeBase = useCallback(() => setDocsOpen(true), []);
+
+  /**
+   * FR-KBM-06's two behaviours: "the button keeps its prototype appearance and position; when
+   * the user has not yet linked an account it initiates linking rather than opening the
+   * selection surface."
+   *
+   * Waiting for `loaded` is not defensiveness. Guessing "not linked" before the status arrives
+   * would navigate an already-linked user away from the app for no reason, and a full-page
+   * redirect is the one action on this surface the Back button does not cleanly undo.
+   */
+  const onCloudImport = useCallback(() => {
+    if (!cloudLink.loaded) return;
+    if (cloudLink.linked) setCloudOpen(true);
+    else void cloudLink.beginLink();
+  }, [cloudLink]);
+
+  /**
+   * The return from linking, acted on once the session has resumed.
+   *
+   * It cannot be acted on any earlier: this is a cold load, so `phase` is `starting` for the
+   * first round trip and the surfaces below do not exist yet. On success both the modal and the
+   * picker open — the user pressed a button, was sent to Google and came back, and landing them
+   * on a plain app would lose that thread. On `failed`/`denied` the modal opens alone, with the
+   * FR-KBM-06 button still offering to link.
+   *
+   * `link.refresh()` on success is what turns the button's branch over: the status was read
+   * before the redirect and still says "not linked".
+   */
+  // Destructured, not read off `cloudLink` inside the effect: the store is a fresh object every
+  // render, so depending on it would re-run this until `linkReturn` cleared. `refresh` is a
+  // stable `useCallback`, which makes the dependency list honest rather than suppressed.
+  const refreshLink = cloudLink.refresh;
+  useEffect(() => {
+    if (linkReturn === null || !authenticated) return;
+    setDocsOpen(true);
+    if (linkReturn === 'linked') {
+      refreshLink();
+      setCloudOpen(true);
+    }
+    setAnnouncement(LINK_RETURN_COPY[linkReturn]);
+    setLinkReturn(null);
+  }, [authenticated, linkReturn, refreshLink]);
+
+  /** Strip the query string so a refresh cannot re-fire the return. Separate from the effect
+   *  above because it must happen whether or not a session ever resumes — an unauthenticated
+   *  user landing here should not keep `?link=` in the address bar through the login screen. */
+  useEffect(() => {
+    if (readLinkReturn(window.location.search) === null) return;
+    window.history.replaceState(null, '', window.location.pathname);
+  }, []);
+
+  // FR-SBR-02 — `POST /conversations`, whose 201 already carries the FR-ANL-03 meter, so the
+  // new chat needs no follow-up GET before the composer can project FR-STA-04 against it.
+  const onNewChat = useCallback(async () => {
+    const created = await conversations.create();
+    if (created === null) return null;
+    chat.adopt(created.id, created.context);
+    setActiveId(created.id);
+    return created.id;
+  }, [chat, conversations]);
+
+  /**
+   * FR-CMP-03's send.
+   *
+   * Creating the conversation first is the one path that spans both stores, and it is
+   * reachable rather than defensive: FR-SBR-07 leaves `activeId` null once the last chat is
+   * deleted, and the empty state still has a composer.
+   */
+  const onSend = useCallback(
+    (text: string) => {
+      const documentIds = mentionedIds(text, mentionDocuments);
+      if (activeId !== null) {
+        chat.send(text, documentIds);
+        return;
+      }
+      void onNewChat().then((id) => {
+        if (id !== null) chat.send(text, documentIds);
+      });
+    },
+    [activeId, chat, mentionDocuments, onNewChat],
+  );
+
+  // FR-SBR-07 — "if it was active, selects the next conversation or the empty state".
+  // Two separate updaters, deliberately: calling `setActiveId` inside a `setState` updater
+  // would be a side effect in a function StrictMode invokes twice.
+  const onDelete = useCallback(
+    async (id: string) => {
+      const failure = await chat.remove(id);
+      if (failure !== null) return failure;
+      setActiveId((current) => (current === id ? nextActiveId(conversations.rows, id) : current));
+      conversations.forget(id);
+      return null;
+    },
+    [chat, conversations],
+  );
+
+  // FR-HDR-01. `undefined` once the last conversation is deleted (FR-SBR-07 leaves `activeId`
+  // null), which `ChatHeader` renders as the untitled-chat label — see `ChatHeaderProps.title`.
+  const activeConversation = conversations.rows.find((row) => row.id === activeId);
+
+  // FR-SBR-04 — the first chat is selected once the list arrives, so the app opens on a
+  // transcript rather than on an empty state the user did not ask for.
+  useEffect(() => {
+    if (!conversations.loaded || activeId !== null) return;
+    setActiveId(conversations.rows[0]?.id ?? null);
+  }, [activeId, conversations.loaded, conversations.rows]);
+
+  // ONE expression, two consumers: the FR-ANL-03 meter and the composer's FR-STA-04 projection
+  // read the same numbers, so the panel cannot say a chat has room while the composer refuses
+  // it. `null` for the one round trip after activation — see `StatsPanelProps.usage`.
+  const usage = chat.usage === null ? null : toProjection(chat.usage);
 
   /**
    * FR-AUT-06's (D), resolved by R-72(3): the conversation the user was in **is** restored
    * after re-login — but only for the same user.
    *
    * Restoring is the default rather than the work, because this component stays mounted across
-   * the session drop (only what it *returns* changes), so `activeId` and the transcripts are
-   * still here. The work is the reset, and it is the half that matters: without it, a colleague
-   * signing in on the expiry screen would land in the previous user's chat pointer — which
-   * `404`s under R-54(1), but should never be attempted.
+   * the session drop (only what it *returns* changes). The work is the reset, and it is the half
+   * that matters: without it, a colleague signing in on the expiry screen would land in the
+   * previous user's chat pointer — which `404`s under R-54(1), but should never be attempted.
+   * The stores re-read themselves off `enabled`, so clearing the pointer is all this has to do.
    */
   const lastUserId = useRef<string | null>(null);
   useEffect(() => {
@@ -319,13 +347,39 @@ function Corpus({ brandName, showStats }: { brandName: string; showStats: boolea
     const previous = lastUserId.current;
     lastUserId.current = user.id;
     if (previous === null || previous === user.id) return;
-    setConversations(SAMPLE_CONVERSATIONS);
-    setActiveId(SAMPLE_CONVERSATIONS[0]?.id ?? null);
-    setTranscripts(SAMPLE_TRANSCRIPTS);
+    setActiveId(null);
     setDocsOpen(false);
+    // The picker belongs to the previous user's Drive account, and `useCloudLink` has already
+    // forgotten the link it was showing. Leaving it open would list the new user's files under
+    // the old one's address for a render.
+    setCloudOpen(false);
     setUserMenuOpen(false);
     setPasswordOpen(false);
   }, [user]);
+
+  /**
+   * NFR-A11Y-04 (T-511). Signing in replaces the entire tree — the login screen and the shell
+   * are different components, not two states of one — so the element that had focus is
+   * detached and focus falls back to `<body>`. Measured live: `document.activeElement` was
+   * `BODY` immediately after a successful sign-in, which leaves a keyboard user at the very
+   * top of the document with no indication anything happened, and a screen-reader user with
+   * no cursor in the new page at all.
+   *
+   * `<main>` is the target because the skip link already uses it (same `MAIN_ID`, same
+   * `tabIndex={-1}`), so this introduces no new focusable element and no new pixel: the ring
+   * is `:focus-visible`-only and programmatic focus after a form submit does not paint it —
+   * verified in both themes for T-510.
+   *
+   * Guarded on the *transition* rather than on `phase`, so a re-render while already
+   * authenticated never yanks focus out from under the user mid-task.
+   */
+  const lastPhase = useRef(phase);
+  useEffect(() => {
+    const previous = lastPhase.current;
+    lastPhase.current = phase;
+    if (phase !== 'authenticated' || previous === 'authenticated') return;
+    document.getElementById(MAIN_ID)?.focus();
+  }, [phase]);
 
   // FR-AUT-07's guard. `starting` renders nothing at all rather than a spinner: the session is
   // resolved by one same-origin request, and a splash that appears and vanishes inside 50ms is
@@ -369,12 +423,19 @@ function Corpus({ brandName, showStats }: { brandName: string; showStats: boolea
                 <KnowledgeBaseModal
                   store={documents}
                   conversationId={activeId}
-                  onClose={() => setDocsOpen(false)}
-                  onCloudImport={() => {
-                    // FR-KBM-06 / R-63: T-512 owns the selection surface. Until it lands the
-                    // button presents FR-AUT-11's *unlinked* state, which is what the requirement
-                    // says it does for an account that has never been linked — and §8.52's rule
-                    // is that a prototype primary action is retargeted, never left inert.
+                  onClose={() => {
+                    // The picker goes with it: it is nested inside this modal, so leaving the
+                    // flag set would reopen it the next time the modal is opened, on a surface
+                    // the user reached for a different reason.
+                    setCloudOpen(false);
+                    setDocsOpen(false);
+                  }}
+                  onCloudImport={onCloudImport}
+                  cloud={{
+                    open: cloudOpen,
+                    files: cloudFiles,
+                    link: cloudLink,
+                    onClose: () => setCloudOpen(false),
                   }}
                 />
               )}
@@ -385,7 +446,10 @@ function Corpus({ brandName, showStats }: { brandName: string; showStats: boolea
               sessionStartedAt={sessionStartedAt}
               entries={chat.entries}
               usage={usage}
-              modelName={modelNameOf(chat.entries) ?? SAMPLE_MODEL_NAME}
+              // The answering model wins where there is one — an answered chat should name the
+              // model that produced it, not the one configured since. FR-SYS-03's configured id
+              // is the fallback, and it is the only thing an unanswered chat can truthfully show.
+              modelName={modelNameOf(chat.entries) ?? config?.chat_model ?? ''}
             />
           }
           chat={
@@ -399,8 +463,8 @@ function Corpus({ brandName, showStats }: { brandName: string; showStats: boolea
                 frozen={chat.frozen}
                 conversationId={activeId}
                 userInitials={sidebarUser.initials}
-                onFeedback={onFeedback}
-                onRegenerate={onRegenerate}
+                onFeedback={chat.feedback}
+                onRegenerate={chat.regenerate}
               />
               <Composer
                 documents={mentionDocuments}
@@ -416,11 +480,11 @@ function Corpus({ brandName, showStats }: { brandName: string; showStats: boolea
           sidebar={
             <Sidebar
               brandName={brandName}
-              conversations={conversations}
+              conversations={conversations.rows}
               activeId={activeId}
               onSelect={setActiveId}
-              onNewChat={onNewChat}
-              onRename={onRename}
+              onNewChat={() => void onNewChat()}
+              onRename={conversations.rename}
               onDelete={onDelete}
               documentCount={knowledgeBaseCount}
               onOpenKnowledgeBase={openKnowledgeBase}

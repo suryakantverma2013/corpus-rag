@@ -15,6 +15,9 @@
  */
 import { api } from '../api';
 import type { DocumentStatus, UploadScope } from '../api';
+import { detailOf } from '../api/detail';
+import { CLOUD_PROVIDER } from '../cloud/cloud';
+import { isLinkRequired } from '../cloud/mutations';
 
 /**
  * What happened, in the modal's vocabulary rather than HTTP's.
@@ -29,6 +32,14 @@ export type Outcome =
   | { kind: 'gone' }
   /** R-24's gate (R-71(1)) — reconciled, never rendered as an error. */
   | { kind: 'locked'; detail: string }
+  /**
+   * FR-AUT-11 (T-512) — the import route's other `409`: no account is linked, or the provider
+   * revoked the grant. Like `locked` and unlike `refused`, this is a statement about the
+   * caller's state rather than a failure, and it has an action of its own (Re-link), so the
+   * picker must be able to tell it apart. `code` is carried because the two causes need
+   * different copy behind that one button (§8.53(5)).
+   */
+  | { kind: 'link-required'; code: string; detail: string }
   | { kind: 'refused'; detail: string; status: number }
   | { kind: 'invalid' }
   | { kind: 'unauthorized' };
@@ -77,24 +88,17 @@ export function classify(result: RawResult, fallbackDetail: string): Outcome {
   if (status === 409 && detail.errorCode === PROCESSING_LOCKED) {
     return { kind: 'locked', detail: detail.message ?? fallbackDetail };
   }
-  return { kind: 'refused', detail: detail.message ?? fallbackDetail, status };
-}
-
-/** Read `{detail: string}` and `{detail: {error_code, message}}` without trusting either. */
-function detailOf(error: unknown): { message: string | null; errorCode: string | null } {
-  if (typeof error !== 'object' || error === null || !('detail' in error)) {
-    return { message: null, errorCode: null };
-  }
-  const { detail } = error as { detail: unknown };
-  if (typeof detail === 'string') return { message: detail, errorCode: null };
-  if (typeof detail === 'object' && detail !== null && 'error_code' in detail) {
-    const { error_code: code, message } = detail as { error_code: unknown; message?: unknown };
+  // The import route's `409` is a union of three codes (`ImportConflictResponse`), so this
+  // branch sits beside the lock's rather than replacing it — the same status carries "a turn is
+  // running" and "your Drive is not connected", and they have different actions.
+  if (status === 409 && isLinkRequired(detail.errorCode)) {
     return {
-      message: typeof message === 'string' ? message : null,
-      errorCode: typeof code === 'string' ? code : null,
+      kind: 'link-required',
+      code: detail.errorCode as string,
+      detail: detail.message ?? fallbackDetail,
     };
   }
-  return { message: null, errorCode: null };
+  return { kind: 'refused', detail: detail.message ?? fallbackDetail, status };
 }
 
 /**
@@ -138,6 +142,37 @@ export function uploadDocument(
         conversation_id: scope === 'chat' && conversationId !== null ? conversationId : undefined,
       }) as never,
       bodySerializer: (body: unknown) => body as FormData,
+    });
+    return { status: response.status, error, data };
+  });
+}
+
+/**
+ * `POST /documents/import` — FR-KBM-10's one-time copy.
+ *
+ * Beside the upload rather than in `cloud/`, because it **is** the upload: R-63(5)/§8.53(3)
+ * widened `upload_document` to take a `ByteSource`, so this route answers the same
+ * `UploadResponse`, burns the same FR-KBM-08 duplicate check, the same FR-ERR-02 quota, the
+ * same 50 MB ceiling and the same R-24 lock. Classifying it anywhere else would be a second
+ * reading of one contract.
+ *
+ * JSON rather than multipart because there is no file part — the client sends an id it got from
+ * the list route, and the backend fetches the bytes from the provider's fixed host. A
+ * client-supplied URL here is exactly what R-63(6)(1) forbids.
+ */
+export function importDocument(
+  fileId: string,
+  scope: UploadScope,
+  conversationId: string | null,
+): Promise<Outcome> {
+  return attempt(async () => {
+    const { data, error, response } = await api.POST('/api/v1/documents/import', {
+      body: {
+        provider: CLOUD_PROVIDER,
+        file_id: fileId,
+        scope,
+        conversation_id: scope === 'chat' ? conversationId : null,
+      },
     });
     return { status: response.status, error, data };
   });

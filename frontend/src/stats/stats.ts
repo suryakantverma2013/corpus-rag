@@ -87,8 +87,8 @@ export interface ContextUsage {
  *
  * Whole numbers here, deliberately: FR-ANL-03 writes `{pct}% used` and the prototype rounds to an
  * integer, while the wire's `ContextWindowResponse.percent_used` carries **one decimal**. Binding
- * that field straight through would render `85.6% used` — a note for T-513, which should pass
- * `used`/`limit` and let this derive.
+ * that field straight through would render `85.6% used`. So `App` passes `used`/`limit` and this
+ * derives (T-513); nothing may bind `percent_used`.
  */
 export function percentUsed({ used, limit }: ContextUsage): number {
   if (limit <= 0) return 100;
