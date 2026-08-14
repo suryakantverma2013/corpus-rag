@@ -9,6 +9,7 @@
     "build": "npm run api:generate && tsc -b && vite build",
     "lint": "oxlint",
     "test": "vitest run",
+    "fidelity": "node fidelity/run.mjs",
     "test:watch": "vitest",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

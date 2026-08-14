@@ -28,6 +28,12 @@ coverage.xml
 node_modules/
 frontend/dist/
 frontend/.vite/
+
+# T-510's fidelity screenshots are diagnostics for a human, never a baseline to diff against
+# (R-66(5): a screenshot comparison is sensitive to font-load timing and subpixel antialiasing,
+# and blurs exactly the errors the computed-property assertions state outright). Regenerate with
+# `node fidelity/run.mjs`.
+frontend/fidelity/screenshots/
 *.tsbuildinfo
 
 # `backend/openapi.json` and `frontend/src/api/schema.d.ts` are generated and **committed**
