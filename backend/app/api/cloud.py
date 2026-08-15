@@ -48,7 +48,12 @@ from app.auth.keycloak_client import (
     KeycloakUnavailableError,
 )
 from app.config import Settings
-from app.security.rate_limit import limiter, principal_or_ip_key, upload_limit
+from app.security.rate_limit import (
+    UPLOAD_BUCKET,
+    limiter,
+    principal_or_ip_key,
+    upload_limit,
+)
 from app.services import cloud_links, drive
 from app.services.cloud_links import CloudProvider
 
@@ -152,7 +157,7 @@ async def get_link_status(
     responses=RATE_LIMITED,
     summary="Begin linking a cloud account",
 )
-@limiter.limit(upload_limit, key_func=principal_or_ip_key)
+@limiter.shared_limit(upload_limit, scope=UPLOAD_BUCKET, key_func=principal_or_ip_key)
 async def start_link(
     request: Request,
     response: Response,
@@ -310,7 +315,7 @@ async def delete_link(
     },
     summary="List the caller's importable cloud-drive files",
 )
-@limiter.limit(upload_limit, key_func=principal_or_ip_key)
+@limiter.shared_limit(upload_limit, scope=UPLOAD_BUCKET, key_func=principal_or_ip_key)
 async def list_cloud_files(
     request: Request,
     response: Response,

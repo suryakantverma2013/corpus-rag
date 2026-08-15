@@ -2505,7 +2505,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorResponse'];
         };
       };
-      /** @description You cannot delete your own account. */
+      /** @description The account is deactivated, or the operation is administrator-only (NFR-SEC-01). */
       403: {
         headers: {
           [name: string]: unknown;
@@ -2516,6 +2516,15 @@ export interface operations {
       };
       /** @description User not found. */
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description You cannot perform this action on your own account. */
+      409: {
         headers: {
           [name: string]: unknown;
         };
@@ -2594,7 +2603,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorResponse'];
         };
       };
-      /** @description You cannot perform this action on your own account. */
+      /** @description The account is deactivated, or the operation is administrator-only (NFR-SEC-01). */
       403: {
         headers: {
           [name: string]: unknown;
@@ -2612,7 +2621,7 @@ export interface operations {
           'application/json': components['schemas']['ErrorResponse'];
         };
       };
-      /** @description A user with that email already exists. */
+      /** @description You cannot perform this action on your own account. */
       409: {
         headers: {
           [name: string]: unknown;

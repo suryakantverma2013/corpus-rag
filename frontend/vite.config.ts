@@ -39,6 +39,11 @@ export default defineConfig({
     },
   },
   test: {
+    // Unit tests only, and all of them live under `src/` (T-603). Without this, vitest's
+    // default glob also matches `e2e/*.spec.ts` — the Playwright journey — and `npm test`
+    // tries to run it under jsdom, where `@playwright/test` throws on import. The two runners
+    // now have disjoint territory: vitest owns `src/`, Playwright owns `e2e/`.
+    include: ['src/**/*.{test,spec}.{ts,tsx}'],
     // The theme mechanism writes to `document.documentElement`, so the tests need a DOM.
     environment: 'jsdom',
     // Explicit `import { describe, it, expect } from 'vitest'` — keeps `tsconfig.app.json`

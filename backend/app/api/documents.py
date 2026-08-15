@@ -69,7 +69,12 @@ from app.auth.keycloak_client import (
 from app.db.enums import DocumentStatus, KBVisibility
 from app.db.repositories.documents import DocumentListing, DocumentRepository
 from app.security.content_validation import UnsupportedFileTypeError
-from app.security.rate_limit import limiter, principal_or_ip_key, upload_limit
+from app.security.rate_limit import (
+    UPLOAD_BUCKET,
+    limiter,
+    principal_or_ip_key,
+    upload_limit,
+)
 from app.services import cloud_import, document_events, drive
 from app.services import documents as documents_service
 from app.services.cloud_links import CloudProvider
@@ -177,7 +182,7 @@ class UploadResponse(BaseModel):
     },
     summary="Upload a document",
 )
-@limiter.limit(upload_limit, key_func=principal_or_ip_key)
+@limiter.shared_limit(upload_limit, scope=UPLOAD_BUCKET, key_func=principal_or_ip_key)
 async def upload_document(
     request: Request,
     response: Response,
@@ -283,7 +288,7 @@ class ImportRequest(BaseModel):
     },
     summary="Import a document from a linked cloud drive",
 )
-@limiter.limit(upload_limit, key_func=principal_or_ip_key)
+@limiter.shared_limit(upload_limit, scope=UPLOAD_BUCKET, key_func=principal_or_ip_key)
 async def import_document(
     request: Request,
     response: Response,
@@ -408,7 +413,7 @@ class RetryResponse(BaseModel):
     },
     summary="Delete a document",
 )
-@limiter.limit(upload_limit, key_func=principal_or_ip_key)
+@limiter.shared_limit(upload_limit, scope=UPLOAD_BUCKET, key_func=principal_or_ip_key)
 async def delete_document(
     request: Request,
     response: Response,
@@ -456,7 +461,7 @@ async def delete_document(
     },
     summary="Retry a failed ingestion",
 )
-@limiter.limit(upload_limit, key_func=principal_or_ip_key)
+@limiter.shared_limit(upload_limit, scope=UPLOAD_BUCKET, key_func=principal_or_ip_key)
 async def retry_document(
     request: Request,
     # Unused by the handler, but slowapi writes its `X-RateLimit-*` headers onto it and
@@ -913,7 +918,7 @@ async def get_document(
     },
     summary="Replace a document with a new version",
 )
-@limiter.limit(upload_limit, key_func=principal_or_ip_key)
+@limiter.shared_limit(upload_limit, scope=UPLOAD_BUCKET, key_func=principal_or_ip_key)
 async def replace_document(
     request: Request,
     response: Response,

@@ -73,6 +73,23 @@ def chat_limit() -> str:  # staged for T-402
     return get_settings().ratelimit.chat
 
 
+#: The shared scope for every upload-family route (R-77(3), T-602).
+#:
+#: **Not cosmetic — without it the limit is not the limit §8.4 documents.** slowapi's
+#: `key_style` defaults to ``"url"``, so a route decorated with a plain `limiter.limit(...)`
+#: buckets on the *concrete request path*, id and all. The three id-addressed routes here
+#: (`DELETE /documents/{id}`, `/retry`, `/replace`) therefore had one budget **per document**
+#: rather than per user: measured at T-602, the same id tripped a 2/minute limit on the third
+#: call while a fresh id every time never tripped at all. A caller with N documents got N × the
+#: allowance for `replace`, which re-uploads bytes and re-runs embedding — precisely the
+#: "runaway cost" NFR-SEC-07 exists to bound.
+#:
+#: An explicit scope overrides the url-derived key, which is why the two chat routes were never
+#: affected: they have shared one since T-402. Any new route on this budget must use
+#: `shared_limit(..., scope=UPLOAD_BUCKET)` for the same reason.
+UPLOAD_BUCKET = "upload"
+
+
 def upload_limit() -> str:  # staged for T-202
     return get_settings().ratelimit.upload
 

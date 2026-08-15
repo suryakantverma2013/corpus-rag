@@ -22,3 +22,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# T-603 Playwright output — traces, videos and screenshots are diagnostics, never a baseline
+e2e/.artifacts
+playwright-report
+test-results

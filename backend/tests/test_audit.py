@@ -89,18 +89,19 @@ async def test_failed_login_audited_with_null_actor(
         400, json={"error": "invalid_grant", "error_description": "Invalid user credentials"}
     )
 
-    resp = await client.post(
-        "/api/v1/auth/login", json={"email": "x@corpus.local", "password": "bad"}
-    )
+    # Unique per run (T-602). A failed login has no actor, so the row can only be narrowed by
+    # its own payload — and a *fixed* address is not narrow enough: the suite runs against the
+    # shared `corpus` database, nothing truncates it, and any run that commits (a live-auth
+    # pass, an interrupted run) leaves rows with the same address behind for ever. This was
+    # found failing on 23 such leftovers, all committed in one earlier run. The T-109 rule is
+    # that a query must be scoped to what the test itself created; a constant only looks
+    # scoped.
+    email = f"{uuid.uuid4().hex[:12]}@corpus.local"
+    resp = await client.post("/api/v1/auth/login", json={"email": email, "password": "bad"})
     assert resp.status_code == 401
 
-    # The one row no actor filter can reach, so it is narrowed by its own payload instead.
     listed = await AuditLogRepository(session).list_events(event_type=AuditEventType.AUTH)
-    rows = [
-        row
-        for row in listed
-        if row.actor_id is None and row.details.get("email") == "x@corpus.local"
-    ]
+    rows = [row for row in listed if row.actor_id is None and row.details.get("email") == email]
     assert len(rows) == 1
     assert rows[0].details["action"] == "login_failed"
 

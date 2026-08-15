@@ -709,16 +709,6 @@
               }
             }
           },
-          "403": {
-            "description": "You cannot perform this action on your own account.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
           "404": {
             "description": "User not found.",
             "content": {
@@ -730,7 +720,7 @@
             }
           },
           "409": {
-            "description": "A user with that email already exists.",
+            "description": "You cannot perform this action on your own account.",
             "content": {
               "application/json": {
                 "schema": {
@@ -781,6 +771,16 @@
           },
           "401": {
             "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
             "content": {
               "application/json": {
                 "schema": {
@@ -818,8 +818,8 @@
           "204": {
             "description": "Successful Response"
           },
-          "403": {
-            "description": "You cannot delete your own account.",
+          "404": {
+            "description": "User not found.",
             "content": {
               "application/json": {
                 "schema": {
@@ -828,8 +828,8 @@
               }
             }
           },
-          "404": {
-            "description": "User not found.",
+          "409": {
+            "description": "You cannot perform this action on your own account.",
             "content": {
               "application/json": {
                 "schema": {
@@ -880,6 +880,16 @@
           },
           "401": {
             "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
             "content": {
               "application/json": {
                 "schema": {

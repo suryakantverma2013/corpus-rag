@@ -109,9 +109,15 @@ async def list_users(
     response_model=UserResponse,
     responses={
         **error_responses(
-            (403, "You cannot perform this action on your own account."),
             (404, "User not found."),
-            (409, "A user with that email already exists."),
+            # R-77(2): the declared envelope is the contract the generated client derives
+            # from, so it has to be the statuses this route can actually answer. It answered
+            # `409` for the self-mutation guard while declaring `403` for it and declaring a
+            # duplicate-email `409` it cannot raise — `update_user` has no `UserConflictError`
+            # path, that is `create_user`'s. The `403`s this route really returns (no
+            # administrator role, disabled account) are injected from its `security` block by
+            # `app/openapi.py`, so they were never this declaration's to make.
+            (409, "You cannot perform this action on your own account."),
         ),
         **_KEYCLOAK_FAILURES,
     },
@@ -145,8 +151,11 @@ async def update_user(
     status_code=status.HTTP_204_NO_CONTENT,
     responses={
         **error_responses(
-            (403, "You cannot delete your own account."),
             (404, "User not found."),
+            # R-77(2), as above: the guard answers `409` and this declared `403` and no `409`
+            # at all, so a generated client had no type for the one refusal this route makes
+            # on its own account.
+            (409, "You cannot perform this action on your own account."),
         ),
         **_KEYCLOAK_FAILURES,
     },
