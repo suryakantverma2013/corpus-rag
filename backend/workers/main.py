@@ -52,7 +52,7 @@ from app.services.object_storage import close_object_storage, get_object_storage
 from workers.delete import delete_document
 from workers.evaluate import evaluate_message
 from workers.ingest import ingest_document
-from workers.retention import prune_checkpoint_history
+from workers.retention import prune_checkpoint_history, prune_turn_telemetry
 from workers.sweeper import sweep_undispatched_jobs
 
 log = structlog.get_logger(__name__)
@@ -170,6 +170,27 @@ class WorkerSettings:
                 )
             ]
             if _settings.checkpointer.retention_interval_seconds > 0
+            else []
+        ),
+        # Telemetry retention (NFR-OBS-04, R-79(3)). Registered only when there is a horizon
+        # *and* a cadence: `TELEMETRY_RETENTION_DAYS = 0` means keep forever, so at 0 the job
+        # must not exist rather than run and find nothing — a scheduled destructive sweep
+        # whose guard lives only inside the task is one refactor away from being a bug.
+        # Second :15, off both the :00 sweeper and the :30 checkpoint prune.
+        *(
+            [
+                cron(
+                    prune_turn_telemetry,
+                    minute=_sweep_minutes(_settings.telemetry.retention_interval_seconds),
+                    second=15,
+                    run_at_startup=False,
+                    unique=True,
+                )
+            ]
+            if (
+                _settings.telemetry.retention_days > 0
+                and _settings.telemetry.retention_interval_seconds > 0
+            )
             else []
         ),
     ]

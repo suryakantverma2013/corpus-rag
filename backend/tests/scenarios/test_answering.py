@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db.enums import MessageRole
 from app.db.models.message import Message
+from app.db.models.turn_telemetry import TurnTelemetry
 from app.db.repositories.retrieval import HybridRetriever
 from app.rag.errors import ABSTAIN_LOW_GROUNDEDNESS, FAILURE_COPY, FailureClass
 from app.rag.prompts import SYSTEM_PROMPT
@@ -340,6 +341,27 @@ async def test_retrieval_being_unavailable_fails_the_turn_closed_without_fabrica
     assert [row.role for row in stored] == [MessageRole.USER], (
         f"an errored turn must be served but not stored; found {[r.role for r in stored]}"
     )
+
+    # ...and T-604/R-79(1) is the other half of that same sentence. Because the answer is not
+    # stored, this turn used to leave **no durable trace anywhere** — FR-ORC-03 names failure
+    # explicitly ("telemetry logs request start/end/**failure**") and satisfied it with a log
+    # line that had scrolled away by the time anyone asked. The row is what closes it, and
+    # this is the only place in the suite where the absence of the `messages` row and the
+    # presence of the telemetry row are asserted about the *same* turn.
+    telemetry_rows = list(
+        (
+            await session.scalars(
+                select(TurnTelemetry).where(
+                    TurnTelemetry.conversation_id == uuid.UUID(conversation_id)
+                )
+            )
+        ).all()
+    )
+    assert len(telemetry_rows) == 1, telemetry_rows
+    assert telemetry_rows[0].outcome == "error"
+    assert telemetry_rows[0].error_code == FailureClass.RETRIEVAL_UNAVAILABLE.value
+    assert telemetry_rows[0].message_id is None, "there is no answer row to point at"
+    assert telemetry_rows[0].latency_ms >= 0, "and it still reports how long it took to fail"
 
 
 @pytest.mark.usefixtures("_live")

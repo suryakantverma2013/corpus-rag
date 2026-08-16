@@ -18,6 +18,7 @@ from app.api import health
 from app.api.router import api_router
 from app.config import Settings, get_settings
 from app.logging_config import configure_logging
+from app.logging_context import request_context_middleware
 from app.openapi import customize_openapi
 from app.rag.graph import close_graph
 from app.security.rate_limit import limiter, rate_limit_exceeded_handler
@@ -123,6 +124,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # applied per-route, not app-wide.
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+
+    # Request correlation (T-604, NFR-OBS-01, R-79(2)). The one piece of app-wide
+    # middleware in this app, and it is the kind the CORS note above argues against adding:
+    # it is production behaviour, not dev-only configuration. Every log line a request
+    # produces carries the id, and the response echoes it, so a user reporting a problem
+    # quotes one string that finds the whole request. It reads and writes no body.
+    app.middleware("http")(request_context_middleware)
 
     # System probes (T-106, NFR-REL-02): liveness + dependency readiness. Mounted at
     # the root — orchestrators expect unversioned probe paths (R-29), so these sit

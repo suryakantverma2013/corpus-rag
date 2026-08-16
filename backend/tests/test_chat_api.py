@@ -32,6 +32,7 @@ from app.db.base import DEFAULT_TENANT_ID
 from app.db.enums import MessageRole
 from app.db.models.conversation import Conversation
 from app.db.models.message import Message
+from app.db.models.turn_telemetry import TurnTelemetry
 from app.db.repositories.users import UserRepository
 from app.rag.citations import SEGMENTS_KEY, SOURCE_IDS_KEY
 from app.rag.graph import ABSTAIN_EMPTY_SCOPE
@@ -485,3 +486,200 @@ async def test_listing_a_foreign_transcript_is_404(
     )
 
     assert response.status_code == 404
+
+
+# ---- send: the durable telemetry record (T-604, R-79) ----
+
+
+async def _turn_telemetry(session: AsyncSession, conversation_id: uuid.UUID) -> list[TurnTelemetry]:
+    rows = await session.scalars(
+        select(TurnTelemetry)
+        .where(TurnTelemetry.conversation_id == conversation_id)
+        .order_by(TurnTelemetry.created_at)
+    )
+    return list(rows)
+
+
+async def test_a_turn_writes_one_durable_telemetry_row(
+    client: httpx.AsyncClient, session: AsyncSession, make_token: Callable[..., str]
+) -> None:
+    """NFR-OBS-01's durable half, asserted through the route rather than on the repository.
+
+    `tests/test_turn_telemetry.py` owns the table's own behaviour; the claim only a route test
+    can make is that a real turn — admission, graph, `finalize`, unlock — actually produces
+    one, and exactly one.
+    """
+    owner, headers = await _caller(session, make_token)
+    conversation = await _conversation(session, owner_id=owner)
+
+    await client.post(
+        f"/api/v1/conversations/{conversation.id}/messages",
+        json={"query": _QUESTION},
+        headers=headers,
+    )
+
+    rows = await _turn_telemetry(session, conversation.id)
+    assert len(rows) == 1, rows
+    assert rows[0].outcome == "abstained"
+    assert rows[0].owner_id == owner
+    assert rows[0].turn_index == 0
+    assert rows[0].latency_ms >= 0
+
+
+async def test_the_telemetry_row_and_the_messages_row_report_one_latency(
+    client: httpx.AsyncClient, session: AsyncSession, make_token: Callable[..., str]
+) -> None:
+    """NFR-OBS-02's identity, at the only place it can actually be checked (R-79(1)).
+
+    "Displayed token counts shall reflect real usage and **match telemetry**" is an identity
+    rather than an agreement only while one value feeds both writes. `finalize` builds a
+    single `TurnRecord` and hands it to the log event, this row and the span, and passes the
+    same `latency_ms` local to `_persist_turn` — so a second clock reading anywhere between
+    them is what this fails on.
+    """
+    owner, headers = await _caller(session, make_token)
+    conversation = await _conversation(session, owner_id=owner)
+
+    await client.post(
+        f"/api/v1/conversations/{conversation.id}/messages",
+        json={"query": _QUESTION},
+        headers=headers,
+    )
+
+    answer = (await _messages(session, conversation.id))[1]
+    row = (await _turn_telemetry(session, conversation.id))[0]
+    assert row.latency_ms == answer.latency_ms
+    assert row.message_id == answer.id, "the two stores join on the id, neither owns the other"
+    assert row.model_name == answer.model_name
+    assert row.prompt_tokens == answer.prompt_tokens
+    assert row.completion_tokens == answer.completion_tokens
+
+
+async def test_a_denied_turn_writes_no_telemetry_row(
+    client: httpx.AsyncClient, session: AsyncSession, make_token: Callable[..., str]
+) -> None:
+    """The table's invariant is one row per turn that **ran** (R-79(1)).
+
+    A denial never opened a span, took the R-24 lock, chose a model or spent a token, so its
+    row would be NULL in every metric column the table exists to hold. Its durable home is the
+    NFR-SEC-08 audit trail (R-43(7)). The route answers `404` here — R-54(1), an administrator
+    included — so this also pins that the refusal happens before any write at all.
+    """
+    owner, _ = await _caller(session, make_token)
+    conversation = await _conversation(session, owner_id=owner)
+    _, intruder_headers = await _caller(session, make_token)
+
+    response = await client.post(
+        f"/api/v1/conversations/{conversation.id}/messages",
+        json={"query": _QUESTION},
+        headers=intruder_headers,
+    )
+
+    assert response.status_code == 404
+    assert await _turn_telemetry(session, conversation.id) == []
+
+
+async def test_a_second_turn_writes_a_second_row(
+    client: httpx.AsyncClient, session: AsyncSession, make_token: Callable[..., str]
+) -> None:
+    """One row per turn, not one per conversation — and `turn_index` is what separates them.
+
+    The T-406 shape: a thread is a checkpoint lineage, so a channel a run does not seed holds
+    last turn's value. A telemetry row that inherited turn 1's index would make every
+    per-turn query wrong in a way no single-turn test can see.
+    """
+    owner, headers = await _caller(session, make_token)
+    conversation = await _conversation(session, owner_id=owner)
+
+    for _ in range(2):
+        await client.post(
+            f"/api/v1/conversations/{conversation.id}/messages",
+            json={"query": _QUESTION},
+            headers=headers,
+        )
+
+    rows = await _turn_telemetry(session, conversation.id)
+    assert len({row.id for row in rows}) == 2
+    # `turn_index` is the **question's rank in the transcript**, not a turn counter (R-56):
+    # turn 2's question is the third row, since turn 1 wrote a question *and* an answer. The
+    # telemetry rows therefore index the `messages` rows they describe, which is what makes
+    # the join meaningful.
+    questions = [
+        row for row in await _messages(session, conversation.id) if row.role is MessageRole.USER
+    ]
+    assert [row.turn_index for row in rows] == [0, 2]
+    assert len(questions) == 2
+
+
+async def test_a_failed_telemetry_write_does_not_take_the_turn_down(
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    make_token: Callable[..., str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The write fails **open**, and it is the last thing `finalize` does (R-79(1)).
+
+    `finalize` must never raise — its own error handler routes back to it, so an exception
+    there loops to the recursion limit rather than failing once — and observability is the
+    last subsystem entitled to break a turn a user is already reading. The row runs after the
+    `messages` row the GUI renders and after the R-24 lock is freed, so losing it costs an
+    operator one record and costs the user nothing.
+    """
+
+    async def _explode(self, record):  # noqa: ANN001, ANN202, ARG001
+        raise RuntimeError("telemetry store gone")
+
+    monkeypatch.setattr(
+        "app.db.repositories.turn_telemetry.TurnTelemetryRepository.record", _explode
+    )
+
+    owner, headers = await _caller(session, make_token)
+    conversation = await _conversation(session, owner_id=owner)
+
+    response = await client.post(
+        f"/api/v1/conversations/{conversation.id}/messages",
+        json={"query": _QUESTION},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    events = [event for event, _ in _frames(response.text)]
+    assert "message" in events and "done" in events, response.text
+
+    rows = await _messages(session, conversation.id)
+    assert [row.role for row in rows] == [MessageRole.USER, MessageRole.AI], (
+        "the answer must still be persisted and served when telemetry is unavailable"
+    )
+    assert await _turn_telemetry(session, conversation.id) == []
+
+
+async def test_the_gate_score_is_retained_for_calibration(
+    client: httpx.AsyncClient, session: AsyncSession, make_token: Callable[..., str]
+) -> None:
+    """T-609 / R-80(1) — `RAGState.groundedness` reaches the operator store, and only it.
+
+    With no retriever wired the scope is empty, so the turn abstains before the gate scores
+    anything and the column is `None` — which is the honest value and is asserted as such,
+    because a backfilled `0.0` would read to the calibration report as a maximally ungrounded
+    answer. What this pins is the wiring and, more importantly, the boundary: the score is in
+    `turn_telemetry` and **not** in `messages.evaluation`, which R-49(1) reserves for DeepEval
+    (OI-34 — two measurements of one property must not reach one reader).
+    """
+    owner, headers = await _caller(session, make_token)
+    conversation = await _conversation(session, owner_id=owner)
+
+    await client.post(
+        f"/api/v1/conversations/{conversation.id}/messages",
+        json={"query": _QUESTION},
+        headers=headers,
+    )
+
+    row = (await _turn_telemetry(session, conversation.id))[0]
+    assert row.outcome == "abstained"
+    assert row.groundedness is None, "an empty-scope abstention never reached the gate"
+
+    answer = (await _messages(session, conversation.id))[1]
+    assert answer.evaluation is None
+    assert "groundedness" not in json.dumps(answer.citations), (
+        "R-49(1): the gate's score must never reach a user surface"
+    )

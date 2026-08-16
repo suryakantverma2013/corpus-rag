@@ -69,21 +69,33 @@ def test_the_health_check_key_matches_arqs_own_default() -> None:
 def test_the_sweeper_is_scheduled() -> None:
     # arq prefixes cron function names with `cron:` to keep them out of the task namespace.
     names = [job.name for job in ArqWorkerSettings.cron_jobs]
-    assert names == ["cron:sweep_undispatched_jobs", "cron:prune_checkpoint_history"]
+    assert names == [
+        "cron:sweep_undispatched_jobs",
+        "cron:prune_checkpoint_history",
+        # T-604: the NFR-OBS-04 telemetry horizon (R-79(3)).
+        "cron:prune_turn_telemetry",
+    ]
     assert ArqWorkerSettings.cron_jobs[0].run_at_startup is True
 
 
 def test_retention_does_not_run_at_startup() -> None:
-    """The two crons differ deliberately (R-65).
+    """The retention crons differ from the sweeper deliberately (R-65, R-79(3)).
 
     The sweeper rescues work stranded by a broker outage, so it must run the moment a worker
     comes up. Retention only reclaims disk — running it at startup would make a worker
     restart loop re-run a table-wide delete on every boot, for no gain.
+
+    The `second` offsets are three distinct values on purpose: a shared minute would otherwise
+    put every sweep on one connection burst.
     """
-    retention = ArqWorkerSettings.cron_jobs[1]
-    assert retention.run_at_startup is False
-    # Off the sweeper's :00 so a shared minute does not put both on the same connection burst.
-    assert retention.second == 30
+    checkpoints = ArqWorkerSettings.cron_jobs[1]
+    assert checkpoints.run_at_startup is False
+    assert checkpoints.second == 30
+
+    telemetry = ArqWorkerSettings.cron_jobs[2]
+    assert telemetry.run_at_startup is False
+    assert telemetry.second == 15
+    assert {job.second for job in ArqWorkerSettings.cron_jobs} == {0, 15, 30}
 
 
 @pytest.mark.parametrize(

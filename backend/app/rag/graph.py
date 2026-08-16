@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Literal
 import structlog
 
 from app.config import Settings, get_settings
+from app.db.repositories.turn_telemetry import TurnTelemetryRepository
 from app.rag import telemetry
 from app.rag.errors import (
     ABSTAIN_LOW_GROUNDEDNESS,
@@ -58,6 +59,7 @@ from app.services.processing_lock import (
     ProcessingLockStore,
     new_token,
 )
+from app.tracing import record_turn_span
 
 apply_strict_msgpack()
 
@@ -1071,8 +1073,9 @@ async def _persist_turn(
       may touch, not what may touch feedback. A 👎 followed by Regenerate is the common
       sequence, so carrying the thumb forward would attach a negative rating to a new and
       possibly good answer with nothing in the row recording that the text changed — and
-      OI-24's calibration loop consumes `(answer, thumb)` pairs, where a mismatched pair is
-      worse than a missing one. `evaluation` is cleared on exactly this reasoning (R-50(5));
+      the R-80 calibration report consumes `(answer, thumb)` pairs, where a mismatched pair
+      is worse than a missing one, since it would count a thumb cast on text the user never
+      saw. `evaluation` is cleared on exactly this reasoning (R-50(5));
       clearing one and keeping the other leaves the row half-stale undetectably.
     """
     from sqlalchemy import update
@@ -1279,28 +1282,77 @@ async def finalize(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
         # reading taken after it. R-43(5) makes those metric columns the FR-ORC-03 telemetry
         # record for MVP, so NFR-OBS-02's "the stats panel matches telemetry" holds by
         # identity — which it would stop doing the moment the two clocks were read apart.
-        outcome = update.get("outcome") or state.get("outcome")
-        if outcome == "error":
-            telemetry.turn_failure(
-                conversation_id=ctx.conversation_id,
-                turn_index=state.get("turn_index"),
-                error_code=state.get("error_code"),
-                latency_ms=latency_ms,
-            )
-        else:
-            # `blocked` and `abstained` close as ends, not failures: an abstention is a
-            # response (R-23), and reporting one as an incident would make every user with
-            # an empty knowledge base look like an outage.
-            telemetry.turn_end(
-                conversation_id=ctx.conversation_id,
-                turn_index=state.get("turn_index"),
-                outcome=outcome,
-                latency_ms=latency_ms,
-                model_name=state.get("model_name"),
-                prompt_tokens=state.get("prompt_tokens"),
-                completion_tokens=state.get("completion_tokens"),
-            )
+        #
+        # **One record, three sinks** (T-604, R-79(1)). It is built once and handed to the
+        # log event, the durable `turn_telemetry` row and the optional OTel span, so the
+        # identity above extends to all three by construction rather than by three call
+        # sites assembling matching argument lists. `TurnRecord` is ids and scalars only, so
+        # none of the three can be handed payload text (R-43(5) made unrepresentable).
+        record = telemetry.TurnRecord(
+            conversation_id=ctx.conversation_id,
+            owner_id=ctx.owner_id,
+            turn_index=state.get("turn_index"),
+            outcome=update.get("outcome") or state.get("outcome"),
+            latency_ms=latency_ms,
+            error_code=state.get("error_code"),
+            model_name=state.get("model_name"),
+            prompt_tokens=state.get("prompt_tokens"),
+            completion_tokens=state.get("completion_tokens"),
+            message_id=_as_uuid(answer_message_id),
+            started_at=started_at,
+            # T-609/R-80(1): the gate's own score, durable in the operator store only.
+            # `RAGState.groundedness` is otherwise transient — it is deliberately never
+            # written to `messages.evaluation` (R-49(1)), so without this the threshold that
+            # decides whether an answer is served has no retained input to calibrate against.
+            groundedness=state.get("groundedness"),
+        )
+        telemetry.turn_closed(record)
+        record_turn_span(record)
+        await _record_turn_telemetry(ctx, record)
     return update
+
+
+def _as_uuid(value: str | uuid.UUID | None) -> uuid.UUID | None:
+    """`answer_message_id` is a *string* in `RAGState` (R-42(2): ids and scalars).
+
+    Unparseable is `None` rather than an exception: this runs inside `finalize`, and a
+    malformed id is worth losing the join for, never the whole telemetry row.
+    """
+    if value is None:
+        return None
+    if isinstance(value, uuid.UUID):
+        return value
+    try:
+        return uuid.UUID(value)
+    except ValueError, AttributeError, TypeError:
+        return None
+
+
+async def _record_turn_telemetry(ctx: RAGContext, record: telemetry.TurnRecord) -> None:
+    """Write the durable NFR-OBS-01 row (T-604, R-79(1)).
+
+    **Its own session and its own transaction**, not the persist step's. Sharing one would
+    let a telemetry failure roll back the answer a user is already being shown — the tail
+    wagging the dog — and the identity NFR-OBS-02 asks for is between the *values*, which
+    come from one `TurnRecord`, not between the transactions.
+
+    **Guarded, and last.** `finalize` must never raise (its own error handler routes back
+    here, so an exception would loop to the recursion limit), and this is the one of its
+    side effects nobody is waiting on: it runs after the row the GUI renders and after the
+    R-24 lock is freed, so a slow or failing telemetry write cannot delay either. A lost
+    row costs an operator one record; the `graph.turn.*` event still fired.
+    """
+    try:
+        async with ctx.sessionmaker() as session:
+            await TurnTelemetryRepository(session).record(record)
+            await session.commit()
+    except Exception:
+        log.warning(
+            "telemetry.record_failed",
+            conversation_id=str(ctx.conversation_id),
+            turn_index=record.turn_index,
+            exc_info=True,
+        )
 
 
 async def handle_node_error(state: RAGState, error: NodeError) -> Command:

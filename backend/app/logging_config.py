@@ -43,6 +43,14 @@ def configure_logging() -> None:
     """
     structlog.configure(
         processors=[
+            # T-604 / R-79(2). **First in the chain, and load-bearing**: without it
+            # `app.logging_context`'s bindings are set and never rendered, so every
+            # correlation id would be silently absent while the code that binds them looks
+            # correct. Tests that use `structlog.testing.capture_logs` must pass it too
+            # (`capture_logs(processors=[merge_contextvars])`) — `capture_logs` replaces the
+            # whole chain, so a test asserting a bound id without it fails against working
+            # code.
+            structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.processors.StackInfoRenderer(),

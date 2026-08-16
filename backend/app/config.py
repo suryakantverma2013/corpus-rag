@@ -1073,6 +1073,48 @@ class CheckpointerSettings(BaseSettings):
         return self
 
 
+class TelemetrySettings(BaseSettings):
+    """The durable NFR-OBS-01 record, its retention, and the NFR-OBS-05 emitter (T-604, R-79).
+
+    **There is deliberately no `TELEMETRY_ENABLED`.** R-50(3)'s rule for a feature switch is
+    that its off state must be a degradation the requirement *sanctions*: `EVAL_ENABLED` is
+    legitimate because FR-EVL-01 says a message "may carry" scores, and `GATE_ENABLED` was
+    refused because its off state is "no product". NFR-OBS-01 says telemetry **shall** record
+    start/end/failure, so a switch that stops writing the record would be a switch that turns
+    a requirement off. The write is guarded and fails open instead (`finalize` must never
+    raise), and `retention_days` is what bounds its cost.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="TELEMETRY_", env_file=".env", extra="ignore")
+
+    # --- Retention (NFR-OBS-04, settled by R-79(3)) ---------------------------
+    #: How long a `turn_telemetry` row is kept. **0 means keep forever** — note that this is
+    #: the opposite polarity from `CHECKPOINTER_RETENTION_INTERVAL_SECONDS`, and it has to
+    #: be: 0 read as a *horizon* would mean "delete everything older than now", i.e. the one
+    #: value whose literal reading destroys the table. The cron is not registered at 0.
+    #: 90 days is generous against the row's size (ids, an outcome, a class and four
+    #: integers — a few hundred bytes) and short enough to state in a conformance answer.
+    retention_days: int = Field(default=90, ge=0)
+
+    #: Rows removed per pass, so one run cannot lock a large slice of the table (R-65's
+    #: `retention_orphan_batch` rule). The sweep converges over successive runs.
+    retention_batch: int = Field(default=5_000, ge=1)  # TBD(§8.4)
+
+    #: Seconds between passes. Daily: unlike the checkpoint sweep, which races a live turn's
+    #: supersteps, nothing here is urgent — a row a day past its horizon costs a few hundred
+    #: bytes. 0 disables the cron independently of `retention_days`.
+    retention_interval_seconds: float = Field(default=86_400.0, ge=0)  # TBD(§8.4)
+
+    # --- Tracing (NFR-OBS-05, R-79(4)) ----------------------------------------
+    #: Emit one OpenTelemetry span per closed turn (`app.tracing`). **Off by default**:
+    #: §10.4 lists the whole observability row as an unadopted scale-out option, and
+    #: `opentelemetry-sdk` is present transitively, so an operator running
+    #: `opentelemetry-instrument` would otherwise start exporting turn attributes without
+    #: having asked for it. The SDK, sampler, exporter and collector are configured through
+    #: the standard `OTEL_*` environment — this flag only decides whether we emit.
+    tracing_enabled: bool = Field(default=False)
+
+
 class GraphSettings(BaseSettings):
     """Orchestration policy for the FR-ORC-01/07 workflow (T-301, R-42).
 
@@ -1400,6 +1442,7 @@ class Settings(BaseSettings):
     eval: EvalSettings = Field(default_factory=EvalSettings)
     context: ContextSettings = Field(default_factory=ContextSettings)
     checkpointer: CheckpointerSettings = Field(default_factory=CheckpointerSettings)
+    telemetry: TelemetrySettings = Field(default_factory=TelemetrySettings)
     graph: GraphSettings = Field(default_factory=GraphSettings)
     keycloak: KeycloakSettings = Field(default_factory=KeycloakSettings)
     session: SessionSettings = Field(default_factory=SessionSettings)

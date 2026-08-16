@@ -56,7 +56,7 @@ export function MessageActions({ feedback, busy, onFeedback, onRegenerate }: Mes
 
   // FR-MSG-08's "feedback toggles": pressing the active one again clears it. Two states on the
   // wire plus null, never a third enum member — "cleared" and "never rated" are different facts
-  // and the deferred OI-24 calibration loop is the consumer that must tell them apart.
+  // and the R-80 calibration report is the consumer that must tell them apart.
   const toggle = (value: Feedback) => onFeedback(feedback === value ? null : value);
 
   return (
