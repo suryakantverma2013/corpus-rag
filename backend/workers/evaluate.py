@@ -48,6 +48,7 @@ from app.rag.evaluation import (
 )
 from app.rag.retrieval import RetrievalFilter
 from app.services.llm import ChatClient, get_chat_client
+from app.services.model_selection import resolve_models
 from workers.common import backoff, is_final_attempt
 
 log = structlog.get_logger(__name__)
@@ -121,12 +122,18 @@ async def evaluate_message(ctx: dict[str, Any], message_id: str) -> None:
     # cost has already been paid.
     async with deps.sessionmaker() as session:
         subject, skip = await _load_subject(session, message_id)
+        # The operator's runtime judge selection (T-611, R-83), read in the *same* session as
+        # the subject: one extra round trip on a table holding at most one row per slot, and
+        # it has to happen inside this block for the reason the block exists — nothing may
+        # hold a session across the judge's five model calls. Skipped when the subject is,
+        # so a message that will not be scored pays nothing.
+        models = await resolve_models(session, deps.settings) if skip is None else None
     if skip is not None:
         return _skip(message_id, skip)
     assert subject is not None  # noqa: S101 — narrowed by `skip is None`
 
     started = time.perf_counter()
-    scores = await build_evaluator(deps.chat, deps.settings).score(
+    scores = await build_evaluator(deps.chat, deps.settings, models=models).score(
         question=subject.question,
         answer=subject.answer,
         context=subject.context,

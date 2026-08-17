@@ -338,8 +338,14 @@ class ChatClient(Protocol):
         schema: Mapping[str, Any],
         schema_name: str,
         max_output_tokens: int,
+        model: str | None = None,
     ) -> ChatJson:
         """One schema-constrained completion on `OPENAI_ROUTER_MODEL`, on the router budget.
+
+        ``model`` overrides the id for this call only (T-611, R-83) — the operator's runtime
+        selection, resolved once per turn and carried on `RAGContext`. `None` means the
+        configured default, so a caller that does not know this exists still works. The
+        *budget* is deliberately not overridable for the reason below; only the id is.
 
         ``LLM_ROUTER_TIMEOUT_SECONDS`` / ``LLM_ROUTER_MAX_RETRIES`` — a short leash, because
         the caller sits before retrieval on the chat critical path. A second call site with
@@ -359,8 +365,11 @@ class ChatClient(Protocol):
         schema: Mapping[str, Any],
         schema_name: str,
         max_output_tokens: int,
+        model: str | None = None,
     ) -> ChatJson:
         """One schema-constrained completion on `OPENAI_RERANK_MODEL`, on the rerank budget.
+
+        ``model`` overrides the id for this call only — see :meth:`complete_json`.
 
         ``LLM_RERANK_TIMEOUT_SECONDS`` / ``LLM_RERANK_MAX_RETRIES`` (T-306, R-47). A separate
         method rather than a parameter for the reason above, and a separate *model* because
@@ -408,8 +417,14 @@ class ChatClient(Protocol):
         messages: Sequence[Mapping[str, str]],
         *,
         max_output_tokens: int,
+        model: str | None = None,
     ) -> AnswerStream:
         """FR-SYS-02 grounded generation on `OPENAI_CHAT_MODEL` (T-307, R-48).
+
+        ``model`` overrides the id for this call only — see :meth:`complete_json`. This is
+        the slot where a wrong id is an outage rather than a degradation, because generation
+        is the one call site that fails **closed**; R-83(3) is why the write path probes the
+        provider before persisting an override instead of discovering it here.
 
         ``LLM_TIMEOUT_SECONDS`` / ``LLM_MAX_RETRIES`` — the most patient of the three
         budgets, and **never** the router's `LLM_ROUTER_*` leash: an 8-second cap tuned for a
@@ -423,6 +438,22 @@ class ChatClient(Protocol):
         Raises the same taxonomy as :meth:`complete_json`, at call time or from the iterator.
         Unlike the other two call sites, nothing catches it: R-48(2) makes generation fail
         closed.
+        """
+        ...
+
+    async def verify_model(self, model_id: str) -> None:
+        """Raise a :class:`ChatError` unless the provider serves ``model_id`` to this account.
+
+        The write-path probe for T-611's runtime overrides (R-83(3)). It exists because
+        generation fails **closed**: an operator's typo would otherwise be discovered by
+        every subsequent turn returning `LLM_ERROR`, and the cheapest place to find it is
+        before the value is persisted.
+
+        **What it does and does not establish.** It checks existence and account access, not
+        fitness for a call site — an embedding model id would pass this and then fail every
+        completion. Verifying fitness means actually completing, which costs tokens and a
+        second decision about what a "good enough" answer looks like; the typo is the failure
+        worth catching cheaply, and the rest is named here rather than implied.
         """
         ...
 
@@ -515,6 +546,18 @@ class OpenAIChatClient:
             await self._client.close()
         self._client = None
 
+    async def verify_model(self, model_id: str) -> None:
+        client = (await self._get_client()).with_options(
+            timeout=httpx.Timeout(self._router_timeout, connect=self._connect_timeout),
+            max_retries=0,
+        )
+        try:
+            await client.models.retrieve(model_id)
+        except ChatError:
+            raise
+        except Exception as exc:
+            raise _translate(exc) from exc
+
     async def complete_json(
         self,
         messages: Sequence[Mapping[str, str]],
@@ -522,10 +565,11 @@ class OpenAIChatClient:
         schema: Mapping[str, Any],
         schema_name: str,
         max_output_tokens: int,
+        model: str | None = None,
     ) -> ChatJson:
         return await self._complete_json(
             messages,
-            model=self._router_model,
+            model=model or self._router_model,
             schema=schema,
             schema_name=schema_name,
             max_output_tokens=max_output_tokens,
@@ -540,10 +584,11 @@ class OpenAIChatClient:
         schema: Mapping[str, Any],
         schema_name: str,
         max_output_tokens: int,
+        model: str | None = None,
     ) -> ChatJson:
         return await self._complete_json(
             messages,
-            model=self._rerank_model,
+            model=model or self._rerank_model,
             schema=schema,
             schema_name=schema_name,
             max_output_tokens=max_output_tokens,
@@ -575,14 +620,16 @@ class OpenAIChatClient:
         messages: Sequence[Mapping[str, str]],
         *,
         max_output_tokens: int,
+        model: str | None = None,
     ) -> AnswerStream:
+        chat_model = model or self._chat_model
         client = (await self._get_client()).with_options(
             timeout=httpx.Timeout(self._timeout, connect=self._connect_timeout),
             max_retries=self._max_retries,
         )
         try:
             stream = await client.chat.completions.create(
-                model=self._chat_model,
+                model=chat_model,
                 messages=[dict(message) for message in messages],  # type: ignore[arg-type]
                 max_completion_tokens=max_output_tokens,
                 stream=True,
@@ -599,7 +646,7 @@ class OpenAIChatClient:
             raise
         except Exception as exc:
             raise _translate(exc) from exc
-        return AnswerStream(self._deltas(stream), model=self._chat_model)
+        return AnswerStream(self._deltas(stream), model=chat_model)
 
     @staticmethod
     async def _deltas(stream: Any) -> AsyncIterator[_Delta]:
@@ -943,6 +990,14 @@ class FakeChatClient:
         #: asserted on this, because the fake's *answers* are fixed by schema and so cannot
         #: show which model was asked.
         self.judge_models: list[str] = []
+        #: `(method, model)` for every call, in order (T-611). Same reasoning as
+        #: `judge_models` one step wider: the fake's answers are fixed, so the *only*
+        #: observable effect of an operator's runtime override reaching the seam is which id
+        #: was named. A test that asserts on the answer instead would pass whether the
+        #: override arrived or not.
+        self.requested_models: list[tuple[str, str]] = []
+        #: Every id handed to :meth:`verify_model`, in order (T-611).
+        self.verified: list[str] = []
 
     @property
     def model(self) -> str:
@@ -960,6 +1015,18 @@ class FakeChatClient:
     def judge_model(self) -> str:
         return self._model
 
+    async def verify_model(self, model_id: str) -> None:
+        """Accepts anything, and records it.
+
+        The fake cannot know what a provider serves, and refusing unknown ids would make a
+        dev box with `LLM_BACKEND=fake` unable to set any override at all — the opposite of
+        what the fake is for. `verified` is how a test asserts the CLI probed *before* it
+        wrote, which is the ordering R-83(3) is about.
+        """
+        if self._error is not None:
+            raise self._error
+        self.verified.append(model_id)
+
     async def complete_json(
         self,
         messages: Sequence[Mapping[str, str]],
@@ -967,7 +1034,9 @@ class FakeChatClient:
         schema: Mapping[str, Any],
         schema_name: str,
         max_output_tokens: int,
+        model: str | None = None,
     ) -> ChatJson:
+        self.requested_models.append(("complete_json", model or self._model))
         return self._answer_json(messages, schema_name)
 
     async def rerank_json(
@@ -977,7 +1046,9 @@ class FakeChatClient:
         schema: Mapping[str, Any],
         schema_name: str,
         max_output_tokens: int,
+        model: str | None = None,
     ) -> ChatJson:
+        self.requested_models.append(("rerank_json", model or self._model))
         return self._answer_json(messages, schema_name)
 
     async def evaluate_json(
@@ -992,6 +1063,7 @@ class FakeChatClient:
         # `model` is recorded rather than honoured: the fake has one deterministic answer per
         # schema, and T-314's escalation is asserted on `judge_models` instead of on output.
         self.judge_models.append(model or self._model)
+        self.requested_models.append(("evaluate_json", model or self._model))
         return self._answer_json(messages, schema_name, schema=schema)
 
     async def stream_answer(
@@ -999,7 +1071,9 @@ class FakeChatClient:
         messages: Sequence[Mapping[str, str]],
         *,
         max_output_tokens: int,
+        model: str | None = None,
     ) -> AnswerStream:
+        self.requested_models.append(("stream_answer", model or self._model))
         self.calls.append([dict(message) for message in messages])
         if self._error is not None:
             raise self._error
@@ -1019,7 +1093,11 @@ class FakeChatClient:
             for delta in deltas:
                 yield delta
 
-        return AnswerStream(produce(), model=self._model)
+        # The override is *honoured* here, not merely recorded as it is in `evaluate_json`:
+        # this value becomes `messages.model_name`, so a fake that always reported its own id
+        # would make a test asserting the answering model pass whether the override reached
+        # generation or not.
+        return AnswerStream(produce(), model=model or self._model)
 
     def _answer_json(
         self,

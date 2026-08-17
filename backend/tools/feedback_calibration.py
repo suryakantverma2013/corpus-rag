@@ -81,6 +81,20 @@ __all__ = [
 #: enough accumulated feedback to measure what a stable estimate actually costs.
 DEFAULT_MIN_SAMPLE = 20  # TBD(§8.4)
 
+#: The `--help` description. Deliberately ASCII and deliberately not `__doc__`: argparse writes
+#: this straight to stdout, and the module docstring carries emoji that a Windows `cp1252`
+#: console cannot encode — which turned `--help` into a traceback. Same rule as the report body
+#: (R-80(7)): the prose keeps the emoji, anything reaching stdout stays ASCII.
+_CLI_DESCRIPTION = """\
+What accumulated thumbs-up / thumbs-down feedback actually says about the automated scores.
+
+Reports coverage, judge-versus-human separation, and a threshold sweep for
+EVAL_ESCALATE_BELOW and GATE_MIN_GROUNDEDNESS. It is evidence for a human decision, not a
+tuning loop: feedback is a measurement, not a controller. A metric whose scores do not
+separate liked from disliked answers has its threshold table omitted rather than printed.
+
+Refuses to draw conclusions below --min-sample rated answers, and always exits 0."""
+
 #: The candidate thresholds the sweep reports. Spans both live knobs: `GATE_MIN_GROUNDEDNESS`
 #: ships at 0.5 (R-49(4)) and `EVAL_ESCALATE_BELOW` at 0.9 (R-53), so a useful sweep has to
 #: cover the whole range rather than a neighbourhood of either.
@@ -485,7 +499,12 @@ async def _run(window_days: int, min_sample: int, as_json: bool, owner_id: uuid.
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m tools.feedback_calibration",
-        description=__doc__,
+        # NOT `__doc__`. R-80(7) made the report body ASCII because a Windows `cp1252`
+        # console raises UnicodeEncodeError on the emoji — but the module docstring keeps
+        # them as prose, and argparse writes `description` straight to stdout for `--help`.
+        # So `--help` still crashed with a traceback on exactly the consoles the rule was
+        # written for. The prose keeps the emoji; anything that reaches stdout does not.
+        description=_CLI_DESCRIPTION,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--days", type=int, default=90, help="window to report over (default 90)")

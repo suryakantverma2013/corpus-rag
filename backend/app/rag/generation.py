@@ -182,6 +182,7 @@ async def generate_answer(
     history: Sequence[Mapping[str, str]] = (),
     chat: ChatClient,
     settings: Settings | None = None,
+    model: str | None = None,
 ) -> GeneratedAnswer:
     """Compose, stream and buffer one grounded answer. **Raises on every failure** (R-48(2)).
 
@@ -201,7 +202,13 @@ async def generate_answer(
 
     started = time.perf_counter()
     stream = await chat.stream_answer(
-        composed.messages, max_output_tokens=settings.llm.max_output_tokens
+        composed.messages,
+        max_output_tokens=settings.llm.max_output_tokens,
+        # `None` means `OPENAI_CHAT_MODEL`; a value is the operator's runtime override
+        # (T-611, R-83). It reaches `messages.model_name` through `AnswerStream.model`, so
+        # the transcript records the model that actually answered rather than the configured
+        # one — which is what keeps FR-ANL-02 honest across a switch.
+        model=model,
     )
     result = await stream.collect()
 

@@ -742,3 +742,55 @@ async def test_the_offline_harness_never_escalates() -> None:
 
     assert len(asked) == 2
     assert scores.relevancy == 0.0
+
+
+# --- runtime model selection (T-611, R-83) ------------------------------------
+
+
+async def test_the_judge_follows_the_operators_selection() -> None:
+    """Both tiers come from the selection when one is supplied.
+
+    The base tier is asserted against the override rather than `chat.judge_model`: the fake
+    exposes that property so tests can see which tier was asked, and an implementation that
+    consulted it first would make the override unreachable in exactly the configuration every
+    test here runs under.
+    """
+    from app.services.model_selection import ModelSelection
+
+    chat = FakeChatClient()
+    evaluator = DeepEvalEvaluator(
+        chat,
+        get_settings(),
+        models=ModelSelection(
+            chat="c", router="r", rerank="k", judge="judge-base", judge_escalation="judge-strong"
+        ),
+    )
+    asked = _scripted(evaluator, [0.0, 1.0, 1.0])
+
+    await evaluator.score(question=QUESTION, answer=ANSWER, context=[PASSAGE])
+
+    assert asked[:2] == ["judge-base", "judge-strong"]
+    assert chat.judge_model not in asked, "the client's own default must not leak in"
+
+
+async def test_moving_the_judge_alone_does_not_silently_arm_escalation() -> None:
+    """Escalation is dormant only while the two tiers name the same model.
+
+    So a selection that repointed `judge` while leaving `judge_escalation` at the environment
+    value would buy a second judge call per metric that nobody asked for. Reading both from
+    the same selection is what prevents it — this fails if `_scored` mixes sources.
+    """
+    from app.services.model_selection import ModelSelection
+
+    evaluator = DeepEvalEvaluator(
+        FakeChatClient(),
+        get_settings(),
+        models=ModelSelection(
+            chat="c", router="r", rerank="k", judge="same-model", judge_escalation="same-model"
+        ),
+    )
+    asked = _scripted(evaluator, [0.0, 0.0])
+
+    await evaluator.score(question=QUESTION, answer=ANSWER, context=[PASSAGE])
+
+    assert asked == ["same-model", "same-model"], "one call per metric, no escalation"

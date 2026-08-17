@@ -25,7 +25,8 @@ from __future__ import annotations
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from app.auth.dependencies import CurrentUser, SettingsDep
+from app.auth.dependencies import CurrentUser, DbSession, SettingsDep
+from app.services.model_selection import resolve_models
 
 router = APIRouter(prefix="/config", tags=["config"])
 
@@ -35,17 +36,27 @@ class ConfigResponse(BaseModel):
 
     chat_model: str = Field(
         description=(
-            "The configured answer model (`OPENAI_CHAT_MODEL`), for FR-ANL-02's MODEL card. "
-            "The *configured* id, not the one that answered any particular turn — that is "
-            "`MessageResponse.model_name`, which the GUI prefers where it exists."
+            "The answer model in force, for FR-ANL-02's MODEL card: the operator's runtime "
+            "override if one is set, else `OPENAI_CHAT_MODEL`. Still not the model that "
+            "answered any particular turn — that is `MessageResponse.model_name`, which the "
+            "GUI prefers where it exists."
         )
     )
 
 
 @router.get("", response_model=ConfigResponse, summary="Deployment configuration")
-async def get_config(user: CurrentUser, settings: SettingsDep) -> ConfigResponse:
-    """FR-SYS-03's model id.
+async def get_config(
+    user: CurrentUser, settings: SettingsDep, session: DbSession
+) -> ConfigResponse:
+    """FR-SYS-03's model id — the one **in force**, not the one in the environment.
 
     `user` is unused and is the point: it is the dependency that makes this authenticated.
+
+    The read goes through `resolve_models` (T-611, R-83) rather than straight to
+    `settings.openai.chat_model`, because since T-611 those two can differ: an operator may
+    have repointed generation without a deploy. Reporting the environment here would make the
+    FR-ANL-02 card name a model that is not answering — the precise silent drift this route
+    was added to remove, reintroduced one layer down.
     """
-    return ConfigResponse(chat_model=settings.openai.chat_model)
+    models = await resolve_models(session, settings)
+    return ConfigResponse(chat_model=models.chat)

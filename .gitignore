@@ -1,7 +1,13 @@
 # ---- Environment / secrets ----
 .env
 .env.*
+# The negations are per-FILENAME, not per-prefix: `!.env.example` does not rescue
+# `.env.prod.example`, which matches `.env.*` and would otherwise be written, never
+# committed, and silently missing from the published repository. Every new committed
+# template needs its own line here. Check with:
+#     git check-ignore -v deployment/.env.prod.example     # must print nothing
 !.env.example
+!.env.prod.example
 
 # ---- Python / uv (backend, T-003) ----
 __pycache__/

@@ -88,6 +88,7 @@ class _ChatDouble:
         schema: Mapping[str, Any],
         schema_name: str,
         max_output_tokens: int,
+        model: str | None = None,
     ) -> ChatJson:
         index = len(self.calls)
         self.calls.append([dict(message) for message in messages])

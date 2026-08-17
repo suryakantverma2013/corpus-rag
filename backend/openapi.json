@@ -388,7 +388,7 @@
           "config"
         ],
         "summary": "Deployment configuration",
-        "description": "FR-SYS-03's model id.\n\n`user` is unused and is the point: it is the dependency that makes this authenticated.",
+        "description": "FR-SYS-03's model id — the one **in force**, not the one in the environment.\n\n`user` is unused and is the point: it is the dependency that makes this authenticated.\n\nThe read goes through `resolve_models` (T-611, R-83) rather than straight to\n`settings.openai.chat_model`, because since T-611 those two can differ: an operator may\nhave repointed generation without a deploy. Reporting the environment here would make the\nFR-ANL-02 card name a model that is not answering — the precise silent drift this route\nwas added to remove, reintroduced one layer down.",
         "operationId": "get_config",
         "responses": {
           "200": {
@@ -3815,7 +3815,7 @@
           "chat_model": {
             "type": "string",
             "title": "Chat Model",
-            "description": "The configured answer model (`OPENAI_CHAT_MODEL`), for FR-ANL-02's MODEL card. The *configured* id, not the one that answered any particular turn — that is `MessageResponse.model_name`, which the GUI prefers where it exists."
+            "description": "The answer model in force, for FR-ANL-02's MODEL card: the operator's runtime override if one is set, else `OPENAI_CHAT_MODEL`. Still not the model that answered any particular turn — that is `MessageResponse.model_name`, which the GUI prefers where it exists."
           }
         },
         "type": "object",

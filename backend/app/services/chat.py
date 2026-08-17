@@ -46,6 +46,7 @@ from app.rag.budget import (
 )
 from app.rag.errors import copy_for
 from app.services.jobs import JobQueue, JobQueueError, evaluation_idempotency_key
+from app.services.model_selection import resolve_models
 
 log = structlog.get_logger(__name__)
 
@@ -310,11 +311,21 @@ async def run_turn(
     # process that picks the turn back up, which is the case an operator is following.
     with bound_turn(conversation_id=conversation.id, turn_index=turn_index):
         graph = await get_graph()
+        # **Resolved once, here, for the whole turn** (T-611, R-83). Once rather than per
+        # node so an operator writing between two supersteps cannot make one turn route with
+        # one model and generate with another; here rather than in `RAGState` so a resumed
+        # run picks up the selection in force *now*, which is R-42(3)'s argument for keeping
+        # authorization off the checkpoint applied to the next subject along. Its own
+        # short-lived session, on this function's standing rule that nothing holds one across
+        # the model calls that follow.
+        async with sessionmaker() as session:
+            models = await resolve_models(session, settings)
         context = RAGContext(
             owner_id=owner_id,
             tenant_id=conversation.tenant_id,
             conversation_id=conversation.id,
             sessionmaker=sessionmaker,
+            models=models,
         )
         config = thread_config(conversation.id, settings)
 

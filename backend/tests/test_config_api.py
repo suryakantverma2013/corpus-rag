@@ -66,3 +66,28 @@ async def test_it_is_not_public(client: httpx.AsyncClient) -> None:
     """Internal product configuration, not a discovery document. The `CurrentUser` dependency
     is the only thing enforcing that, and it is easy to drop while everything still works."""
     assert (await client.get(_URL)).status_code == 401
+
+
+async def test_it_reports_the_operators_override_rather_than_the_environment(
+    client: httpx.AsyncClient, session: AsyncSession, make_token: Callable[..., str]
+) -> None:
+    """T-611/R-83: since the answer model is repointable at runtime, the *configured* value
+    and the value **in force** can differ — and this card must name the one that will answer.
+
+    Reading `settings.openai.chat_model` here would pass every other test in this file and
+    reintroduce, one layer down, exactly the silent drift this route was added to remove.
+    """
+    from app.services.model_selection import ModelSlot, set_model_override
+
+    _, headers = await _caller(session, make_token)
+    await set_model_override(
+        session, slot=ModelSlot.CHAT, model_id="gpt-5-preview", updated_by="test"
+    )
+
+    response = await client.get(_URL, headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["chat_model"] == "gpt-5-preview"
+    assert get_settings().openai.chat_model != "gpt-5-preview", (
+        "the fixture must differ from the environment or the assertion above is vacuous"
+    )

@@ -1,0 +1,357 @@
+# Corpus production stack (T-605) — self-contained: one command brings up every dependency.
+#
+#   cp deployment/.env.prod.example deployment/.env.prod    # then fill every CHANGE_ME
+#   docker compose -f deployment/docker-compose.prod.yml --env-file deployment/.env.prod \
+#       up -d --wait --build
+#
+# The dev stack in ./docker-compose.yml is a DIFFERENT thing and is untouched: it starts
+# infrastructure only, for an application running natively on the developer's machine.
+# Runbook: docs/DEPLOYMENT.md. Dev infrastructure: deployment/README.md.
+#
+# A distinct project name namespaces every container, network and volume, so this stack
+# coexists with a running dev stack rather than fighting it for names.
+name: corpus-prod
+
+# ---------------------------------------------------------------------------------------
+# Application environment, shared by api, worker and init. They must agree on every value:
+# the worker writes what the API reads, and `init` migrates the schema both then use.
+# ---------------------------------------------------------------------------------------
+x-corpus-env: &corpus-env
+  # `production` is not cosmetic — two boot-time invariants key on this exact string
+  # (app/config.py::Settings._coherent). It refuses CHECKPOINTER_BACKEND=memory, which
+  # would make conversations non-durable, and refuses a non-Secure refresh cookie.
+  ENVIRONMENT: production
+  APP_NAME: ${APP_NAME:-Corpus}
+
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  REDIS_URL: redis://redis:6379/0
+
+  RATELIMIT_ENABLED: "true"
+  # slowapi 0.1.10 reaches storage synchronously, so this is the sync redis:// scheme
+  # deliberately, on its own logical database.
+  RATELIMIT_STORAGE_URI: redis://redis:6379/1
+
+  STORAGE_BACKEND: s3
+  STORAGE_AUTO_CREATE_BUCKET: "true"
+  MINIO_ENDPOINT: minio:9000
+  MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+  MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+  MINIO_BUCKET: ${MINIO_BUCKET:-corpus}
+  # Container-internal hop on a private network; TLS terminates at the edge.
+  MINIO_SECURE: "false"
+
+  QUEUE_BACKEND: arq
+  CHECKPOINTER_BACKEND: postgres
+
+  SCANNER_BACKEND: ${SCANNER_BACKEND:-clamav}
+  CLAMAV_HOST: clamav
+  CLAMAV_PORT: "3310"
+  # Must be >= UPLOAD_MAX_FILE_BYTES or the app refuses to boot, and must stay in step with
+  # StreamMaxLength in deployment/clamav/clamd.conf, which nothing in the app can validate.
+  CLAMAV_MAX_STREAM_BYTES: "104857600"
+
+  EMBEDDING_BACKEND: ${EMBEDDING_BACKEND:-openai}
+  LLM_BACKEND: ${LLM_BACKEND:-openai}
+  OPENAI_API_KEY: ${OPENAI_API_KEY}
+
+  KEYCLOAK_SERVER_URL: ${KEYCLOAK_SERVER_URL}
+  # Optional (R-82): how the API reaches Keycloak, when that differs from the browser's
+  # public origin. Empty means "same as KEYCLOAK_SERVER_URL".
+  KEYCLOAK_INTERNAL_URL: ${KEYCLOAK_INTERNAL_URL:-}
+  KEYCLOAK_REALM: ${KEYCLOAK_REALM:-corpus}
+  KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-corpus-backend}
+  KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET}
+
+  SESSION_REFRESH_COOKIE_SECURE: "true"
+  SESSION_REFRESH_COOKIE_SAMESITE: strict
+
+  # Browser-facing origin: where Keycloak returns the user after FR-AUT-11 account linking.
+  CLOUD_CALLBACK_BASE_URL: ${PUBLIC_ORIGIN}
+  CLOUD_RETURN_URL: ${PUBLIC_ORIGIN}/
+
+  # deepeval writes a hidden cache directory into the CWD; /app is root-owned and the
+  # process is not root.
+  DEEPEVAL_CACHE_FOLDER: /tmp/deepeval
+
+services:
+  # ================================================================= data plane
+  postgres:
+    image: pgvector/pgvector:pg18
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
+    volumes:
+      # PostgreSQL 18+ images want the volume at /var/lib/postgresql, NOT at
+      # .../data: they store the cluster in a major-version-specific subdirectory so
+      # `pg_upgrade --link` can work across a single mount point. Mounting the old path
+      # makes the entrypoint refuse to start, in a restart loop, with a long explanation
+      # about "PostgreSQL data in /var/lib/postgresql/data (unused mount/volume)".
+      - pgdata:/var/lib/postgresql
+      # Mounted file by file rather than as a directory: the dev stack mounts only
+      # 01-extension.sql, and mounting the directory would give it the Keycloak script too.
+      - ./initdb/01-extension.sql:/docker-entrypoint-initdb.d/01-extension.sql:ro
+      - ./initdb/02-keycloak-db.sh:/docker-entrypoint-initdb.d/02-keycloak-db.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    # No published port: nothing outside this stack speaks to Postgres, and publishing 5432
+    # would collide with a developer's native instance.
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    restart: unless-stopped
+
+  clamav:
+    image: clamav/clamav:1.4
+    volumes:
+      - clamav-data:/var/lib/clamav
+      - ./clamav/clamd.conf:/etc/clamav/clamd.conf:ro
+    mem_limit: 2g
+    # THE DOCUMENTED DEFECT, FIXED HERE.
+    #
+    # The image's own clamdcheck.sh pings `localhost`, which resolves to ::1 first, while
+    # clamd.conf pins `TCPAddr 0.0.0.0` — so the stock probe talks to an address clamd does
+    # not listen on and reports `unhealthy` while clamd is perfectly healthy. That is
+    # cosmetic under the dev stack (deployment/README.md records it), but here `restart` and
+    # `depends_on: service_healthy` act on it, so an orchestrator would restart-loop a
+    # working scanner forever. clamdscan connects by address and is the probe the dev README
+    # already tells you to trust.
+    healthcheck:
+      test: ["CMD-SHELL", "clamdscan --ping 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # A cold volume downloads ~1 GB of signatures before clamd answers anything.
+      start_period: 300s
+    restart: unless-stopped
+
+  # ================================================================= identity
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4
+    # `start` and not `start --optimized`: the latter requires an image pre-augmented with
+    # `kc.sh build`, i.e. a third Dockerfile, to save a one-off ~20-30s first boot.
+    command: ["start", "--import-realm"]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
+      KC_HTTP_ENABLED: "true"
+      # Same relative path in both deployment modes, so nginx never needs a rewrite.
+      KC_HTTP_RELATIVE_PATH: /auth
+      # The PUBLIC origin, and it must equal KEYCLOAK_SERVER_URL exactly, path included:
+      # Keycloak builds the `iss` claim from this, NOT from the URL the request arrived on,
+      # and the API validates against KEYCLOAK_SERVER_URL. The API reaches Keycloak by the
+      # separate KEYCLOAK_INTERNAL_URL (R-82), so this value only ever has to satisfy a
+      # browser. See docs/DEPLOYMENT.md, "The issuer constraint".
+      KC_HOSTNAME: ${KC_HOSTNAME}
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD}
+    volumes:
+      # The FILE, not the directory: deployment/keycloak/ also holds README.md and
+      # patch-realm.sh, and --import-realm reads every file in the import directory.
+      - ./keycloak/corpus-realm.json:/opt/keycloak/data/import/corpus-realm.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      # Loopback-bound, for the admin console and kcadm only. Browser traffic reaches
+      # Keycloak through the edge at /auth/.
+      - "127.0.0.1:${KEYCLOAK_PORT:-8180}:8080"
+    healthcheck:
+      # The image carries no curl or wget, so this speaks HTTP over bash's /dev/tcp
+      # (/bin/sh is bash here). Keycloak 26 serves health on the separate MANAGEMENT port
+      # 9000, and — the part that is easy to get wrong — KC_HTTP_RELATIVE_PATH applies to
+      # that interface too, so the path is /auth/health/ready and a bare /health/ready
+      # answers 404. Measured: /auth/health/ready → 200, /health/ready → 404.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000; printf 'GET /auth/health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; grep -q 'UP' <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    restart: unless-stopped
+
+  keycloak-init:
+    image: quay.io/keycloak/keycloak:26.4
+    entrypoint: ["bash", "/scripts/patch-realm.sh"]
+    environment:
+      KC_URL: http://keycloak:8080/auth
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD}
+      CORPUS_REALM: ${KEYCLOAK_REALM:-corpus}
+      CORPUS_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-corpus-backend}
+      CORPUS_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET}
+      CORPUS_ADMIN_EMAIL: ${CORPUS_ADMIN_EMAIL:-admin@corpus.local}
+      CORPUS_ADMIN_PASSWORD: ${CORPUS_ADMIN_PASSWORD}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+    volumes:
+      - ./keycloak/patch-realm.sh:/scripts/patch-realm.sh:ro
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    restart: "no"
+
+  # ================================================================= bootstrap
+  # Runs to completion once per `up`, before api and worker start. Two steps, in order:
+  #
+  #   1. alembic upgrade head   — the application schema.
+  #   2. python -m app.services.checkpointer
+  #        The four LangGraph checkpoint* tables are NOT Alembic's; `upgrade head` does not
+  #        create them, and without them the first chat request raises
+  #        CheckpointerNotProvisionedError. Idempotent, so re-running on every deploy is
+  #        both safe and required.
+  #   3. ensure_bucket()      — the object-storage bucket.
+  #        STORAGE_AUTO_CREATE_BUCKET creates it on FIRST USE, but the readiness probe's
+  #        HeadBucket is not a use: on a fresh volume /health/ready therefore answers 503
+  #        ("object_storage: 404 HeadBucket") until somebody happens to upload a document,
+  #        so the API never becomes healthy and nothing that gates on it can start. Creating
+  #        it here makes "deployed" and "ready" the same instant. Uses the storage service's
+  #        own ensure_bucket, and is a no-op for STORAGE_BACKEND=local, which has none.
+  #
+  # A one-shot service rather than an entrypoint hook, because a hook races itself across
+  # replicas on `CREATE INDEX CONCURRENTLY` (which cannot run in a transaction), and because
+  # the API process should not hold DDL rights.
+  #
+  # `sh -c`, never `sh -lc`: a LOGIN shell re-reads /etc/profile, which resets PATH and
+  # drops /app/.venv/bin — alembic then simply is not found.
+  init:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    image: corpus-backend:${IMAGE_TAG:-local}
+    # `sh -c`, never `sh -lc`: a LOGIN shell re-reads /etc/profile, which resets PATH and
+    # drops /app/.venv/bin, so alembic is simply not found. `set -e` because a multi-line
+    # script does not stop on the first failure by itself.
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        alembic upgrade head
+        python -m app.services.checkpointer
+        python - <<'PY'
+        import asyncio
+        from app.services.object_storage import build_object_storage
+
+        async def main() -> None:
+            storage = build_object_storage()
+            ensure = getattr(storage, "ensure_bucket", None)
+            if ensure is not None:      # absent on the local-filesystem backend
+                await ensure()
+            await storage.aclose()      # or aiohttp prints "Unclosed client session"
+            print("object storage bucket ready")
+
+        asyncio.run(main())
+        PY
+    environment: *corpus-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # ================================================================= application
+  api:
+    image: corpus-backend:${IMAGE_TAG:-local}
+    environment: *corpus-env
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      keycloak-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      # No curl in a python-slim image — use the interpreter that is already there.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+    # No published port: the only ingress is the edge.
+
+  worker:
+    image: corpus-backend:${IMAGE_TAG:-local}
+    command: ["arq", "workers.main.WorkerSettings"]
+    environment: *corpus-env
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      # Only the worker waits for the scanner. The readiness arms are split precisely so a
+      # dead ClamAV does not pull the chat surface out of service: ingestion fails closed,
+      # chat carries on.
+      clamav:
+        condition: service_healthy
+    restart: unless-stopped
+    # No healthcheck: the worker runs no HTTP server. Its liveness is the arq heartbeat key
+    # in Redis, which the API surfaces at GET /health/ready/worker.
+
+  web:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+    image: corpus-web:${IMAGE_TAG:-local}
+    depends_on:
+      # nginx resolves upstream names at configuration load and exits if one is missing, so
+      # both proxied services must exist before it starts.
+      api:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-8088}:8080"
+    healthcheck:
+      # Without this `--wait` returns the moment the container starts, so a configuration
+      # error that makes nginx exit immediately reads as a successful deploy. busybox wget
+      # is present in the alpine image; curl is not.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redis-data:
+  minio-data:
+  clamav-data:

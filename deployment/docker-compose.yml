@@ -70,7 +70,13 @@ services:
       POSTGRES_USER: "${POSTGRES_USER:-postgres}"
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-postgres}"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # PostgreSQL 18+ images want the volume at /var/lib/postgresql, NOT at .../data:
+      # they keep the cluster in a major-version-specific subdirectory so `pg_upgrade --link`
+      # works across one mount point. With the old path the entrypoint refuses to start and
+      # the container restart-loops, explaining at length that it found "PostgreSQL data in
+      # /var/lib/postgresql/data (unused mount/volume)". Found while building the production
+      # stack (T-605); this profile had the same latent defect.
+      - pgdata:/var/lib/postgresql
       - ./initdb/01-extension.sql:/docker-entrypoint-initdb.d/01-extension.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-corpus}"]

@@ -54,6 +54,7 @@ from app.rag.state import GateVerdict, RAGContext, RAGState
 # Must be set before langgraph's serde module is imported, because it snapshots the flag
 # at import time (see `app.services.checkpointer` for the same call and the reasoning).
 from app.services.checkpointer import apply_strict_msgpack
+from app.services.model_selection import ModelSlot
 from app.services.processing_lock import (
     DatabaseProcessingLockStore,
     ProcessingLockStore,
@@ -380,7 +381,13 @@ async def route(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
                 from app.services.llm import get_chat_client
 
                 chat = get_chat_client()
-            return await classify_query(query=query, chat=chat, history=history, settings=settings)
+            return await classify_query(
+                query=query,
+                chat=chat,
+                history=history,
+                settings=settings,
+                model=_model_for(ctx, ModelSlot.ROUTER),
+            )
         except Exception:
             log.warning(
                 "rag.router.failed",
@@ -486,6 +493,17 @@ def _retrieval_deps(ctx: RAGContext) -> tuple[EmbeddingClient, Callable[[AsyncSe
 
         embeddings = get_embedding_client()
     return embeddings, ctx.retriever_factory or HybridRetriever
+
+
+def _model_for(ctx: RAGContext, slot: ModelSlot) -> str | None:
+    """The model id this turn calls for ``slot``, or ``None`` for the configured default.
+
+    A :class:`ModelSlot` member rather than a string, deliberately: a mistyped attribute
+    name would raise inside `route` or `rerank`, both of which fail open (R-45(2), R-47(2)),
+    so the bug would surface as a permanently degraded stage rather than as an error. An
+    enum member is wrong at import time instead.
+    """
+    return None if ctx.models is None else ctx.models.for_slot(slot)
 
 
 def _message_uuid(value: str | None) -> uuid.UUID | None:
@@ -642,6 +660,7 @@ async def rerank(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
         sources=prompt_sources(hits),
         chat=chat,
         settings=settings,
+        model=_model_for(ctx, ModelSlot.RERANK),
     )
     return {
         "reranked_chunk_ids": list(outcome.chunk_ids),
@@ -775,6 +794,7 @@ async def generate(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
         sources=prompt_sources(hits),
         history=history,
         chat=chat,
+        model=_model_for(ctx, ModelSlot.CHAT),
     )
     if generated.source_ids != tuple(surviving):  # pragma: no cover - invariant guard
         # Unreachable while the sources are composed from `hits` in order. It is checked

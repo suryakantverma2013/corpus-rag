@@ -57,6 +57,7 @@ from app.rag.search import RETRIEVAL_COMPLETED
 from app.rag.state import RAGContext, RAGState, fresh_turn_state
 from app.security.prompt_injection import CONTEXT_FENCE_OPEN
 from app.services.llm import ChatResponseError, ChatUnavailableError, FakeChatClient
+from app.services.model_selection import ModelSelection
 from app.services.processing_lock import MemoryProcessingLockStore
 
 OWNER_ID = uuid.uuid4()
@@ -232,6 +233,7 @@ def _context(
     chat: object | None = None,
     messages: list[object] | None = None,
     retriever: _StubRetriever | None = None,
+    models: object | None = None,
 ):
     """A `RAGContext` whose stub conversation is owned by `conversation_owner`.
 
@@ -257,6 +259,9 @@ def _context(
         processing_lock=lock or MemoryProcessingLockStore(),
         chat=chat or FakeChatClient(),  # type: ignore[arg-type]
         retriever_factory=lambda session: hits,  # type: ignore[arg-type,misc]  # noqa: ARG005
+        # `None` is the production default too (T-611): a caller that resolved nothing gets
+        # the configured `OPENAI_*` ids, which is what every test predating T-611 relies on.
+        models=models,  # type: ignore[arg-type]
     )
 
 
@@ -1205,7 +1210,9 @@ async def test_the_router_call_and_the_query_arm_run_at_the_same_time(prefetch_o
     barrier = asyncio.Barrier(2)
 
     class _BarrierChat(FakeChatClient):
-        async def complete_json(self, messages, *, schema, schema_name, max_output_tokens):  # noqa: ANN001, ANN003, ANN201
+        async def complete_json(
+            self, messages, *, schema, schema_name, max_output_tokens, model=None
+        ):  # noqa: ANN001, ANN003, ANN201, E501
             async with asyncio.timeout(5):
                 await barrier.wait()
             return await super().complete_json(
@@ -1213,6 +1220,7 @@ async def test_the_router_call_and_the_query_arm_run_at_the_same_time(prefetch_o
                 schema=schema,
                 schema_name=schema_name,
                 max_output_tokens=max_output_tokens,
+                model=model,
             )
 
     class _BarrierRetriever(_StubRetriever):
@@ -1243,7 +1251,9 @@ async def test_a_failing_router_does_not_take_the_query_arm_down_with_it(prefetc
     """
 
     class _RouterFailsChat(FakeChatClient):
-        async def complete_json(self, messages, *, schema, schema_name, max_output_tokens):  # noqa: ANN001, ANN003, ANN201
+        async def complete_json(
+            self, messages, *, schema, schema_name, max_output_tokens, model=None
+        ):  # noqa: ANN001, ANN003, ANN201, E501
             raise ChatResponseError("the model returned prose")
 
     retriever = _StubRetriever([_chunk("still retrieved")])
@@ -2337,3 +2347,69 @@ def test_the_ambient_retrieval_scope_is_not_enumerated_in_state() -> None:
     fields = set(get_type_hints(RAGState))
     assert "mentioned_document_ids" in fields
     assert not {"scope_document_ids", "visible_document_ids", "knowledge_base_ids"} & fields
+
+
+# --- runtime model selection (T-611, R-83) ------------------------------------
+
+
+_SELECTION = ModelSelection(
+    chat="model-generation",
+    router="model-router",
+    rerank="model-rerank",
+    judge="model-judge",
+    judge_escalation="model-judge",
+)
+
+
+async def test_the_operators_selection_reaches_every_call_site() -> None:
+    """One turn, three seam calls, three distinct ids — the end-to-end wiring assertion.
+
+    Asserted on which model each call *named* rather than on the answer, because the fake's
+    answers are fixed by schema: a test that checked the output would pass whether the
+    selection arrived or not (§8.65(5)). Three *different* ids in one selection is what stops
+    an implementation that wires only one slot — or hands `chat` to all three — from passing.
+
+    A retriever with a hit is not incidental: with an empty scope the turn abstains at
+    `retrieve` (R-23), so `rerank` and `generate` never run and the assertion would be
+    vacuous for two of the three call sites.
+    """
+    chat = FakeChatClient()
+    context = _context(chat=chat, retriever=_StubRetriever([_chunk("a grounded passage")]))
+    object.__setattr__(context, "models", _SELECTION)
+
+    await _run(context)
+
+    called = dict(chat.requested_models)
+    assert called["complete_json"] == "model-router"
+    assert called["rerank_json"] == "model-rerank"
+    assert called["stream_answer"] == "model-generation"
+
+
+async def test_a_context_with_no_selection_uses_the_configured_defaults() -> None:
+    """`RAGContext.models` defaults to `None`, and that path must keep working — every test
+    in this file predating T-611 depends on it, as does any caller built before it."""
+    chat = FakeChatClient(model="the-fake-default")
+    context = _context(chat=chat, retriever=_StubRetriever([_chunk("a grounded passage")]))
+
+    assert context.models is None
+
+    await _run(context)
+
+    assert {name for name, _ in chat.requested_models} >= {
+        "complete_json",
+        "rerank_json",
+        "stream_answer",
+    }
+    assert {model for _, model in chat.requested_models} == {"the-fake-default"}
+
+
+async def test_the_answering_model_is_recorded_as_the_one_that_answered() -> None:
+    """FR-ANL-02 stays honest across a switch: `messages.model_name` must be the id that
+    produced the text, not the configured default it was overridden from."""
+    chat = FakeChatClient()
+    context = _context(chat=chat, retriever=_StubRetriever([_chunk("a grounded passage")]))
+    object.__setattr__(context, "models", _SELECTION)
+
+    await _run(context)
+
+    assert _served(context).model_name == "model-generation"

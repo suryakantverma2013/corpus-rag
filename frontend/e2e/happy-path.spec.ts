@@ -77,6 +77,29 @@ async function reloadAndWait(page: Page): Promise<void> {
   await expect(shellReady(page)).toBeVisible({ timeout: 30_000 });
 }
 
+/**
+ * Wait for a conversation mutation to actually come back before reloading on it (T-605).
+ *
+ * A reload CANCELS whatever is still in flight, and both mutations below are optimistic — so
+ * "assert the optimistic state, then reload" quietly races the request it is trying to verify.
+ * Against a native backend on loopback the request won round-trips in a millisecond or two and
+ * the suite was green; run against the containerized stack, where the same call goes through a
+ * reverse proxy, the reload wins and the server never sees it. It surfaced as nginx logging a
+ * single `PATCH … 499` (client closed the connection) and no PATCH at all in the API log, with
+ * the sidebar showing the new title and the database still holding the old one.
+ *
+ * This does NOT weaken what the reload is for: if the mutation were a no-op, no request would be
+ * issued and this would time out — the failure the step exists to produce.
+ */
+function awaitConversationMutation(page: Page, method: 'PATCH' | 'DELETE'): Promise<unknown> {
+  return page.waitForResponse(
+    (response) =>
+      response.request().method() === method &&
+      /\/api\/v1\/conversations\/[^/]+$/.test(new URL(response.url()).pathname),
+    { timeout: 30_000 },
+  );
+}
+
 /** The sidebar's conversation list, scoped so row lookups cannot match sidebar chrome. */
 const conversationList = (page: Page): Locator => page.getByRole('list', { name: 'CONVERSATIONS' });
 
@@ -222,7 +245,9 @@ test('the whole journey: sign in, ingest, ask, cite, rate, regenerate, rename, d
     title = `E2E renamed ${RUN}`;
     const editor = row.getByRole('textbox');
     await editor.fill(title);
+    const renamed = awaitConversationMutation(page, 'PATCH');
     await editor.press('Enter');
+    await renamed;
 
     // Asserted on the *row*, not on a button matching the title: each row carries two buttons
     // whose accessible names contain it — the select button (`{title} {date} · N messages`) and
@@ -253,7 +278,9 @@ test('the whole journey: sign in, ingest, ask, cite, rate, regenerate, rename, d
     await expect(confirm).toBeVisible();
     // `Delete` is also the name of every document row's delete button, so this is dialog-scoped
     // and exact — an unscoped click here would remove a document instead.
+    const removed = awaitConversationMutation(page, 'DELETE');
     await confirm.getByRole('button', { name: 'Delete', exact: true }).click();
+    await removed;
 
     await expect(
       conversationList(page).getByRole('listitem').filter({ hasText: title }),

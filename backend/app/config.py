@@ -1222,37 +1222,81 @@ class KeycloakSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="KEYCLOAK_", env_file=".env", extra="ignore")
 
+    #: The **public** base URL — the one a browser uses, and the one Keycloak stamps into
+    #: the `iss` claim. Keycloak builds that claim from its own `KC_HOSTNAME` rather than
+    #: from the URL a request arrived on, so this must equal `KC_HOSTNAME` exactly,
+    #: including any relative path (R-81(3), measured at T-605).
     server_url: str = Field(default="http://localhost:8080")
+
+    #: The **internal** base URL for server-to-server calls, when it differs (R-82).
+    #: Empty means "same as `server_url`", which is the single-host case and stays the
+    #: default — nothing changes for a deployment that never sets it.
+    #:
+    #: It exists because one URL cannot always satisfy both readers. In a container
+    #: deployment the browser resolves a public origin while the API resolves a service
+    #: name, and `server_url` alone forces a choice: address Keycloak internally and the
+    #: FR-AUT-11 linking redirect sends the browser somewhere it cannot reach; address it
+    #: publicly and the API hairpins out through the edge and back — slower, and commonly
+    #: blocked by network policy.
+    #:
+    #: The split is by *reader*, not by convenience:
+    #:   * `issuer` (a string compared against the token), `authorization_endpoint` and
+    #:     `account_link_endpoint` (both **browser** redirects) stay on `server_url`;
+    #:   * `jwks_uri`, `token_endpoint`, `logout_endpoint`, `admin_url` and
+    #:     `broker_token_endpoint` (all **server-to-server**) use this.
+    #:
+    #: `issuer` must stay public: it is validated against what Keycloak stamped, and
+    #: pointing it here would reject every token.
+    internal_url: str = Field(default="")
+
     realm: str = Field(default="corpus")
     client_id: str = Field(default="corpus-backend")
     client_secret: str = Field(default="")
 
+    @property
+    def _internal_base(self) -> str:
+        return (self.internal_url or self.server_url).rstrip("/")
+
     @computed_field
     @property
     def issuer(self) -> str:
+        """The `iss` claim to expect, and the base for browser-facing endpoints.
+
+        Deliberately derived from `server_url` even when `internal_url` is set: this is
+        compared against the claim Keycloak signed, not fetched.
+        """
         return f"{self.server_url.rstrip('/')}/realms/{self.realm}"
 
     @computed_field
     @property
+    def internal_issuer(self) -> str:
+        """The same realm path, addressed the way the *backend* reaches it.
+
+        Equal to `issuer` unless `internal_url` is set. Never compared against a token.
+        """
+        return f"{self._internal_base}/realms/{self.realm}"
+
+    @computed_field
+    @property
     def jwks_uri(self) -> str:
-        return f"{self.issuer}/protocol/openid-connect/certs"
+        return f"{self.internal_issuer}/protocol/openid-connect/certs"
 
     @computed_field
     @property
     def token_endpoint(self) -> str:
-        return f"{self.issuer}/protocol/openid-connect/token"
+        return f"{self.internal_issuer}/protocol/openid-connect/token"
 
     @computed_field
     @property
     def logout_endpoint(self) -> str:
-        return f"{self.issuer}/protocol/openid-connect/logout"
+        return f"{self.internal_issuer}/protocol/openid-connect/logout"
 
     @computed_field
     @property
     def admin_url(self) -> str:
         # The Admin REST API lives under /admin/realms/<realm>, NOT under the
         # /realms/<realm> issuer path — deriving it from `issuer` is a 404 trap.
-        return f"{self.server_url.rstrip('/')}/admin/realms/{self.realm}"
+        return f"{self._internal_base}/admin/realms/{self.realm}"
 
     # --- Cloud-account linking (FR-AUT-11, R-63) ------------------------------
     # Corpus stores no third-party credential: Keycloak brokers the provider OAuth,
@@ -1282,14 +1326,18 @@ class KeycloakSettings(BaseSettings):
         `linkOnly: true` precisely to forbid that (T-214, proved live 2026-08-11). The
         linking flow grants it explicitly after a successful link — see
         `app.services.cloud_links.grant_read_token`.
+
+        Server-to-server, so it goes to `internal_issuer` (R-82).
         """
-        return f"{self.issuer}/broker/{alias}/token"
+        return f"{self.internal_issuer}/broker/{alias}/token"
 
     def authorization_endpoint(self) -> str:
         """The browser leg of FR-AUT-11's linking flow, on the `corpus-linking` client.
 
         Never used for login: `corpus-backend` ships `standardFlowEnabled: false` and R-28's
         ROPC grant is the only login path (R-63(2)).
+
+        A **browser** redirect, so it stays on the public `issuer` (R-82).
         """
         return f"{self.issuer}/protocol/openid-connect/auth"
 
@@ -1299,6 +1347,8 @@ class KeycloakSettings(BaseSettings):
         Requires a browser SSO session — with none it redirects straight back carrying
         ``link_error=not_logged_in`` (measured, T-214), which is the whole reason linking is
         two legs rather than one: leg 1 authenticates the browser, leg 2 links.
+
+        A **browser** redirect, so it stays on the public `issuer` (R-82).
         """
         return f"{self.issuer}/broker/{alias}/link"
 

@@ -276,9 +276,11 @@ async def test_the_answer_budget_comes_from_the_generation_settings() -> None:
     captured: dict[str, int] = {}
 
     class _Recording(FakeChatClient):
-        async def stream_answer(self, messages, *, max_output_tokens):  # type: ignore[no-untyped-def]
+        async def stream_answer(self, messages, *, max_output_tokens, model=None):  # type: ignore[no-untyped-def]
             captured["max_output_tokens"] = max_output_tokens
-            return await super().stream_answer(messages, max_output_tokens=max_output_tokens)
+            return await super().stream_answer(
+                messages, max_output_tokens=max_output_tokens, model=model
+            )
 
     await generate_answer(
         query=QUERY,

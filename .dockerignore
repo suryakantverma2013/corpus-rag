@@ -1,0 +1,71 @@
+# Build context for BOTH images (T-605).
+#
+# The context is the repository root, not backend/ or frontend/: the frontend image's
+# `npm run api:generate` reads ../backend/openapi.json, and the frontend runtime stage
+# copies deployment/nginx/*. One context means one ignore file, which is the only way
+# this stays honest as the tree grows.
+
+.git
+.gitignore
+
+# ---- never in an image ----
+# There is a node_modules/ at the REPO ROOT as well as in frontend/, hence the glob.
+**/node_modules
+**/.venv
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+**/.deepeval
+
+# Secrets and local config. `backend/.env` is the developer's, never the image's — the
+# container is configured entirely by compose environment.
+**/.env
+!**/.env.example
+client_secret_*.json
+*client_secret*.json
+credentials.json
+
+# ---- build outputs (rebuilt inside the image; copying them in would shadow the fresh build) ----
+frontend/dist
+frontend/.vite
+**/*.tsbuildinfo
+build/
+dist/
+*.egg-info/
+
+# ---- test artifacts and local data ----
+backend/tests
+backend/evals/results
+frontend/e2e/.artifacts
+frontend/playwright-report
+frontend/test-results
+frontend/fidelity/screenshots
+.data/
+pgdata/
+minio-data/
+*.log
+*.sqlite
+*.sqlite3
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# ---- private to this working copy: gitignored, and doubly excluded here ----
+planning
+ReferenceDocs
+RAG Chatbot GUI Design
+Nexus_AI_Detailed_Specification.md
+CLAUDE.md
+.claude
+
+# ---- editor / OS ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*~

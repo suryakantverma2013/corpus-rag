@@ -333,6 +333,7 @@ async def classify_query(
     chat: ChatClient,
     history: Iterable[HistoryTurn] = (),
     settings: Settings | None = None,
+    model: str | None = None,
 ) -> RouterDecision:
     """Classify one query and derive its retrieval probes. **Never raises** (R-45(2)).
 
@@ -355,6 +356,8 @@ async def classify_query(
             schema=ROUTER_SCHEMA,
             schema_name=ROUTER_SCHEMA_NAME,
             max_output_tokens=router.max_output_tokens,
+            # `None` means `OPENAI_ROUTER_MODEL` (T-611, R-83).
+            model=model,
         )
     except Exception as exc:
         # Every failure is the same failure from here: no classification. The *code* is

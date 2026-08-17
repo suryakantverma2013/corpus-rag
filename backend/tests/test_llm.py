@@ -725,3 +725,122 @@ async def test_live_router_call_returns_a_valid_class() -> None:
 
     assert result.data["query_class"] in CLASSES
     assert isinstance(result.data["probes"], list)
+
+
+# --- runtime model overrides (T-611, R-83) ------------------------------------
+
+
+async def test_a_per_call_model_overrides_the_configured_one_at_every_call_site(
+    respx_mock: Any,
+) -> None:
+    """The operator's runtime selection has to reach the wire, not merely the seam.
+
+    Asserted against the real client rather than `FakeChatClient`, because the graph-level
+    wiring test drives the fake and so cannot see this line at all — a mutation dropping
+    `model or ...` here left that test green, which is what this exists to catch.
+    """
+    import json
+
+    for method, kwargs in (
+        ("complete_json", {"schema": _SCHEMA, "schema_name": "s", "max_output_tokens": 64}),
+        ("rerank_json", {"schema": _SCHEMA, "schema_name": "s", "max_output_tokens": 64}),
+        ("evaluate_json", {"schema": _SCHEMA, "schema_name": "s", "max_output_tokens": 64}),
+    ):
+        route = respx_mock.post(_URL).respond(json=_body())
+        client = _client()
+        try:
+            await getattr(client, method)(
+                [{"role": "user", "content": "hi"}], model="operator-choice", **kwargs
+            )
+        finally:
+            await client.aclose()
+        sent = json.loads(route.calls.last.request.content)["model"]
+        assert sent == "operator-choice", f"{method} sent {sent!r}"
+
+
+async def test_a_streamed_answer_requests_the_overridden_model(respx_mock: Any) -> None:
+    """The override reaches the wire.
+
+    What is *reported* is deliberately not asserted here: the provider echoes the model it
+    resolved in every chunk — usually a dated snapshot such as `gpt-4o-2024-08-06` — and
+    `AnswerStream` prefers that echo, which is the more precise record for
+    `messages.model_name`. The next test pins the fallback when there is no echo.
+    """
+    import json
+
+    _stream_response(
+        respx_mock,
+        _sse(_delta_chunk("Refunds take 30 days."), _delta_chunk(finish_reason="stop")),
+    )
+    client = OpenAIChatClient(_generation_settings())
+    try:
+        stream = await client.stream_answer(
+            [{"role": "user", "content": "hi"}],
+            max_output_tokens=64,
+            model="operator-choice",
+        )
+        await stream.collect()
+    finally:
+        await client.aclose()
+
+    assert json.loads(respx_mock.calls.last.request.content)["model"] == "operator-choice"
+
+
+async def test_an_unechoed_stream_reports_the_overridden_model_not_the_configured_one(
+    respx_mock: Any,
+) -> None:
+    """The fallback, and it is the half with a user-visible consequence.
+
+    `AnswerStream.model` becomes `messages.model_name`. With no echo to correct it, a client
+    that called the override but seeded the stream with `OPENAI_CHAT_MODEL` would name a
+    model that did not write the answer — FR-ANL-02 pointing at the wrong thing, with
+    nothing failing anywhere.
+    """
+    _stream_response(respx_mock, _sse({"choices": [{"index": 0, "delta": {"content": "hi"}}]}))
+    client = OpenAIChatClient(_generation_settings())
+    try:
+        stream = await client.stream_answer(
+            [{"role": "user", "content": "hi"}],
+            max_output_tokens=64,
+            model="operator-choice",
+        )
+        result = await stream.collect()
+    finally:
+        await client.aclose()
+
+    assert result.model == "operator-choice"
+
+
+async def test_omitting_the_model_keeps_the_configured_default(respx_mock: Any) -> None:
+    """The whole compatibility guarantee: a caller that knows nothing of T-611 is unchanged."""
+    import json
+
+    route = respx_mock.post(_URL).respond(json=_body())
+    client = _client()
+    try:
+        await client.complete_json(
+            [{"role": "user", "content": "hi"}],
+            schema=_SCHEMA,
+            schema_name="s",
+            max_output_tokens=64,
+        )
+    finally:
+        await client.aclose()
+
+    assert json.loads(route.calls.last.request.content)["model"] == "gpt-4o-mini"
+
+
+async def test_verify_model_asks_the_provider_and_translates_its_refusal(
+    respx_mock: Any,
+) -> None:
+    """R-83(3)'s probe. A 404 from the provider must arrive as a `ChatError`, or the CLI
+    cannot tell "no such model" from a bug and would persist the id anyway."""
+    respx_mock.get("https://api.openai.com/v1/models/gtp-4o").respond(
+        status_code=404, json={"error": {"message": "The model does not exist"}}
+    )
+    client = _client()
+    try:
+        with pytest.raises(ChatError):
+            await client.verify_model("gtp-4o")
+    finally:
+        await client.aclose()

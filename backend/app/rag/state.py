@@ -47,6 +47,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from app.rag.retrieval import Retriever
     from app.services.embeddings import EmbeddingClient
     from app.services.llm import ChatClient
+    from app.services.model_selection import ModelSelection
     from app.services.processing_lock import ProcessingLockStore
 
 __all__ = [
@@ -289,4 +290,12 @@ class RAGContext:
     #: an empty slot simply means `retrieve` searches the query itself, exactly as it did
     #: before T-311. Default-constructed, so no caller has to know it exists.
     prefetch: QueryArmPrefetch = field(default_factory=QueryArmPrefetch)
+    #: The operator's runtime model selection (T-611, R-83), resolved **once** at turn start
+    #: so a write between two supersteps cannot make one turn route with one model and
+    #: generate with another. Here rather than in `RAGState` for the reason authorization is
+    #: here: it must not survive a checkpoint — a run resumed after an operator moved the
+    #: answer model should use the model in force *now*, not the one recorded when the
+    #: conversation started (R-42(3), the same argument one subject over). `None` means the
+    #: configured `OPENAI_*` defaults, which is what every test that does not care gets.
+    models: ModelSelection | None = None
     is_admin: bool = False

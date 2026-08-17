@@ -34,6 +34,7 @@ from app.config import Settings, get_settings
 from app.rag.generation import split_answer_segments
 from app.rag.groundedness import GroundednessReport, assess
 from app.services.llm import ChatClient
+from app.services.model_selection import ModelSelection
 
 __all__ = [
     "EVAL_COMPLETED",
@@ -310,10 +311,12 @@ class DeepEvalEvaluator:
         settings: Settings | None = None,
         *,
         escalate: bool = True,
+        models: ModelSelection | None = None,
     ) -> None:
         self._settings = settings or get_settings()
         self._chat = chat
         self._escalate = escalate
+        self._models = models
         self._judges: dict[str, Any] = {}
 
     async def score(
@@ -350,7 +353,15 @@ class DeepEvalEvaluator:
         score = await self._measure(metric_cls, case, name, model=base_model)
 
         cut = self._settings.eval.escalate_below
-        stronger = self._settings.openai.judge_escalation_model
+        # Both tiers come from the same selection or neither does (T-611, R-83). Reading the
+        # override for `judge` alone would silently *arm* escalation, which is dormant only
+        # while the two ids are equal — an operator moving the judge would get a second
+        # judge call per metric they never asked for.
+        stronger = (
+            self._models.judge_escalation
+            if self._models is not None
+            else self._settings.openai.judge_escalation_model
+        )
         if (
             not self._escalate
             or score is None
@@ -443,11 +454,24 @@ class DeepEvalEvaluator:
         return judge
 
     def _chat_model_name(self) -> str:
+        """The base judge: the operator's override, else the client's own, else the setting.
+
+        The override is checked *first* and the client's `judge_model` second. That order is
+        the point of the feature — the fake exposes `judge_model` so tests can observe which
+        tier was asked, and leaving it ahead would make the override unreachable in exactly
+        the configuration every test runs under.
+        """
+        if self._models is not None:
+            return self._models.judge
         return getattr(self._chat, "judge_model", self._settings.openai.judge_model)
 
 
 def build_evaluator(
-    chat: ChatClient, settings: Settings | None = None, *, escalate: bool = True
+    chat: ChatClient,
+    settings: Settings | None = None,
+    *,
+    escalate: bool = True,
+    models: ModelSelection | None = None,
 ) -> Evaluator:
     """Build the judge. Returns the :class:`Evaluator` Protocol, never the concrete class.
 
@@ -463,4 +487,4 @@ def build_evaluator(
         import os
 
         os.environ.setdefault("DEEPEVAL_TELEMETRY_OPT_OUT", "true")
-    return DeepEvalEvaluator(chat, settings, escalate=escalate)
+    return DeepEvalEvaluator(chat, settings, escalate=escalate, models=models)

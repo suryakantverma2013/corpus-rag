@@ -292,6 +292,7 @@ async def rerank_passages(
     sources: Sequence[PromptSource],
     chat: ChatClient,
     settings: Settings | None = None,
+    model: str | None = None,
 ) -> RerankOutcome:
     """Score, order and truncate one turn's candidates. **Never raises** (R-47(2)).
 
@@ -328,6 +329,8 @@ async def rerank_passages(
                 schema=RERANK_SCHEMA,
                 schema_name=RERANK_SCHEMA_NAME,
                 max_output_tokens=config.max_output_tokens,
+                # `None` means `OPENAI_RERANK_MODEL` (T-611, R-83).
+                model=model,
             )
         return parse_scores(result.data, count=len(batch), scale=config.score_scale), result
 
