@@ -32,6 +32,7 @@ from app.ingestion.chunker import (
 from app.ingestion.parsers import parse_document_sync
 from app.ingestion.parsers.base import (
     PREPROCESSING_VERSION,
+    Extraction,
     LocatorKind,
     ParsedBlock,
     ParsedDocument,
@@ -50,10 +51,10 @@ def _settings(**overrides) -> ChunkerSettings:
     return ChunkerSettings(**(base | overrides))
 
 
-def _parsed(*texts: str, locators=None) -> ParsedDocument:
+def _parsed(*texts: str, locators=None, extraction=Extraction.TEXT) -> ParsedDocument:
     locators = locators or [page_locator(index + 1) for index in range(len(texts))]
     blocks = tuple(
-        ParsedBlock(text=text, locator=locator, order=order)
+        ParsedBlock(text=text, locator=locator, order=order, extraction=extraction)
         for order, (text, locator) in enumerate(zip(texts, locators, strict=True))
     )
     return ParsedDocument(suffix=".pdf", blocks=blocks, page_count=len(blocks))
@@ -256,7 +257,35 @@ def test_chunk_metadata_shape() -> None:
         "embedding_model": MODEL,
         "chunking_version": effective_chunking_version(_settings()),
         "preprocessing_version": PREPROCESSING_VERSION,
+        "extraction": "text",
     }
+
+
+def test_a_recognised_block_is_marked_ocr_in_the_chunk_metadata() -> None:
+    """R-88(7): provenance travels block -> chunk -> `document_chunks.metadata`.
+
+    Without it "the citation is garbled" cannot be told from "the document is garbled", which
+    is the whole reason the marker exists. Asserted on a *split* block as well, because
+    `split_text` hands every part one shared `Locator` — a marker put there instead of on the
+    block would be indistinguishable from this until a page overflowed.
+    """
+    chunked = _chunk(_sentences(30), extraction=Extraction.OCR)
+    assert len(chunked.chunks) > 1
+    assert {chunked.meta_for(chunk)["extraction"] for chunk in chunked.chunks} == {"ocr"}
+
+
+def test_the_marker_does_not_reach_the_fingerprint() -> None:
+    """Metadata is not a fingerprint input, and that is what makes enabling OCR additive.
+
+    If it were, turning recognition on would invalidate every existing chunk in the corpus —
+    a fleet-wide re-embed disguised as a feature flag. The one legitimate bump is T-220's
+    `PREPROCESSING_VERSION` change, which is deliberate and driven.
+    """
+    text = "A short single-chunk page."
+    as_text = _chunk(text, extraction=Extraction.TEXT).chunks[0]
+    as_ocr = _chunk(text, extraction=Extraction.OCR).chunks[0]
+    assert as_text.embedding_fingerprint == as_ocr.embedding_fingerprint
+    assert as_text.chunk_hash == as_ocr.chunk_hash
 
 
 def test_section_locators_survive_into_the_metadata() -> None:

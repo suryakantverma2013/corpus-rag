@@ -9,6 +9,7 @@ Values come from the environment / a local `.env`; defaults align with the
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from typing import ClassVar, Literal
 from urllib.parse import urlsplit, urlunsplit
@@ -160,6 +161,99 @@ class ParserSettings(BaseSettings):
     csv_max_rows: int = Field(default=200_000)  # TBD(§8.4)
     csv_max_columns: int = Field(default=1_000)  # TBD(§8.4)
     csv_rows_per_block: int = Field(default=50)  # TBD(§8.4)
+
+    # FR-ING-07 optical character recognition (T-217, R-88 §8.78). Ships **off**: R-88(12)
+    # makes that the deliberate default, because the feature adds a container, a language
+    # pack and a large latency term to every PDF ingestion, while R-88(9) makes its absence
+    # a clean degradation rather than a failure. This is the `EVAL_ENABLED` test rather than
+    # the `GATE_ENABLED` one — the off state removes an enrichment, not a requirement, since
+    # FR-ING-01's contract is unchanged without it.
+    #
+    # The sidecar's *connection* is :class:`OcrSettings`, on the ScannerSettings/ClamAVSettings
+    # precedent; what follows is the recognition *policy*, added by T-218 because T-218 is
+    # what reads it. Every literal is provisional under §8.4 and none is a correctness
+    # boundary — each trades recognition quality against ingestion cost, so each is an
+    # operator decision to be settled by measurement on a real scanned corpus.
+    ocr_enabled: bool = Field(default=False)  # TBD(§8.4)
+
+    # Rasterisation resolution. Fixed rather than adaptive: R-88(1) makes the recognised text
+    # an input to `embedding_fingerprint`, so the raster the engine sees has to be a function
+    # of the page alone. 300 is also the DPI T-217 measured byte-reproducibility at.
+    ocr_dpi: int = Field(default=300)  # TBD(§8.4)
+
+    # Not polish — the guard that keeps a hand-crafted mediabox from OOM-ing the worker.
+    # `get_pixmap` allocates raw samples in-process *before* anything can inspect the encoded
+    # result, so `OCR_MAX_IMAGE_BYTES` (which weighs the PNG) is far too late: A4 at 300 DPI is
+    # ~26 MB, but an A0 page at the same DPI is ~418 megapixels, i.e. over a gigabyte, and the
+    # worker parses several documents at once. Over this ceiling the render is **scaled down
+    # deterministically** rather than skipped — a function of the page's own mediabox, so two
+    # runs cannot disagree (R-88(1)). This is the NFR-SEC-09 surface reached with no decoder
+    # defect at all, just an unusual page size.
+    ocr_max_render_pixels: int = Field(default=40_000_000)  # TBD(§8.4)
+
+    # R-88(8): a page whose mean word confidence falls below this contributes **no block**,
+    # exactly as an empty page does — garbled OCR is not merely useless, it damages trust in
+    # the FR-CIT-06 quote and pollutes the index with tokens no user would type. Tesseract's
+    # own 0–100 scale. Deliberately conservative, under R-49(4)'s standing rule: if healthy
+    # documents cluster below it, the metric is wrong rather than the number.
+    ocr_min_confidence: float = Field(default=60.0)  # TBD(§8.4)
+
+    # R-88(11), first half: how many pages of one document may be recognised. A document
+    # exceeding it is **not failed** — it ingests the pages it managed, because a partially
+    # searchable scan is more useful than a rejected one, and R-34(5)'s caps-reject-never-
+    # truncate rule governs *input size limits*, not how much optional enrichment ran.
+    #
+    # Sized so it binds **before** the wall clock below on any nominal document, which matters
+    # for a reason easy to miss: a ceiling is a deterministic function of the document, a clock
+    # is not, so a clock-truncated scan recognises more pages on a fast host than a slow one
+    # and produces a different chunk set each time — precisely the reuse-defeating
+    # non-determinism R-88(1) exists to prevent. At the ~2.25 s/page measured on this hardware
+    # (300 DPI A4, render plus recognition), 200 pages is ~450 s of the 600 s budget, so the
+    # clock only fires on a host or a corpus around a third slower than measured. The damage
+    # when it does is bounded — a re-embed of the delta on the next ingestion, never a wrong
+    # answer — and it is logged rather than silent.
+    ocr_max_pages: int = Field(default=200)  # TBD(§8.4)
+
+    # R-88(11), second half, and the knob that makes its guarantee true rather than nominal.
+    # The per-page timeout the ruling names already exists as `OCR_TIMEOUT_SECONDS` (60s,
+    # T-217), so a page ceiling alone would have to sit near 14 to keep `ceiling × per-page`
+    # inside `WORKER_JOB_TIMEOUT_SECONDS` — useless for a real scan. This is a whole-document
+    # wall clock checked **between** pages, so the worst case is `budget + one in-flight page`
+    # (600 + 60 = 660s against a 900s job timeout) whatever the ceiling is. That matters
+    # because R-41(5) derives the FR-KBM-09 `stalled` flag from the job timeout: an unbounded
+    # recognition pass renders a *healthy* long ingestion as stalled in the user's KB list.
+    # The worst case spans three groups, so `Settings._coherent` is what refuses one that does
+    # not fit.
+    ocr_budget_seconds: float = Field(default=600.0)  # TBD(§8.4)
+
+    # R-88(4): an embedded raster on an otherwise-textual page is recognised only when it is
+    # plausibly textual, bounded by area **and** by pixel dimension. Most images in a document
+    # corpus are logos, rules and decorative marks, and recognising every one of them is
+    # unbounded work for no gain. A cost control, not a correctness rule.
+    # The two are measured off **different** properties and must stay that way: the area
+    # fraction comes from the image's placement box on the page, the pixel floor from its
+    # native stored dimensions. Reading both off one of them is wrong in opposite directions
+    # — a huge scan dropped into a stamp-sized box, or a 40x40 icon stretched page-wide.
+    ocr_min_image_area: float = Field(default=0.15)  # TBD(§8.4)
+    ocr_min_image_pixels: int = Field(default=400)  # TBD(§8.4)
+
+    @model_validator(mode="after")
+    def _coherent(self) -> ParserSettings:
+        if not 72 <= self.ocr_dpi <= 600:
+            raise ValueError("PARSER_OCR_DPI must be between 72 and 600")
+        if self.ocr_max_render_pixels < 1_000_000:
+            raise ValueError("PARSER_OCR_MAX_RENDER_PIXELS must be >= 1,000,000")
+        if not 0.0 <= self.ocr_min_confidence <= 100.0:
+            raise ValueError("PARSER_OCR_MIN_CONFIDENCE must be between 0 and 100")
+        if self.ocr_max_pages < 0:
+            raise ValueError("PARSER_OCR_MAX_PAGES must be >= 0")
+        if self.ocr_budget_seconds <= 0:
+            raise ValueError("PARSER_OCR_BUDGET_SECONDS must be > 0")
+        if not 0.0 < self.ocr_min_image_area <= 1.0:
+            raise ValueError("PARSER_OCR_MIN_IMAGE_AREA must be in (0, 1]")
+        if self.ocr_min_image_pixels < 1:
+            raise ValueError("PARSER_OCR_MIN_IMAGE_PIXELS must be >= 1")
+        return self
 
 
 #: Ceiling on the characters in one embedding input. `text-embedding-3-*` accepts
@@ -393,6 +487,61 @@ class ClamAVSettings(BaseSettings):
             raise ValueError("CLAMAV_CHUNK_BYTES must be >= 1024")
         if self.timeout_seconds <= 0 or self.ping_timeout_seconds <= 0:
             raise ValueError("CLAMAV_*_TIMEOUT_SECONDS must be > 0")
+        return self
+
+
+#: Tesseract language codes are alphanumeric with underscores (`eng`, `chi_sim`,
+#: `deu_frak`) and combine with `+`. Pinned here as well as in the sidecar because the
+#: value ends up in that process's argv.
+_OCR_LANGUAGES_RE = re.compile(r"\A[A-Za-z0-9_]{1,32}(?:\+[A-Za-z0-9_]{1,32})*\Z")
+
+
+class OcrSettings(BaseSettings):
+    """OCR sidecar connection for FR-ING-07 recognition (T-217, R-88 §8.78).
+
+    Separate from :class:`ParserSettings` on the same grounds that separate
+    :class:`ClamAVSettings` from :class:`ScannerSettings`: that class holds worker-side
+    ceilings on what a parser may *expand* a 50 MB original into, and a host and port are
+    not that. The R-88(12) on/off switch stays there, next to the parser that consults it.
+
+    There is deliberately **no backend selector** here — no ``OCR_BACKEND``, no seam. R-88(1)
+    refuses one explicitly: the only alternative vendor class is the hosted-vision one it
+    just excluded on correctness grounds, so a seam would advertise a substitution that must
+    not be made. ``PARSER_OCR_ENABLED=false`` is the off state, and it is the only one.
+
+    ``languages`` is Tesseract's own syntax (``eng``, ``eng+deu``) and is validated here as
+    well as inside the sidecar, because it reaches that process's ``argv``. Two validations
+    of one value is not redundancy: the client's refusal is what keeps a malformed setting
+    from becoming a request at all.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="OCR_", env_file=".env", extra="ignore")
+
+    host: str = Field(default="localhost")
+    port: int = Field(default=8884)
+    # A 300 DPI page is seconds, not milliseconds; this is the whole-call budget, and the
+    # per-page ceiling R-88(11) sizes against `WORKER_JOB_TIMEOUT_SECONDS` is T-218's.
+    timeout_seconds: float = Field(default=60.0)  # TBD(§8.4)
+    # Readiness probes must fail fast — they recognise nothing.
+    ping_timeout_seconds: float = Field(default=2.0)  # TBD(§8.4)
+    # Refused before the request is made, so a page rendered at an absurd DPI costs no
+    # transfer. The sidecar enforces the same ceiling independently.
+    max_image_bytes: int = Field(default=32 * 1024 * 1024)  # TBD(§8.4)
+    languages: str = Field(default="eng")  # TBD(§8.4)
+
+    @model_validator(mode="after")
+    def _coherent(self) -> OcrSettings:
+        if self.timeout_seconds <= 0 or self.ping_timeout_seconds <= 0:
+            raise ValueError("OCR_*_TIMEOUT_SECONDS must be > 0")
+        if not 1 <= self.port <= 65_535:
+            raise ValueError("OCR_PORT must be a valid TCP port")
+        if self.max_image_bytes < 1024:
+            raise ValueError("OCR_MAX_IMAGE_BYTES must be >= 1024")
+        if not _OCR_LANGUAGES_RE.fullmatch(self.languages):
+            raise ValueError(
+                "OCR_LANGUAGES must be Tesseract language codes joined by '+' "
+                "(e.g. 'eng' or 'eng+deu')"
+            )
         return self
 
 
@@ -1481,6 +1630,7 @@ class Settings(BaseSettings):
     sse: SseSettings = Field(default_factory=SseSettings)
     scanner: ScannerSettings = Field(default_factory=ScannerSettings)
     clamav: ClamAVSettings = Field(default_factory=ClamAVSettings)
+    ocr: OcrSettings = Field(default_factory=OcrSettings)
     ratelimit: RateLimitSettings = Field(default_factory=RateLimitSettings)
     openai: OpenAISettings = Field(default_factory=OpenAISettings)
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
@@ -1568,6 +1718,25 @@ class Settings(BaseSettings):
                 "second cycle repeats the first's inputs at full latency cost (R-49, §8.4). "
                 "Set 0 to abstain on the first gate failure."
             )
+        # R-88(11): the OCR bound spans three groups — the budget is `PARSER_*`, the per-page
+        # timeout is `OCR_*`, and the thing they have to fit inside is `WORKER_*` — so it
+        # cannot live on any of them. The budget is checked *between* pages, so at most one
+        # page is in flight past it, bounded by the client's read timeout: worst case is
+        # `budget + per-page`. A configuration where that exceeds the job timeout does not
+        # merely run long, it makes R-41(5)'s `stalled` flag lie about a healthy ingestion,
+        # and arq kills the job with the document mid-pipeline. Checked only when recognition
+        # is on, because with `PARSER_OCR_ENABLED=false` neither knob is read.
+        if self.parser.ocr_enabled:
+            worst_case = self.parser.ocr_budget_seconds + self.ocr.timeout_seconds
+            if worst_case > self.worker.job_timeout_seconds:
+                raise ValueError(
+                    f"PARSER_OCR_BUDGET_SECONDS ({self.parser.ocr_budget_seconds:,.0f}) + "
+                    f"OCR_TIMEOUT_SECONDS ({self.ocr.timeout_seconds:,.0f}) = "
+                    f"{worst_case:,.0f}s must be <= WORKER_JOB_TIMEOUT_SECONDS "
+                    f"({self.worker.job_timeout_seconds:,.0f}) — recognition is bounded by a "
+                    "budget plus one in-flight page, and a worst case past the job timeout "
+                    "renders a healthy long ingestion as stalled (R-88(11), R-41(5))."
+                )
         return self
 
     # R-41(5): the stall threshold spans two groups, so like the invariant above it cannot

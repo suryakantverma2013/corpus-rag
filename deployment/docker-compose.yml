@@ -7,11 +7,13 @@
 #   docker compose --profile minio    up -d   # + MinIO object storage
 #   docker compose --profile postgres up -d   # + pgvector Postgres
 #   docker compose --profile clamav   up -d   # + ClamAV malware scanner (T-207, R-32)
+#   docker compose --profile ocr      up -d   # + Tesseract OCR sidecar (T-217, R-88)
 #
 # Usage (from repo root):
 #   docker compose -f deployment/docker-compose.yml up -d                    # redis only
 #   docker compose -f deployment/docker-compose.yml --profile minio up -d    # redis + minio
 #   docker compose -f deployment/docker-compose.yml --profile clamav up -d   # redis + clamav
+#   docker compose -f deployment/docker-compose.yml --profile ocr up -d --build  # redis + ocr
 #   docker compose -f deployment/docker-compose.yml down
 #
 # Credentials here are DEV DEFAULTS and match backend/.env(.example). Override via
@@ -115,8 +117,52 @@ services:
       retries: 5
       start_period: 180s
 
+  # FR-ING-07 optical character recognition (T-217, ruling R-88 / spec §8.78).
+  #
+  # NFR-SEC-09 is why this is a container rather than a library call: recognition is the
+  # first ingestion step that *renders* attacker-supplied content, so the image decoders and
+  # the engine sit outside the worker, where a defect in them cannot reach its database
+  # session or its object-storage credentials. The worker rasterises the page and sends a
+  # PNG; nothing leaves the deployment.
+  #
+  # Profile-gated like ClamAV, and additionally off by default in the application
+  # (PARSER_OCR_ENABLED=false, R-88(12)) — with the profile down and the flag false, PDF
+  # ingestion behaves exactly as it did before Rev 0.55.
+  #
+  # Built rather than pulled: the image pins its base by digest and Tesseract by Debian
+  # version, because R-88(1) makes byte-reproducible recognition a *correctness* property —
+  # text that differs between two passes over one page leaves `embedding_fingerprint` reuse
+  # permanently empty and turns every re-ingestion into a silent full re-embed.
+  ocr:
+    build: ./ocr
+    profiles: ["ocr"]
+    ports:
+      # Published because the application runs natively on the dev box (§8.67): the worker
+      # reaches the sidecar on localhost, not over a compose network.
+      - "${OCR_PORT:-8884}:8884"
+    volumes:
+      # The extension point for extra language packs: drop a `.traineddata` in and set
+      # OCR_LANGUAGES. A named volume seeds itself from the image ONLY while it is empty, so
+      # after rebuilding with a different pinned pack you must `docker volume rm` this one —
+      # otherwise the deployment quietly keeps recognising with the old data. The sidecar's
+      # `GET /health` reports a digest per pack so that state is visible rather than assumed.
+      - ocr-tessdata:/usr/share/tesseract-ocr/5/tessdata
+    # Recognition is CPU- and memory-bounded per page, not a resident database like clamd's
+    # signatures; this is headroom for a large page at 300 DPI, not a working set.
+    mem_limit: 1g
+    healthcheck:
+      # The image has Python and deliberately not curl. Probe over the loopback address
+      # rather than a name, on R-81(5)'s lesson: the stock ClamAV probe pinged `localhost`,
+      # resolved ::1, and reported a healthy daemon unhealthy forever.
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8884/health').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
 volumes:
   minio-data:
   redis-data:
   pgdata:
   clamav-data:
+  ocr-tessdata:

@@ -32,6 +32,12 @@ The worker arm adds:
 * **clamav** — ``PING`` over the T-207 INSTREAM client. Only probed when
   ``SCANNER_BACKEND=clamav``; under ``structural`` there is no daemon to reach and
   reporting one down would be a false alarm.
+* **ocr** — ``GET /health`` on the FR-ING-07 recognition sidecar (T-217, R-88). Only
+  probed when ``PARSER_OCR_ENABLED=true``, for the reason ``clamav`` is gated: with the
+  feature off there is no sidecar to reach. It sits on the **worker** arm and nowhere else
+  — R-81(5)'s split — because a dead OCR engine must never pull the chat surface out of
+  service, and R-88(9) makes recognition fail open, so its absence degrades ingestion
+  rather than breaking it.
 * **worker** — the arq heartbeat key. arq's ``record_health`` rewrites it every
   ``health_check_interval`` with a TTL of ``interval + 1``, so the key's *existence* is
   the liveness signal and expiry does the timing for us — no clock comparison, and no
@@ -53,6 +59,7 @@ from app.db.session import get_engine
 from app.services.clamav import get_clamav_client
 from app.services.jobs import WORKER_HEALTH_CHECK_KEY
 from app.services.object_storage import get_object_storage
+from app.services.ocr import get_ocr_client
 
 # Per-probe wall-clock ceiling. Provisional pending the §8.4 decision. Kept short so
 # an unreachable dependency fails the probe fast rather than hanging the endpoint.
@@ -133,6 +140,23 @@ async def check_clamav() -> CheckResult:
         return _error(exc)
 
 
+async def check_ocr() -> CheckResult:
+    """Probe the OCR sidecar's ``/health`` (R-88; worker readiness only).
+
+    Wrapped in ``asyncio.to_thread`` because the client is deliberately synchronous (see
+    ``app.services.ocr``). The thread cannot be cancelled, so the real bound here is the
+    client's own ``OCR_PING_TIMEOUT_SECONDS`` rather than the ``asyncio.timeout`` around it;
+    that budget is set well under ``_PROBE_TIMEOUT`` for exactly this reason.
+    """
+    started = time.perf_counter()
+    try:
+        async with asyncio.timeout(_PROBE_TIMEOUT):
+            await asyncio.to_thread(get_ocr_client().ping)
+        return _ok(started)
+    except Exception as exc:  # noqa: BLE001
+        return _error(exc)
+
+
 async def check_worker() -> CheckResult:
     """Probe for a live arq worker via its heartbeat key.
 
@@ -185,14 +209,17 @@ async def run_worker_readiness_checks() -> tuple[bool, ReadinessResponse]:
     without. Same ``(all_ok, payload)`` shape and same 200/503 rule as the API arm, so an
     orchestrator configures it identically against a different path.
     """
-    scanner_enabled = get_settings().scanner.backend == "clamav"
+    settings = get_settings()
+    scanner_enabled = settings.scanner.backend == "clamav"
+    ocr_enabled = settings.parser.ocr_enabled
 
-    database, broker, object_storage, worker, clamav = await asyncio.gather(
+    database, broker, object_storage, worker, clamav, ocr = await asyncio.gather(
         check_database(),
         check_broker(),
         check_object_storage(),
         check_worker(),
         check_clamav() if scanner_enabled else _skipped("SCANNER_BACKEND=structural"),
+        check_ocr() if ocr_enabled else _skipped("PARSER_OCR_ENABLED=false"),
     )
     checks = {
         "database": database,
@@ -200,6 +227,7 @@ async def run_worker_readiness_checks() -> tuple[bool, ReadinessResponse]:
         "object_storage": object_storage,
         "worker": worker,
         "clamav": clamav,
+        "ocr": ocr,
     }
     return _aggregate(checks)
 

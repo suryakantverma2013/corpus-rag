@@ -19,7 +19,7 @@ import httpx
 import pytest
 from httpx import ASGITransport
 
-from app.config import ScannerSettings, Settings
+from app.config import ParserSettings, ScannerSettings, Settings
 from app.main import create_app
 from app.services import health
 from app.services.health import CheckResult
@@ -43,6 +43,7 @@ def _patch_all_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(health, "check_object_storage", _ok)
     monkeypatch.setattr(health, "check_worker", _ok)
     monkeypatch.setattr(health, "check_clamav", _ok)
+    monkeypatch.setattr(health, "check_ocr", _ok)
 
 
 def _down(error: str):  # noqa: ANN202
@@ -113,6 +114,7 @@ async def test_worker_readiness_all_up(
         "object_storage",
         "worker",
         "clamav",
+        "ocr",
     }
 
 
@@ -169,6 +171,51 @@ async def test_the_clamav_probe_is_skipped_when_no_daemon_is_configured(
     assert resp.status_code == 200
     assert resp.json()["checks"]["clamav"]["status"] == "ok"
     assert "structural" in resp.json()["checks"]["clamav"]["error"]
+
+
+async def test_ocr_down_takes_the_worker_probe_down_but_not_the_api(
+    probe_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-81(5)'s split, applied to the second sidecar (T-217, R-88).
+
+    An OCR engine that is down must never evict the API, exactly as ClamAV must not. The
+    asymmetry with ClamAV is the *worker* half: R-32 fails a job closed on an unreachable
+    scanner, while R-88(9) makes recognition fail open, so what the red probe reports here is
+    "scanned pages will ingest without their text", not "ingestion has stopped". It is still
+    an operator's business, which is why it is a probe rather than a log line.
+    """
+    _patch_all_ok(monkeypatch)
+
+    def _ocr_on() -> Settings:
+        return Settings(parser=ParserSettings(ocr_enabled=True))
+
+    monkeypatch.setattr(health, "get_settings", _ocr_on)
+    monkeypatch.setattr(health, "check_ocr", _down("ConnectionRefusedError"))
+
+    worker = await probe_client.get("/health/ready/worker")
+    api = await probe_client.get("/health/ready")
+
+    assert worker.status_code == 503
+    assert worker.json()["checks"]["ocr"]["status"] == "error"
+
+    assert api.status_code == 200
+    assert "ocr" not in api.json()["checks"]
+
+
+async def test_the_ocr_probe_is_skipped_when_the_feature_is_off(
+    probe_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-88(12) ships the feature off, and then there is no sidecar to report down."""
+    _patch_all_ok(monkeypatch)
+    monkeypatch.setattr(
+        health, "check_ocr", _down("should not be called under PARSER_OCR_ENABLED=false")
+    )
+
+    resp = await probe_client.get("/health/ready/worker")
+
+    assert resp.status_code == 200
+    assert resp.json()["checks"]["ocr"]["status"] == "ok"
+    assert "PARSER_OCR_ENABLED=false" in resp.json()["checks"]["ocr"]["error"]
 
 
 async def test_the_worker_probe_reads_the_arq_heartbeat_key(

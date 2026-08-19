@@ -190,6 +190,30 @@ def section_locator(
 # --- parsed document ----------------------------------------------------------
 
 
+class Extraction(StrEnum):
+    """How a block's characters came to exist (R-88(7), §8.78).
+
+    Provenance rather than address, which is why it sits on the block and not on
+    :class:`Locator`: an OCR'd figure and the surrounding text share one page, so they share
+    one locator, and they must still be tellable apart. It is what makes an OCR-quality
+    complaint diagnosable at all — without it, "the citation is garbled" cannot be
+    distinguished from "the document is garbled".
+
+    ``TABLE`` is declared here and emitted by nothing yet: FR-ING-08 is T-219's, and a
+    consumer that has to grow a third case later is worse than one that already has it.
+
+    Not a fingerprint input — it travels in `document_chunks.metadata`, which
+    `embedding_fingerprint` does not read. Enabling recognition on an existing corpus is
+    therefore purely additive: every text block still hashes identically and keeps its vector,
+    and only the newly recognised blocks are embedded. The fleet-wide re-embed belongs to
+    T-220's `PREPROCESSING_VERSION` bump, not to this marker.
+    """
+
+    TEXT = "text"
+    OCR = "ocr"
+    TABLE = "table"
+
+
 @dataclass(frozen=True, slots=True)
 class ParsedBlock:
     """One addressable unit of text. T-204 chunks *within* blocks, never across them."""
@@ -197,6 +221,9 @@ class ParsedBlock:
     text: str
     locator: Locator
     order: int  # 0-based position in the document
+    #: Defaulted **and trailing** so the three formats that can only ever produce extracted
+    #: text — DOCX, MD, CSV — need no change. `pdf.py` is the one parser that sets it.
+    extraction: Extraction = Extraction.TEXT
 
 
 @dataclass(frozen=True, slots=True)

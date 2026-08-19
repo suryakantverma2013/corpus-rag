@@ -38,10 +38,23 @@ from app.ingestion.parsers.text import is_blank, normalize
 
 
 def _limits(**overrides) -> ParserSettings:
-    return ParserSettings(**overrides)
+    """Parser limits with recognition **pinned off**, never inherited from the environment.
+
+    `ParserSettings()` reads the developer's `backend/.env`, so without the pin an operator
+    who sets `PARSER_OCR_ENABLED=true` locally would silently arm the OCR sidecar inside this
+    suite — and `test_async_facade_matches_sync`, which compares two independent parses for
+    equality, would start failing on someone else's machine for a reason nothing here names.
+    Recognition has its own module: `tests/test_recognition.py`.
+    """
+    return ParserSettings(**{"ocr_enabled": False, **overrides})
 
 
 def make_pdf(pages: int = 3, *, text: bool = True, encrypt: bool = False) -> bytes:
+    """A born-digital PDF. ``text=False`` yields **blank** pages — not scanned ones.
+
+    The distinction became load-bearing with FR-ING-07: a blank page carries no raster, so it
+    is not a fixture for recognition. `tests/test_recognition.py` builds real image-only pages.
+    """
     document = pymupdf.open()
     for index in range(pages):
         page = document.new_page()
@@ -188,9 +201,17 @@ def test_pdf_locator_metadata_shape() -> None:
     assert parsed.blocks[0].locator.as_metadata() == {"kind": "page", "label": "p. 1", "page": 1}
 
 
-def test_pdf_without_text_fails_rather_than_ingesting_empty() -> None:
+def test_pdf_with_no_content_at_all_fails_rather_than_ingesting_empty() -> None:
+    """R-34(4) is unchanged by FR-ING-07 — it is only evaluated later (R-88(9)).
+
+    Named for what the fixture actually is: `text=False` produces blank pages, which have
+    nothing for a recogniser to read either. The scanned cases live in
+    `tests/test_recognition.py`, and keeping the old name here would let a reader believe
+    scans were covered by a fixture that cannot exhibit one — the same defect R-88(2) filed
+    against T-211's document-level trigger.
+    """
     with pytest.raises(NoExtractableTextError, match="OCR"):
-        parse_document_sync(make_pdf(2, text=False), filename="scan.pdf")
+        parse_document_sync(make_pdf(2, text=False), filename="scan.pdf", limits=_limits())
 
 
 def test_pdf_password_protected_is_rejected() -> None:

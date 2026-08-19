@@ -41,7 +41,13 @@ from dataclasses import dataclass
 from app.config import EMBEDDING_MAX_INPUT_CHARS, ChunkerSettings, get_settings
 from app.db.base import DEFAULT_TENANT_ID
 from app.db.models.document_chunk import DocumentChunk
-from app.ingestion.parsers.base import Locator, LocatorKind, ParsedBlock, ParsedDocument
+from app.ingestion.parsers.base import (
+    Extraction,
+    Locator,
+    LocatorKind,
+    ParsedBlock,
+    ParsedDocument,
+)
 from app.tokens import CHARS_PER_TOKEN, estimate_tokens
 
 __all__ = [
@@ -307,6 +313,12 @@ class Chunk:
     block_chunk_index: int  # 0-based ordinal within that block
     char_start: int  # span into the parent block's text (block-relative)
     char_end: int
+    #: R-88(7) provenance, inherited from the parent block. Deliberately **not** defaulted,
+    #: unlike `ParsedBlock.extraction`: that default serves three formats which can only ever
+    #: produce extracted text, whereas this has exactly one producer, and a default here would
+    #: let a future call site silently label recognised text as `text` — the one error the
+    #: marker exists to make impossible.
+    extraction: Extraction
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,6 +353,11 @@ class ChunkedDocument:
         offset. `char_count` is the length of the stored text, which for a CSV chunk
         carrying a repeated header is the only truthful one.
 
+        `extraction` is R-88(7)'s provenance marker (`text` | `ocr` | `table`), additive to the
+        R-35 contract. It is what makes an OCR-quality complaint diagnosable at all: without
+        it, "the citation is garbled" cannot be told from "the document is garbled". It is not
+        a fingerprint input, so adding it re-embeds nothing.
+
         Absent by design: `chunk_hash`, `token_count`, `tenant_id`,
         `knowledge_base_id`, `document_id`, `document_version` — every one is a first-class
         column, and duplicating a column into JSONB creates a second source of truth.
@@ -355,6 +372,7 @@ class ChunkedDocument:
             "embedding_model": self.embedding_model,
             "chunking_version": self.chunking_version,
             "preprocessing_version": self.preprocessing_version,
+            "extraction": chunk.extraction.value,
         }
 
 
@@ -407,6 +425,7 @@ def chunk_document_sync(
                     block_chunk_index=block_chunk_index,
                     char_start=start,
                     char_end=end,
+                    extraction=block.extraction,
                 )
             )
 

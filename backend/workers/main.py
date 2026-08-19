@@ -26,6 +26,7 @@ OpenAI credentials or a 2 GB `clamd`.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import structlog
@@ -49,6 +50,7 @@ from app.services.jobs import (
 )
 from app.services.llm import close_chat_client, get_chat_client
 from app.services.object_storage import close_object_storage, get_object_storage
+from app.services.ocr import close_ocr_client, get_ocr_client
 from workers.delete import delete_document
 from workers.evaluate import evaluate_message
 from workers.ingest import ingest_document
@@ -90,9 +92,23 @@ async def on_startup(ctx: dict[str, Any]) -> None:
         except Exception as exc:  # noqa: BLE001 — advisory only
             log.warning("worker.clamav_unreachable", endpoint=client.endpoint, error=str(exc))
 
+    if settings.parser.ocr_enabled:
+        # Same advisory shape as the clamd ping above, and for a weaker reason still: R-88(9)
+        # makes recognition fail *open*, so a sidecar that never comes up costs a scanned page
+        # its text and nothing else. Refusing to start would convert an optional enrichment
+        # into a hard dependency, which is precisely what R-88(12)'s default-off posture says
+        # it is not. `to_thread` because the client is synchronous by design (T-217).
+        ocr = get_ocr_client()
+        try:
+            await asyncio.to_thread(ocr.ping)
+            log.info("worker.ocr_ready", endpoint=ocr.endpoint)
+        except Exception as exc:  # noqa: BLE001 — advisory only
+            log.warning("worker.ocr_unreachable", endpoint=ocr.endpoint, error=str(exc))
+
     log.info(
         "worker.started",
         scanner=settings.scanner.backend,
+        ocr=settings.parser.ocr_enabled,
         embeddings=settings.embedding.backend,
         storage=settings.storage.backend,
         max_tries=settings.worker.max_tries,
@@ -104,6 +120,7 @@ async def on_shutdown(ctx: dict[str, Any]) -> None:
     await close_object_storage()
     await close_embedding_client()
     await close_clamav_client()
+    await close_ocr_client()
     await close_job_queue()
     await close_chat_client()
     await get_engine().dispose()

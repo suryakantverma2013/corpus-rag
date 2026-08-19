@@ -644,6 +644,14 @@ NFR_DISPOSITIONS: dict[str, NfrRow] = {
     "NFR-SEC-06": _met("scenarios row 8 — the predicate is evaluated in-query, every turn"),
     "NFR-SEC-07": _met("tests/security/test_rate_limits.py; thresholds provisional per §8.4"),
     "NFR-SEC-08": _met("tests/test_audit.py; the T-608 operator row (DOCUMENT_REPLACE + rebuild)"),
+    # By construction rather than by test, because what the requirement asks for is the
+    # *absence* of an alternative: there is no in-process recognition engine to isolate from,
+    # and no destination but the configured local sidecar. `tests/test_ocr.py` asserts both
+    # absences, which is the only form an isolation claim can take (T-217, R-88 §8.78).
+    "NFR-SEC-09": _construction(
+        "app/services/ocr.py reaches deployment/ocr over a local socket; tests/test_ocr.py "
+        "guards no in-process engine and no third-party destination"
+    ),
     # 5.3 Capacity & performance
     "NFR-CAP-01": _met("§9 defaults pinned in tests/test_budget.py and tests/test_upload.py"),
     "NFR-PRF-01": _met("StatsPanel.test.tsx advances 999ms for no tick, then 1ms for one"),

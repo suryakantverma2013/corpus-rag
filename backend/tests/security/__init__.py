@@ -627,6 +627,11 @@ NFR_SEC_ROWS: Final[dict[str, str]] = {
         "Audit logging: security- and lifecycle-relevant events are recorded in an "
         "append-only audit trail distinct from operational telemetry."
     ),
+    "NFR-SEC-09": (
+        "Recognition runs isolated: FR-ING-07 renders attacker-supplied content, so the "
+        "image decoders and the OCR engine run outside the worker process, and no page "
+        "raster, image or recognised text leaves the deployment."
+    ),
 }
 
 #: Requirements this package deliberately does not cover, and who owns them instead.
@@ -646,6 +651,15 @@ DEFERRED_NFRS: Final[dict[str, str]] = {
     "NFR-SEC-04": (
         "(D) — R-28/R-72/R-86(1): Keycloak realm configuration, guarded in "
         "tests/test_account_linking.py rather than here."
+    ),
+    # NFR-SEC-09 is a *worker* and deployment property: recognition has no request-path
+    # surface at all, so there is no route for this package's matrix to drive. It is covered,
+    # not uncovered - `tests/test_ocr.py` guards both halves (the engine is reachable only
+    # over the sidecar socket, and there is no in-process one to reach instead), and R-31's
+    # existing guard keeps rasterisation out of the API process (T-217, R-88 §8.78).
+    "NFR-SEC-09": (
+        "worker-side isolation with no request-path surface; guarded in tests/test_ocr.py "
+        "and deployment/ocr/ rather than here."
     ),
 }
 
