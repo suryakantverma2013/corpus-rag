@@ -2358,6 +2358,7 @@ _SELECTION = ModelSelection(
     rerank="model-rerank",
     judge="model-judge",
     judge_escalation="model-judge",
+    embedding="model-embedding",
 )
 
 

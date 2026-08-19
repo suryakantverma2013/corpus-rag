@@ -43,6 +43,7 @@ async def test_an_empty_table_resolves_to_the_configured_defaults(session: Async
         rerank=openai.rerank_model,
         judge=openai.judge_model,
         judge_escalation=openai.judge_escalation_model,
+        embedding=openai.embedding_model,
     )
 
 
@@ -97,11 +98,13 @@ async def test_setting_the_same_slot_twice_keeps_one_row(session: AsyncSession) 
 async def test_an_unknown_slot_in_the_table_is_ignored(session: AsyncSession) -> None:
     """A row this version does not understand must not break the turn.
 
-    Not defensive padding: `embedding` becomes a slot once T-608 lands, and a process rolled
-    back to an older build has to keep answering while a newer one's row sits in the table.
+    Not defensive padding: `embedding` was exactly this case until T-612 added it, and the
+    next slot will be too — a process rolled back to an older build has to keep answering
+    while a newer one's row sits in the table. Re-pointed at a name no version has ever
+    known, because the moment `embedding` became real this test stopped testing anything.
     """
     await session.execute(
-        text("INSERT INTO model_overrides (slot, model_id) VALUES ('embedding', 'whatever')")
+        text("INSERT INTO model_overrides (slot, model_id) VALUES ('summariser', 'whatever')")
     )
 
     selection = await resolve_models(session)
@@ -154,17 +157,40 @@ async def test_clearing_an_unset_slot_reports_that_nothing_was_cleared(
 # --- the slot vocabulary ------------------------------------------------------
 
 
-def test_there_is_no_embedding_slot() -> None:
-    """R-83(4), pinned so that adding one trips a test that explains why it must not.
+def test_the_embedding_slot_exists_and_what_it_costs_to_use(
+    session: AsyncSession,
+) -> None:
+    """R-87, the successor to R-83(4)'s pin — **rewritten rather than deleted**.
 
-    `OPENAI_EMBEDDING_MODEL` is an FR-ING-03 fingerprint input read by the chunker. Changing
-    it at runtime leaves existing chunks holding model-A vectors while new ingests write
-    model-B ones, and both are then compared in the same cosine query — silently wrong
-    retrieval, not a degraded ranking, with nothing failing anywhere. T-608 owns the
-    controlled re-embed that has to come first; until it exists this slot must not.
+    The hazard R-83(4) named is unchanged and always will be: `OPENAI_EMBEDDING_MODEL` is an
+    FR-ING-03 fingerprint input read by the chunker, so a flip leaves existing chunks holding
+    model-A vectors while new ingests write model-B ones, and both are then compared in the
+    same cosine query with nothing failing anywhere.
+
+    What changed is the *recovery*, and that is the whole basis on which this slot is
+    admitted. T-608 made the drift **visible** — the staleness report reads the provenance
+    each chunk recorded, so an operator can enumerate exactly which documents are in the old
+    space — and **finite**, because `tools.reembed run` converts them. The window is now a
+    state you can price and drain rather than one you cannot see.
+
+    Three properties hold it together, and each is asserted somewhere that fails loudly:
+
+    * the id is resolved **per ingest job** and travels on `ChunkedDocument`, so the
+      fingerprint and the vector cannot name different models (`test_ingest_task.py`);
+    * staleness is measured against the **resolved** id, not the environment default, or the
+      report would answer a question nobody asked (`test_reembed.py`);
+    * the write path refuses a model whose dimension is not `EMBEDDING_DIM`, because the
+      column is fixed and a mismatch is a corpus that will not ingest (`test_set_model`
+      below).
+
+    If you are here because you want to remove one of those, this docstring is the argument
+    for why the slot exists at all.
     """
-    assert "embedding" not in {slot.value for slot in ModelSlot}
-    assert not hasattr(ModelSelection("a", "b", "c", "d", "e"), "embedding")
+    assert "embedding" in {slot.value for slot in ModelSlot}
+    assert ModelSelection.from_settings().embedding == get_settings().openai.embedding_model
+    assert ModelSelection("a", "b", "c", "d", "e", "f").for_slot(ModelSlot.EMBEDDING) == "f", (
+        "for_slot reads by the enum's value, so the field name and the slot must not drift"
+    )
 
 
 def test_an_unknown_slot_name_names_the_legal_ones() -> None:
@@ -182,7 +208,7 @@ def test_the_selection_cannot_be_mutated_after_resolution() -> None:
     """Frozen, because it is resolved once per turn precisely so that nothing can move it
     between two supersteps."""
     with pytest.raises((AttributeError, TypeError)):
-        ModelSelection("a", "b", "c", "d", "e").chat = "something else"  # type: ignore[misc]
+        ModelSelection("a", "b", "c", "d", "e", "f").chat = "x"  # type: ignore[misc]
 
 
 # --- the CLI ------------------------------------------------------------------
@@ -289,10 +315,13 @@ async def test_the_cli_shows_which_slots_are_overridden(
 
     assert await bound_sessionmaker._show() == 0
 
+    # Prefixes derived from the enum, never listed by hand: the hand-written tuple missed
+    # `embedding` the moment T-612 added it, and the count assertion below then failed for a
+    # reason that had nothing to do with what this test is about.
     rows = [
         line
         for line in capsys.readouterr().out.splitlines()
-        if line.startswith(("chat", "router", "rerank", "judge"))
+        if line.startswith(tuple(slot.value for slot in ModelSlot))
     ]
     assert len(rows) == len(ModelSlot)
     assert sum(line.endswith("override") for line in rows) == 1
@@ -306,3 +335,211 @@ def test_the_cli_help_is_ascii() -> None:
     from tools.set_model import _CLI_DESCRIPTION
 
     _CLI_DESCRIPTION.encode("ascii")
+
+
+# --- the embedding slot's write path (T-612, R-87(3)) -------------------------
+
+
+async def _seed_one_active_chunk(session: AsyncSession) -> None:
+    """One `ACTIVE` document with one chunk whose provenance is the pipeline in force.
+
+    The minimum a flip can strand. Written here rather than imported from `test_reembed.py`
+    so this file states what "a corpus that would be stranded" means for the assertion below.
+    """
+    import uuid
+
+    from app.db.base import DEFAULT_TENANT_ID
+    from app.db.enums import DocumentStatus
+    from app.db.models.document import Document
+    from app.db.models.document_chunk import DocumentChunk
+    from app.db.repositories.knowledge_bases import KnowledgeBaseRepository
+    from app.db.repositories.users import UserRepository
+    from app.ingestion.chunker import effective_chunking_version
+    from app.ingestion.parsers.base import PREPROCESSING_VERSION
+
+    settings = get_settings()
+    owner = uuid.uuid4()
+    await UserRepository(session).upsert_from_claims(
+        sub=owner, email=f"{owner.hex[:8]}@corpus.local", display_name="Owner"
+    )
+    kb = await KnowledgeBaseRepository(session).get_or_create_default(owner)
+    document = Document(
+        id=uuid.uuid4(),
+        knowledge_base_id=kb.id,
+        tenant_id=DEFAULT_TENANT_ID,
+        owner_id=owner,
+        filename="handbook.pdf",
+        mime_type="application/pdf",
+        size_bytes=1024,
+        checksum_sha256=uuid.uuid4().hex * 2,
+        storage_uri="file://seed",
+        status=DocumentStatus.ACTIVE,
+        current_version=1,
+        searchable=True,
+    )
+    session.add(document)
+    await session.flush()
+    session.add(
+        DocumentChunk(
+            document_id=document.id,
+            document_version=1,
+            chunk_index=0,
+            chunk_hash=uuid.uuid4().hex,
+            embedding_fingerprint=uuid.uuid4().hex,
+            token_count=20,
+            tenant_id=DEFAULT_TENANT_ID,
+            knowledge_base_id=kb.id,
+            chunk_text="a passage",
+            meta={
+                "embedding_model": settings.openai.embedding_model,
+                "chunking_version": effective_chunking_version(settings.chunker),
+                "preprocessing_version": PREPROCESSING_VERSION,
+            },
+        )
+    )
+    await session.flush()
+
+
+class _WrongDimensionClient:
+    """An embedding client whose model returns vectors the column cannot hold."""
+
+    def __init__(self) -> None:
+        self.asked: list[str | None] = []
+        self.closed = False
+
+    async def embed_query(self, text: str, *, model: str | None = None) -> list[float]:
+        from app.db.base import EMBEDDING_DIM
+        from app.services.embeddings import _check_dimensions
+
+        self.asked.append(model)
+        _check_dimensions([0.0] * (EMBEDDING_DIM // 2), model=model or "unknown")
+        raise AssertionError("unreachable")
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+async def test_the_embedding_probe_refuses_a_model_of_the_wrong_dimension(
+    bound_sessionmaker, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal the other five slots have no equivalent of.
+
+    `document_chunks.embedding` is `VECTOR(EMBEDDING_DIM)` and nothing widens it at runtime,
+    so a model of another size is not a degraded choice — it is a corpus that cannot ingest at
+    all. Caught at the operator's keystroke rather than at the next upload, and caught by
+    *measuring* rather than by consulting a list of model ids, which would rot the day the
+    provider ships anything.
+    """
+    wrong = _WrongDimensionClient()
+    monkeypatch.setattr(bound_sessionmaker, "build_embedding_client", lambda *_: wrong)
+
+    exit_code = await bound_sessionmaker._set(
+        ModelSlot.EMBEDDING, "text-embedding-3-small", verify=True, yes=True
+    )
+
+    assert exit_code == 2
+    assert wrong.asked == ["text-embedding-3-small"], "the probe must ask for the candidate"
+    assert wrong.closed, "the probe client must be closed on the refusal path too"
+    assert await ModelOverrideRepository(session).list_all() == [], "nothing may be written"
+
+
+async def test_the_embedding_slot_refuses_no_verify(
+    bound_sessionmaker, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--no-verify` is coherent for the other five and incoherent here.
+
+    There it means "I accept the risk that this id is wrong", and the risk is a degraded
+    stage. Here the probe is not asking whether the id exists but how many numbers it
+    returns, and no offline source answers that — so the flag would be accepting a risk it
+    cannot describe. It must also not build a client, since that is the very network the flag
+    exists for.
+    """
+
+    def _explode(*_: object) -> None:
+        raise AssertionError("--no-verify must not build an embedding client")
+
+    monkeypatch.setattr(bound_sessionmaker, "build_embedding_client", _explode)
+
+    exit_code = await bound_sessionmaker._set(
+        ModelSlot.EMBEDDING, "whatever", verify=False, yes=True
+    )
+
+    assert exit_code == 2
+    assert await ModelOverrideRepository(session).list_all() == []
+
+
+async def test_moving_the_embedding_slot_prices_the_flip_and_needs_yes(
+    bound_sessionmaker, session: AsyncSession, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:  # noqa: ANN001
+    """R-87(3): the operator is told what the flip costs *before* it happens.
+
+    The other five slots are free to move and free to move back. This one leaves every
+    existing chunk in the previous vector space until a rebuild drains it, so the refusal is
+    not paternalism — it is the difference between an operator who chose that backlog and one
+    who discovers it on an invoice. `--yes` is the acceptance, and it is a flag rather than an
+    interactive prompt because every tool here is scriptable.
+    """
+    from app.services.embeddings import FakeEmbeddingClient
+
+    monkeypatch.setattr(
+        bound_sessionmaker, "build_embedding_client", lambda *_: FakeEmbeddingClient()
+    )
+    await _seed_one_active_chunk(session)
+
+    refused = await bound_sessionmaker._set(
+        ModelSlot.EMBEDDING, "operators-choice", verify=True, yes=False
+    )
+
+    assert refused == 2
+    priced = capsys.readouterr().out
+    assert "strands" in priced and "tools.reembed run" in priced, (
+        "the refusal has to say what the cost is and how to pay it down"
+    )
+    assert await ModelOverrideRepository(session).list_all() == []
+
+    accepted = await bound_sessionmaker._set(
+        ModelSlot.EMBEDDING, "operators-choice", verify=True, yes=True
+    )
+
+    assert accepted == 0
+    assert (await resolve_models(session)).embedding == "operators-choice"
+
+
+async def test_an_empty_corpus_needs_no_yes(
+    bound_sessionmaker, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing to strand, nothing to accept.
+
+    A first-day deployment choosing its embedding model should not have to acknowledge a
+    backlog that does not exist — and pricing a flip at zero is exactly how an operator can
+    tell that it is safe.
+
+    The corpus is emptied inside this test's own transaction rather than assumed empty: the
+    tool prices the **whole deployment**, deliberately (an operator wants the global number),
+    so on a development database this assertion would otherwise be a statement about whatever
+    the last end-to-end run happened to leave behind.
+    """
+    from sqlalchemy import delete
+
+    from app.db.models.document import Document
+    from app.db.models.document_chunk import DocumentChunk
+    from app.db.models.knowledge_job import KnowledgeJob
+    from app.services.embeddings import FakeEmbeddingClient
+
+    # Children first: both reference `documents` with NO ACTION, which is R-39's deliberate
+    # choice so a delete has to be explicit about what it is destroying.
+    await session.execute(delete(DocumentChunk))
+    await session.execute(delete(KnowledgeJob))
+    await session.execute(delete(Document))
+    await session.flush()
+
+    monkeypatch.setattr(
+        bound_sessionmaker, "build_embedding_client", lambda *_: FakeEmbeddingClient()
+    )
+
+    exit_code = await bound_sessionmaker._set(
+        ModelSlot.EMBEDDING, "operators-choice", verify=True, yes=False
+    )
+
+    assert exit_code == 0
+    assert (await resolve_models(session)).embedding == "operators-choice"

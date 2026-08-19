@@ -251,21 +251,38 @@ class EmbeddingClient(Protocol):
 
     @property
     def model(self) -> str:
-        """The model id that entered the FR-ING-03 fingerprint."""
+        """The **configured** model id — the environment default, not what any call used.
+
+        Since T-612 this is a fallback rather than the truth: an operator override
+        (`ModelSlot.EMBEDDING`) is resolved per job and passed to the call below, so a caller
+        that needs to know which model produced a vector must use the id **it passed**, never
+        read it back off the client. `workers/ingest.py` does exactly that, and the
+        FR-ING-03 fingerprint depends on it.
+        """
         ...
 
     @property
     def dimensions(self) -> int: ...
 
-    async def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
-        """Embed a corpus batch. Order-preserving: ``result[i]`` embeds ``texts[i]``."""
+    async def embed_texts(
+        self, texts: Sequence[str], *, model: str | None = None
+    ) -> list[list[float]]:
+        """Embed a corpus batch. Order-preserving: ``result[i]`` embeds ``texts[i]``.
+
+        ``model`` overrides the configured id for this call only, mirroring what R-83 did to
+        `ChatClient` — one pooled client, the id chosen per call. `on_startup` caches a single
+        embedding client precisely so a job does not build a connection pool of its own, so
+        the override has to travel on the call rather than on a new client.
+        """
         ...
 
-    async def embed_query(self, text: str) -> list[float]:
+    async def embed_query(self, text: str, *, model: str | None = None) -> list[float]:
         """Embed one search query (T-206). Never batched, never deduped."""
         ...
 
-    async def embed_queries(self, texts: Sequence[str]) -> list[list[float]]:
+    async def embed_queries(
+        self, texts: Sequence[str], *, model: str | None = None
+    ) -> list[list[float]]:
         """Embed a turn's probes in one round trip (T-305). Order-preserving.
 
         Distinct from :meth:`embed_texts` in **budget, not in shape**: R-45(3) makes a chat
@@ -360,10 +377,17 @@ class OpenAIEmbeddingClient:
 
     # -- requests
 
-    async def _request(self, client, texts: Sequence[str]) -> list[list[float]]:  # noqa: ANN001
-        """One `embeddings.create` call, unpacked by `index` and dimension-checked."""
+    async def _request(  # noqa: ANN001 — the SDK's client type is imported lazily
+        self, client, texts: Sequence[str], *, model: str
+    ) -> list[list[float]]:
+        """One `embeddings.create` call, unpacked by `index` and dimension-checked.
+
+        ``model`` is required rather than defaulted: every caller has already resolved which
+        id it means, and a default here would let one path silently fall back to the
+        configured value while its fingerprint claimed the override (T-612).
+        """
         try:
-            response = await client.embeddings.create(input=list(texts), model=self._model)
+            response = await client.embeddings.create(input=list(texts), model=model)
         except EmbeddingError:
             raise
         except Exception as exc:
@@ -383,17 +407,20 @@ class OpenAIEmbeddingClient:
                 raise EmbeddingResponseError(f"response index {item.index} is out of range")
             if slots[item.index] is not None:
                 raise EmbeddingResponseError(f"response index {item.index} was returned twice")
-            _check_dimensions(item.embedding, model=self._model)
+            _check_dimensions(item.embedding, model=model)
             slots[item.index] = list(item.embedding)
         if any(slot is None for slot in slots):
             raise EmbeddingResponseError("response did not cover every requested index")
         return [slot for slot in slots if slot is not None]
 
-    async def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
+    async def embed_texts(
+        self, texts: Sequence[str], *, model: str | None = None
+    ) -> list[list[float]]:
         texts = list(texts)
         if not texts:
             return []
         _validate_inputs(texts)
+        model = model or self._model
         client, _ = await self._get_clients()
 
         batches = plan_batches(
@@ -406,7 +433,7 @@ class OpenAIEmbeddingClient:
 
         async def run(batch: tuple[int, ...]) -> None:
             async with semaphore:
-                vectors = await self._request(client, [texts[i] for i in batch])
+                vectors = await self._request(client, [texts[i] for i in batch], model=model)
             for position, index in enumerate(batch):
                 results[index] = vectors[position]
 
@@ -421,7 +448,7 @@ class OpenAIEmbeddingClient:
 
         log.info(
             "embeddings.batch_complete",
-            model=self._model,
+            model=model,
             inputs=len(texts),
             requests=len(batches),
         )
@@ -429,13 +456,15 @@ class OpenAIEmbeddingClient:
             raise EmbeddingResponseError("not every input received an embedding")
         return [vector for vector in results if vector is not None]
 
-    async def embed_query(self, text: str) -> list[float]:
+    async def embed_query(self, text: str, *, model: str | None = None) -> list[float]:
         _validate_inputs([text])
         _, query_client = await self._get_clients()
-        vectors = await self._request(query_client, [text])
+        vectors = await self._request(query_client, [text], model=model or self._model)
         return vectors[0]
 
-    async def embed_queries(self, texts: Sequence[str]) -> list[list[float]]:
+    async def embed_queries(
+        self, texts: Sequence[str], *, model: str | None = None
+    ) -> list[list[float]]:
         texts = list(texts)
         if not texts:
             return []
@@ -447,7 +476,7 @@ class OpenAIEmbeddingClient:
         # `ROUTER_MAX_SUB_QUERIES + 1` and each probe by `ROUTER_MAX_PROBE_CHARS`, which is
         # three orders of magnitude inside the array and token ceilings `embed_texts` batches
         # against — a batching loop here would be dead code guarding an unreachable input.
-        return await self._request(query_client, texts)
+        return await self._request(query_client, texts, model=model or self._model)
 
 
 # --- fake backend -------------------------------------------------------------
@@ -474,6 +503,12 @@ class FakeEmbeddingClient:
     Sanctioned in the spirit of R-19's filesystem object-storage backend and
     `QUEUE_BACKEND=none`. Records what it was asked to embed so tests can assert that an
     unchanged document cost zero inputs — the whole claim of FR-ING-03.
+
+    **It also records the model each call named** (`models_used`), which is what lets a test
+    assert T-612's central invariant offline: the id written into `document_chunks.metadata`
+    is the id that produced the vector. Vectors stay derived from the text alone, so a flip
+    does not perturb any existing fixture — the fake cannot simulate two vector spaces, and
+    is not asked to. What it can prove is provenance, which is the part that must not drift.
     """
 
     def __init__(self, model: str = "fake-embedding", *, dimensions: int = EMBEDDING_DIM) -> None:
@@ -481,6 +516,7 @@ class FakeEmbeddingClient:
         self._dimensions = dimensions
         self.embedded_inputs = 0
         self.request_count = 0
+        self.models_used: list[str] = []
 
     @property
     def model(self) -> str:
@@ -490,28 +526,35 @@ class FakeEmbeddingClient:
     def dimensions(self) -> int:
         return self._dimensions
 
-    async def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
+    async def embed_texts(
+        self, texts: Sequence[str], *, model: str | None = None
+    ) -> list[list[float]]:
         texts = list(texts)
         if not texts:
             return []
         _validate_inputs(texts)
         self.embedded_inputs += len(texts)
         self.request_count += 1
+        self.models_used.append(model or self._model)
         return [_deterministic_vector(text, self._dimensions) for text in texts]
 
-    async def embed_query(self, text: str) -> list[float]:
+    async def embed_query(self, text: str, *, model: str | None = None) -> list[float]:
         _validate_inputs([text])
         self.embedded_inputs += 1
         self.request_count += 1
+        self.models_used.append(model or self._model)
         return _deterministic_vector(text, self._dimensions)
 
-    async def embed_queries(self, texts: Sequence[str]) -> list[list[float]]:
+    async def embed_queries(
+        self, texts: Sequence[str], *, model: str | None = None
+    ) -> list[list[float]]:
         texts = list(texts)
         if not texts:
             return []
         _validate_inputs(texts)
         self.embedded_inputs += len(texts)
         self.request_count += 1
+        self.models_used.append(model or self._model)
         return [_deterministic_vector(text, self._dimensions) for text in texts]
 
     async def aclose(self) -> None:

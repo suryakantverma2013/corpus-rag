@@ -60,6 +60,7 @@ from app.ingestion.parsers import parse_document
 from app.ingestion.scanner import Scanner, ScanResult, build_scanner
 from app.services import audit
 from app.services.embeddings import EmbeddingClient, get_embedding_client
+from app.services.model_selection import resolve_models
 from app.services.object_storage import (
     ObjectNotFoundError,
     ObjectStorage,
@@ -320,11 +321,18 @@ async def _run(
     await jobs.update_status(job, JobStatus.RUNNING, progress=_PROGRESS_CHUNKING)
     await session.commit()
 
-    # `embedding_model` is passed explicitly, never defaulted. The chunker would otherwise
-    # read `OPENAI_EMBEDDING_MODEL` while the client embeds with its own `.model`; if those
-    # two ever diverge, every `embedding_fingerprint` names a model that did not produce the
-    # vector, and the FR-ING-03 diff re-embeds the whole document on every single ingest.
-    chunked = await chunk_document(parsed, embedding_model=deps.embedder.model)
+    # `embedding_model` is passed explicitly, never defaulted, and since T-612 it is the
+    # **resolved** id rather than the client's own: an operator may repoint
+    # `ModelSlot.EMBEDDING` between jobs, and the chunker would otherwise read
+    # `OPENAI_EMBEDDING_MODEL` while the embed call used the override. Resolved here, on a
+    # session that is between transactions (the commit above just landed) and per job rather
+    # than per process, because the worker outlives any number of operator changes.
+    #
+    # From here the id travels on `chunked` alone — `plan_chunk_set` embeds with
+    # `chunked.embedding_model` — so the fingerprint and the vector cannot name different
+    # models without someone editing two files to make it so.
+    embedding_model = (await resolve_models(session, deps.settings)).embedding
+    chunked = await chunk_document(parsed, embedding_model=embedding_model)
     if not chunked.chunks:
         # Defence in depth: R-34 makes the parsers raise `NoExtractableTextError` rather
         # than yield nothing, so reaching here is a bug — but a zero-chunk `ACTIVE`

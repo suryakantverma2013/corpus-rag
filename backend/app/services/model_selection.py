@@ -1,7 +1,8 @@
 """Runtime model selection (T-611, R-83) — which model id each call site calls, now.
 
-**The shape of the thing.** :class:`ModelSelection` is the four ids a turn needs, resolved
-once at turn start from `OPENAI_*` overlaid with whatever `model_overrides` holds. It is a
+**The shape of the thing.** :class:`ModelSelection` is the six ids a run needs, resolved
+once at turn start (or once per ingest job) from `OPENAI_*` overlaid with whatever
+`model_overrides` holds. It is a
 frozen dataclass of strings, so it is cheap to pass, impossible to mutate mid-turn, and
 carries nothing that could not go in a log line.
 
@@ -17,13 +18,21 @@ vendor serves; `LLM_BACKEND` / `EMBEDDING_BACKEND` are deliberately unreachable 
 module, because a database row that could turn `FakeChatClient` into a real one would put
 ~1,790 tests and CI onto the network.
 
-**Embeddings is absent on purpose.** `OPENAI_EMBEDDING_MODEL` is an FR-ING-03 fingerprint
-input read by the chunker, so a live change would leave existing chunks holding model-A
-vectors while new ingests write model-B ones — and both are then compared in the same cosine
-query, with nothing failing anywhere. That is not a degraded ranking, it is silently wrong
-retrieval, and T-608 (the controlled re-embed FR-ING-03 implies and nothing provides) is the
-prerequisite. See R-83(4); :data:`ModelSlot` has no member for it, so the omission is
-unrepresentable rather than remembered.
+**Embeddings is here now, and what changed is not the hazard but the recovery.** R-83(4)
+excluded it because `OPENAI_EMBEDDING_MODEL` is an FR-ING-03 fingerprint input read by the
+chunker: a live flip leaves existing chunks holding model-A vectors while new ingests write
+model-B ones, and both are then compared in the same cosine query with nothing failing
+anywhere. **All of that is still true.** T-608 changed the consequence — the drift is now
+*visible* (`GET /api/v1/admin/documents/stale` reads the provenance each chunk recorded) and
+*finite* (`tools.reembed run` converts it) — so the window is a priced, drainable state
+rather than a permanent silent one. R-87 (T-612) admits the slot on exactly that basis.
+
+**The one invariant this module cannot enforce, stated where it will be read.** Whoever
+resolves :attr:`ModelSelection.embedding` must pass that id to *both* the embed call and the
+fingerprint. They are one value at one call site in `workers/ingest.py`, and if they ever
+diverge every affected chunk records a model that did not produce its vector — which the
+staleness report cannot detect, because the report's only source is that same recorded
+label.
 """
 
 from __future__ import annotations
@@ -51,12 +60,17 @@ logger = structlog.get_logger(__name__)
 
 
 class ModelSlot(enum.StrEnum):
-    """The call sites an operator may repoint.
+    """The call sites an operator may repoint. All six of them, since T-612.
 
-    Four rather than six. `embedding` is excluded by R-83(4) — see the module docstring.
     `judge_escalation` is here because T-314's escalation is *dormant while it equals*
     `judge` (`_scored` skips a second tier that would ask the same model twice), so an
     operator moving `judge` alone would silently arm escalation as a side effect.
+
+    `embedding` is the one whose blast radius outlives the turn: the other five change what
+    the next call asks and nothing more, while this one changes what gets *written* and
+    leaves the corpus holding two vector spaces until a rebuild drains it. That is why its
+    write path prices the flip and refuses `--no-verify` (R-87(3)), and why the enum member
+    alone was never the work.
     """
 
     CHAT = "chat"
@@ -64,6 +78,7 @@ class ModelSlot(enum.StrEnum):
     RERANK = "rerank"
     JUDGE = "judge"
     JUDGE_ESCALATION = "judge_escalation"
+    EMBEDDING = "embedding"
 
 
 class UnknownModelSlotError(ValueError):
@@ -79,6 +94,7 @@ class ModelSelection:
     rerank: str
     judge: str
     judge_escalation: str
+    embedding: str
 
     @classmethod
     def from_settings(cls, settings: Settings | None = None) -> ModelSelection:
@@ -94,6 +110,7 @@ class ModelSelection:
             rerank=openai.rerank_model,
             judge=openai.judge_model,
             judge_escalation=openai.judge_escalation_model,
+            embedding=openai.embedding_model,
         )
 
     def for_slot(self, slot: ModelSlot) -> str:
@@ -144,6 +161,7 @@ async def resolve_models(session: AsyncSession, settings: Settings | None = None
         rerank=overrides.get(ModelSlot.RERANK, defaults.rerank),
         judge=overrides.get(ModelSlot.JUDGE, defaults.judge),
         judge_escalation=overrides.get(ModelSlot.JUDGE_ESCALATION, defaults.judge_escalation),
+        embedding=overrides.get(ModelSlot.EMBEDDING, defaults.embedding),
     )
 
 

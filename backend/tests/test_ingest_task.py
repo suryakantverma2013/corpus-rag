@@ -44,6 +44,7 @@ from app.ingestion.scanner import REASON_MACRO, ScanResult, ScanVerdict
 from app.rag.retrieval import RetrievalFilter
 from app.services.clamav import ClamAVUnavailableError
 from app.services.embeddings import FakeEmbeddingClient
+from app.services.model_selection import ModelSlot, set_model_override
 from app.services.object_storage import LocalFilesystemStorage, original_key
 from workers.ingest import ingest_document
 
@@ -803,3 +804,67 @@ def test_no_api_module_imports_the_scanner_or_the_worker() -> None:
         f"{offenders} import worker-side ingestion code into the API process — R-31 "
         "(§8.12) requires screening and parsing to happen in the worker"
     )
+
+
+# --- the operator's embedding slot (T-612, R-87) --------------------------------------
+
+
+async def test_the_fingerprint_names_the_model_that_produced_the_vector(sessions, storage) -> None:  # noqa: ANN001
+    """T-612's central invariant, and the one mistake here that nothing downstream detects.
+
+    The id is resolved per job from `ModelSlot.EMBEDDING` and travels on `ChunkedDocument` to
+    two places: `compute_embedding_fingerprint`, which stamps it into
+    `document_chunks.metadata`, and `plan_chunk_set`, which embeds with it. If those ever
+    disagree, every affected chunk records a model that did not produce its vector — and the
+    staleness report reads exactly that stamp, so the corpus would be mislabelled with no
+    instrument able to notice.
+
+    Both halves are asserted here rather than only the stamp, because the stamp alone passes
+    while the client silently embeds with its own configured id.
+    """
+    document_id, job_id, _ = await _fixtures(sessions, storage)
+    embedder = FakeEmbeddingClient()
+    ctx = _ctx(sessions, storage, _StubScanner())
+    ctx["embedder"] = embedder
+
+    async with sessions() as session:
+        await set_model_override(
+            session, slot=ModelSlot.EMBEDDING, model_id="operators-choice", updated_by="test"
+        )
+        await session.commit()
+
+    await ingest_document(ctx, str(document_id), str(job_id))
+
+    async with sessions() as session:
+        rows = await DocumentChunkRepository(session).list_by_version(document_id, 1)
+    assert rows, "the ingest wrote no chunks"
+    stamped = {row.meta["embedding_model"] for row in rows}
+
+    assert stamped == {"operators-choice"}, (
+        "the fingerprint names the environment default, so the per-job resolution was lost"
+    )
+    assert embedder.models_used == ["operators-choice"], (
+        "the vectors were produced by a different model from the one stamped on them — "
+        f"stamped {stamped}, embedded with {embedder.models_used}"
+    )
+
+
+async def test_without_an_override_the_environment_default_still_wins(sessions, storage) -> None:  # noqa: ANN001
+    """The unchanged path, asserted so the resolution cannot quietly become mandatory.
+
+    `resolve_models` fails open to `ModelSelection.from_settings`, so a deployment with no
+    `model_overrides` row — which is every deployment until an operator acts — must still
+    fingerprint with `OPENAI_EMBEDDING_MODEL`.
+    """
+    document_id, job_id, _ = await _fixtures(sessions, storage)
+    embedder = FakeEmbeddingClient()
+    ctx = _ctx(sessions, storage, _StubScanner())
+    ctx["embedder"] = embedder
+
+    await ingest_document(ctx, str(document_id), str(job_id))
+
+    configured = get_settings().openai.embedding_model
+    async with sessions() as session:
+        rows = await DocumentChunkRepository(session).list_by_version(document_id, 1)
+    assert {row.meta["embedding_model"] for row in rows} == {configured}
+    assert embedder.models_used == [configured]

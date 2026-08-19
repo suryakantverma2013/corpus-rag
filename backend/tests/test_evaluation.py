@@ -762,7 +762,12 @@ async def test_the_judge_follows_the_operators_selection() -> None:
         chat,
         get_settings(),
         models=ModelSelection(
-            chat="c", router="r", rerank="k", judge="judge-base", judge_escalation="judge-strong"
+            chat="c",
+            router="r",
+            rerank="k",
+            judge="judge-base",
+            judge_escalation="judge-strong",
+            embedding="e",
         ),
     )
     asked = _scripted(evaluator, [0.0, 1.0, 1.0])
@@ -786,7 +791,12 @@ async def test_moving_the_judge_alone_does_not_silently_arm_escalation() -> None
         FakeChatClient(),
         get_settings(),
         models=ModelSelection(
-            chat="c", router="r", rerank="k", judge="same-model", judge_escalation="same-model"
+            chat="c",
+            router="r",
+            rerank="k",
+            judge="same-model",
+            judge_escalation="same-model",
+            embedding="e",
         ),
     )
     asked = _scripted(evaluator, [0.0, 0.0])

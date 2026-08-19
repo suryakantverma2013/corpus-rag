@@ -23,7 +23,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 import structlog
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
 from app.config import Settings
@@ -105,6 +105,22 @@ async def test_an_errored_turn_writes_the_row_that_messages_cannot(session: Asyn
     assert row.latency_ms == 1234, "and it still reports how long it took to fail"
 
 
+async def _only_this_test(session: AsyncSession) -> None:
+    """Empty `turn_telemetry` inside this test's transaction.
+
+    Four assertions below count or list the **whole** table, and `turn_telemetry` deliberately
+    has no foreign keys and is never cleaned up by a conversation delete (R-79(1): a user's
+    deletion must not rewrite an operator's history). So every real turn ever run against the
+    development database is still there — and the moment anyone runs `frontend/e2e`, which
+    `frontend/e2e/README.md` tells them to, these tests start failing on rows that are supposed
+    to be there. Found exactly that way by the T-606 acceptance run.
+
+    The `session` fixture rolls back, so this touches nothing beyond the test.
+    """
+    await session.execute(delete(TurnTelemetry))
+    await session.flush()
+
+
 async def test_the_outcome_column_is_never_null_even_for_a_record_that_lost_one(
     session: AsyncSession,
 ) -> None:
@@ -114,6 +130,7 @@ async def test_the_outcome_column_is_never_null_even_for_a_record_that_lost_one(
     The only path reaching here without an outcome is a failure whose class is already known,
     so it is filed as `error`; anything else is `unknown` rather than a lost insert.
     """
+    await _only_this_test(session)
     repo = TurnTelemetryRepository(session)
     await repo.record(make_record(outcome=None, error_code="TIMEOUT"))
     await repo.record(make_record(outcome=None, error_code=None, conversation_id=uuid.uuid4()))
@@ -303,6 +320,7 @@ async def test_a_hostile_correlation_id_is_replaced_not_bound(
 async def test_retention_removes_what_is_past_the_horizon_and_nothing_else(
     session: AsyncSession,
 ) -> None:
+    await _only_this_test(session)
     repo = TurnTelemetryRepository(session)
     fresh = await repo.record(make_record())
     stale = await repo.record(make_record(conversation_id=uuid.uuid4()))
@@ -323,6 +341,7 @@ async def test_retention_removes_what_is_past_the_horizon_and_nothing_else(
 
 async def test_retention_is_batch_bounded_and_converges(session: AsyncSession) -> None:
     """One pass may not lock a large slice of the table (R-65's rule, R-79(3) inherits it)."""
+    await _only_this_test(session)
     repo = TurnTelemetryRepository(session)
     for _ in range(5):
         await repo.record(make_record(conversation_id=uuid.uuid4()))
@@ -345,6 +364,7 @@ async def test_a_zero_horizon_keeps_everything_rather_than_deleting_it(
     `CHECKPOINTER_RETENTION_INTERVAL_SECONDS`, where 0 disables by meaning "never run", and
     the guard is deliberately in both the cron registration and the task.
     """
+    await _only_this_test(session)
     repo = TurnTelemetryRepository(session)
     await repo.record(make_record())
     await session.flush()

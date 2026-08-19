@@ -55,9 +55,10 @@ Tear down with `down`, or `down -v` to discard the data volumes as well.
 ## 3. Configuration
 
 `deployment/.env.prod` configures the **stack** — ports, credentials, which URLs things answer on.
-The application's own 158 settings keep their defaults; `backend/.env.example` documents every one
-of them. To override one, add it to the `x-corpus-env` block in the compose file: only variables
-referenced there are passed into a container.
+The application's own settings keep their defaults; `backend/.env.example` documents every one of
+them, and `backend/tests/test_env_templates.py` fails if it stops doing so. To override one, add
+it to the `x-corpus-env` block in the compose file: only variables referenced there are passed
+into a container.
 
 Values that must change for any real deployment: every `CHANGE_ME`, `OPENAI_API_KEY`,
 `PUBLIC_ORIGIN`, and the three Keycloak URLs in §6.
@@ -249,7 +250,60 @@ degrades that stage. `--no-verify` skips the check for hosts that cannot reach t
 **Embeddings is deliberately not a slot.** `OPENAI_EMBEDDING_MODEL` is folded into each chunk's
 embedding fingerprint, so changing it live would leave existing chunks holding vectors from the old
 model while new ingests write the new one — and both get compared in the same similarity query,
-with nothing failing anywhere. It stays a restart-and-re-embed operation.
+with nothing failing anywhere. It stays a restart-and-re-embed operation, and the re-embed half is
+the next section.
+
+**Re-embedding after a pipeline change.** Three settings are folded into every chunk's fingerprint:
+`OPENAI_EMBEDDING_MODEL`, the four `CHUNKER_*` sizing knobs (as one composite version) and the
+parsers' preprocessing version. Change any of them and *new* ingests use the new pipeline while
+every document already indexed keeps serving vectors from the old one. Nothing detects that on its
+own, and no ordinary route will re-drive a healthy document — that is deliberate, because re-embedding
+a corpus costs real money.
+
+Start by looking. This is read-only and safe at any time:
+
+```bash
+docker compose … exec api python -m tools.reembed
+```
+
+It prints the pipeline in force, how many `ACTIVE` documents were built by a different one, which of
+the three inputs drifted for each, and **an estimate of the embedding tokens a full run would spend**.
+Then re-drive a bounded batch:
+
+```bash
+docker compose … exec api python -m tools.reembed run --limit 50
+```
+
+`--limit` is required; there is no "all of them". The command only *queues* the work — the worker
+does it — so re-run the plan once the queue has drained and repeat until it reports nothing. That
+loop is safe to interrupt and safe to repeat: a rebuilt document drops out of the stale set, and one
+still being rebuilt is excluded from the next batch rather than queued twice.
+
+Same two operations over HTTP, for an administrator token:
+
+```
+GET  /api/v1/admin/documents/stale?limit=50[&owner_id=…]
+POST /api/v1/admin/documents/{document_id}/reembed
+```
+
+What to expect while it runs:
+
+- **Documents keep answering questions throughout.** A rebuild writes a *new* version and the
+  previously indexed one keeps serving until the new one is complete, so retrieval never sees a
+  half-built document and never mixes two models in one query.
+- **Storage briefly doubles for the documents in the batch.** Each rebuild copies the stored
+  original forward and the superseded copy is deleted after the new version lands. Users' storage
+  allowances are unaffected.
+- **A rebuild that fails leaves the document showing `Failed` while the previous version continues
+  to answer.** The knowledge-base row says so (`update failed, v{n} still answering`), and the job's
+  own diagnostics are at `GET /api/v1/jobs/{id}`.
+- Two refusals are normal and not errors: `NOT_STALE` means that document is already current
+  (harmless — re-run the plan), and `NOT_REBUILDABLE` means it is mid-ingestion or being deleted.
+  `ORIGINAL_CORRUPT` is the one that needs a person: the stored file no longer matches its recorded
+  checksum, and it must be re-uploaded.
+
+Prefer off-peak. Each rebuild ends with a version swap, and a swap landing in the middle of a chat
+turn can cost that one turn its citations — the same window a document replacement already opens.
 
 ## 9. Verifying a deployment
 

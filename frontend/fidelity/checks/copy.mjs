@@ -5,7 +5,7 @@
  * is that these strings reach the screen, and a component test can only show that a component
  * given the right props would render them.
  */
-import { clickByText, sleep, waitUntil } from '../harness.mjs';
+import { APP, clickByText, selectAnsweredChat, sleep, waitUntil } from '../harness.mjs';
 
 /** Text of every leaf element currently on screen — the haystack for a literal. */
 const LEAVES = `
@@ -170,10 +170,24 @@ export async function checkCloudPicker(page, r, theme) {
       true,
       'no linked Drive account in this environment — not a fidelity failure',
     );
-    await page.evaluate(`
-      const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /Close/i.test(x.getAttribute('aria-label')||''));
-      if (b) b.click(); return true;`);
-    await sleep(400);
+    // FR-KBM-06 branches on the linked state (R-74(5)) and with no linked account the button is
+    // **not inert** — `useCloudLink` calls `window.location.assign` and the whole browser leaves
+    // for Keycloak's account-link endpoint. So there is no Close button to press here, and every
+    // later check in the run would otherwise measure Keycloak's login page. Restore the app.
+    //
+    // T-606 found this by looking at a screenshot: the light-theme pass, motion, expansion and
+    // both empty states — 39 checks — had run against PatternFly. This branch had never executed
+    // before, because the audit account was still linked when T-510 and T-514 wrote it.
+    const inApp = await page.evaluate(`return !!document.querySelector('[role="dialog"]');`);
+    if (inApp) {
+      await page.evaluate(`
+        const b = [...document.querySelectorAll('[role="dialog"] button')].find(x => /Close/i.test(x.getAttribute('aria-label')||''));
+        if (b) b.click(); return true;`);
+      await sleep(400);
+      return;
+    }
+    await page.navigate(APP);
+    await selectAnsweredChat(page);
     return;
   }
 

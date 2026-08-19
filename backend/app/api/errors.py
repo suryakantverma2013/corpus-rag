@@ -62,6 +62,8 @@ __all__ = [
     "NotLatestAnswerResponse",
     "ProcessingLockedDetail",
     "ProcessingLockedResponse",
+    "RebuildConflictDetail",
+    "RebuildConflictResponse",
     "cloud_link_required",
     "error_responses",
     "processing_locked",
@@ -171,6 +173,35 @@ class CloudLinkRequiredResponse(BaseModel):
     """The wire body for FR-AUT-11's refusal."""
 
     detail: CloudLinkRequiredDetail
+
+
+class RebuildConflictDetail(BaseModel):
+    """Why a T-608 re-embed was refused (R-84 → 409). Three codes, one status.
+
+    All three are refusals about the *document's state*, not failures, so none carries a
+    `FailureClass` — the R-51(5) precedent, and the same reasoning that keeps R-24's gate on
+    `409` rather than `423`. They are separate codes because the operator's next action differs
+    for each and no two of them are derivable from the same follow-up read:
+
+    - ``NOT_REBUILDABLE`` — the document is not `ACTIVE` (R-84(4)). Transient for anything in
+      flight, permanent for the deletion path; either way, look at the document.
+    - ``NOT_STALE`` — it was already built by the configured pipeline (R-84(3)). **The
+      load-bearing one:** it is what keeps this trigger *controlled* rather than a re-embed
+      button, so a client must be able to tell it from the other two and report it as "nothing
+      to do" rather than as an error.
+    - ``ORIGINAL_CORRUPT`` — the stored original no longer matches `checksum_sha256` (R-84(8)).
+      Neither transient nor a state to wait out: it needs a human, and re-running the batch will
+      report it again forever until one arrives.
+    """
+
+    error_code: Literal["NOT_REBUILDABLE", "NOT_STALE", "ORIGINAL_CORRUPT"]
+    message: str
+
+
+class RebuildConflictResponse(BaseModel):
+    """The wire body for R-84's three refusals."""
+
+    detail: RebuildConflictDetail
 
 
 class ContextWindowExceededResponse(BaseModel):

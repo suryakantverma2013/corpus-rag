@@ -66,6 +66,7 @@ from app.services.object_storage import (
     ObjectTooLargeError,
     original_key,
 )
+from app.services.reembed import is_stale
 
 log = structlog.get_logger(__name__)
 
@@ -173,6 +174,30 @@ class DuplicateChecksumError(Exception):
     """
 
 
+class NotRebuildableError(Exception):
+    """Re-embed requested for a document that is not `ACTIVE` (R-84(4) → 409)."""
+
+
+class NotStaleError(Exception):
+    """Re-embed requested for a document already built by the configured pipeline.
+
+    R-84(3), and the refusal is the point: a re-embed that will change nothing is not a
+    cheaper re-embed, it is a full-price one whose result is byte-identical. This is the whole
+    difference between T-608's trigger and widening `/retry` to `ACTIVE` documents, which
+    would erase FR-ING-04's short-circuit rather than satisfy it.
+    """
+
+
+class OriginalCorruptError(Exception):
+    """The stored original no longer hashes to `documents.checksum_sha256` (R-84(8) → 409).
+
+    Refused **before** a version is burned. Rebuilding anyway would re-chunk whatever bytes
+    the object store actually holds and record them under the old checksum, which is the one
+    column FR-KBM-08's dedup trusts — so the next upload of the *real* file would be answered
+    as a duplicate of a document that no longer contains it.
+    """
+
+
 class ProcessingLockedError(Exception):
     """The caller has a chat turn generating; FR-STA-02 pauses this action (R-43 → 409).
 
@@ -262,6 +287,23 @@ class RetryOutcome:
     document_id: uuid.UUID
     job_id: uuid.UUID
     status: DocumentStatus
+
+
+@dataclass(frozen=True, slots=True)
+class RebuildOutcome:
+    """What the T-608 re-embed trigger renders (R-84).
+
+    Both versions are carried because both are true at once and neither implies the other:
+    `version` is the one the worker will build, `previous_version` the one still answering
+    questions until the swap commits (R-36(3)). `ReplaceOutcome` names one of them for exactly
+    this reason; a re-embed is the same shape, so it makes the same distinction.
+    """
+
+    document_id: uuid.UUID
+    job_id: uuid.UUID
+    status: DocumentStatus
+    version: int
+    previous_version: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -1006,6 +1048,193 @@ async def replace_document(
     )
 
 
+# --- re-embed (T-608, FR-ING-03, R-84) ----------------------------------------
+
+
+async def rebuild_document(
+    *,
+    document_id: uuid.UUID,
+    actor_id: uuid.UUID | None,
+    session: AsyncSession,
+    storage: ObjectStorage,
+    queue: JobQueue,
+    settings: Settings | None = None,
+) -> RebuildOutcome:
+    """Re-drive ingestion for a document the configured pipeline did not build (R-84).
+
+    **This is `replace_document` with the document's own bytes**, and the resemblance is the
+    design rather than a coincidence: it writes the stored original forward to `v(n+1)`,
+    repoints `storage_uri` at it and queues the build, touching none of `current_version`,
+    `searchable`, `chunk_count` or `page_count` — so v(n) keeps answering questions until the
+    worker's R-36(3) swap commits, and a failed rebuild leaves a document that still works.
+
+    **Why a version bump rather than rebuilding v(n) in place.** FR-ING-04's short-circuit
+    skips an `ACTIVE` document only when `current_version >= job.document_version`, so a
+    genuinely later build target is the case that guard is *written to let through* — this
+    satisfies the short-circuit instead of evading it, which is what the board line forbade
+    when it ruled out widening `/retry` to `ACTIVE` documents. It also needs no change to
+    `workers/ingest.py` at all, and it makes R-71(2)'s existing
+    `update failed, v{n} still answering` label render correctly on a failed rebuild, since
+    that label keys on `latest_job_document_version > current_version`.
+
+    **The copy is load-bearing, not tidiness.** After the swap the worker runs
+    `_purge_superseded_versions(first=previous, last=target)` — `range(n, n+1)` — so without a
+    v(n+1) object the purge would delete the prefix holding the live `storage_uri`'s bytes,
+    destroying the only original of a document nothing could then rebuild. Skipping the copy
+    looks like an optimisation and is data loss.
+
+    **No ownership predicate and no R-24 gate.** The route above this is `RequireAdmin` and an
+    administrator already holds owner-or-admin power over every document (R-39(1), FR-USR-04);
+    `tools.reembed` has no principal at all, which is why `actor_id` is optional. The
+    processing lock is not taken because `_reject_if_processing` is keyed on the *caller*
+    (FR-STA-02 names four verbs from the requesting user's GUI, and an operator is neither),
+    and because there is nothing to serialise for correctness — retrieval is answered from
+    v(n) throughout. FR-ERR-02 is likewise untouched: `size_bytes` does not change, so the
+    owner's allowance cannot move, and the transient double storage between the copy and the
+    purge is bounded by the caller's batch and invisible to `total_bytes_for_owner`.
+
+    Recorded, not fixed (R-84(7)): a swap committing between `rerank` and `generate` deletes
+    the chunk rows that turn holds ids for. That is the same window a concurrent `/replace`
+    already opens and the same mechanisms absorb it — R-47(5)'s fail-closed read-back,
+    R-48(5)'s narrowing, FR-CIT-06(1)/(5). It argues for bounded batches run off-peak, not for
+    a lock.
+    """
+    settings = settings or get_settings()
+    documents = DocumentRepository(session)
+    jobs = KnowledgeJobRepository(session)
+
+    # --- 1. gate before downloading anything ------------------------------------------
+    document = await documents.get(document_id)
+    if document is None:
+        raise DocumentNotFoundError(str(document_id))
+    if document.status is not DocumentStatus.ACTIVE:
+        raise NotRebuildableError(f"document is {document.status}, not ACTIVE")
+    if not await is_stale(session, document_id, settings=settings):
+        raise NotStaleError(f"{document_id} was already built by the configured pipeline")
+
+    tenant_id = document.tenant_id
+    knowledge_base_id = document.knowledge_base_id
+    filename = document.filename
+    mime_type = document.mime_type
+    checksum = document.checksum_sha256
+    old_key = storage.key_for_uri(document.storage_uri)
+    # Captured before the commit below, which expires the identity map — touching an attribute
+    # on the expired instance afterwards raises `MissingGreenlet` under asyncio. Same trap and
+    # same remedy as `replace_document`, whose comment explains why this is `commit()` rather
+    # than `rollback()`.
+    await session.commit()
+
+    slots = await _acquire_slot(settings)
+    async with slots:
+        # --- 2. read the original, outside any transaction ----------------------------
+        payload = await storage.get(old_key)
+
+        # R-84(8). Cheap — the bytes are already in memory — and it refuses before a version
+        # is burned, so a corrupt or mis-keyed object costs nothing but a diagnostic.
+        if hashlib.sha256(payload).hexdigest() != checksum:
+            raise OriginalCorruptError(
+                f"{old_key} does not match the recorded checksum for document {document_id}"
+            )
+
+        # --- 3. re-load FOR UPDATE and re-check ---------------------------------------
+        # The download can take minutes for a 50 MB original, and this is the window in which
+        # a `DELETE`, a `replace` or a second rebuild arrives. The lock is the same row lock
+        # all three of those take, which is what keeps the interleaving analysis finite.
+        #
+        # Staleness is re-checked as well as the state: two concurrent rebuilds of one
+        # document are caught by the `ACTIVE` gate only while the first is still in flight, and
+        # a first rebuild that has *finished* leaves the document `ACTIVE` and fresh — which
+        # only the staleness re-read can see.
+        document = await documents.get_for_update(document_id)
+        if document is None:
+            raise DocumentNotFoundError(str(document_id))
+        if document.status is not DocumentStatus.ACTIVE:
+            raise NotRebuildableError(f"document is {document.status}, not ACTIVE")
+        if not await is_stale(session, document_id, settings=settings):
+            raise NotStaleError(f"{document_id} was already built by the configured pipeline")
+
+        previous_version = document.current_version
+
+        # --- 4. target version --------------------------------------------------------
+        # `MAX(knowledge_jobs.document_version)`, not `current_version + 1`: a replace whose
+        # ingestion failed has already burned its number, and reusing it would collide on the
+        # unique `ingest:{doc}:v{n}` key. The same read `retry_ingestion` and
+        # `replace_document` do, for the same reason.
+        version = (await jobs.latest_ingest_version(document_id) or previous_version) + 1
+
+        new_key = original_key(
+            tenant_id=tenant_id,
+            knowledge_base_id=knowledge_base_id,
+            document_id=document_id,
+            version=version,
+            filename=filename,
+        )
+        try:
+            # The `put` runs under the row lock, exactly as `replace_document`'s does and for
+            # its stated reason: the key embeds the version, and a version computed without
+            # the lock can be wrong by the time the object lands.
+            stored = await storage.put(
+                new_key,
+                payload,
+                content_type=mime_type,
+                max_bytes=settings.upload.max_file_bytes,
+            )
+
+            # The ONLY document field this writes. Not `checksum_sha256`, `size_bytes`,
+            # `filename` or `mime_type` — the bytes are the same bytes, and re-writing them
+            # from a second reading of the same object is how those columns acquire a second
+            # source of truth. Not `current_version`, `searchable`, `chunk_count` or
+            # `page_count` — those describe the version still answering questions (R-36(3)).
+            document.storage_uri = stored.uri
+            await documents.set_status(document, DocumentStatus.QUEUED, clear_error=True)
+
+            await _supersede_open_ingests(jobs, document_id)
+
+            job = KnowledgeJob(
+                document_id=document_id,
+                job_type=JobType.INGEST,
+                status=JobStatus.QUEUED,
+                document_version=version,
+                idempotency_key=f"ingest:{document_id}:v{version}",
+            )
+            await jobs.add(job)
+
+            # NFR-SEC-08. R-83(5) recorded the trigger for this in its own ruling — "an
+            # authenticated `PUT /admin/models` … is also the day an audit row becomes both
+            # possible and right" — and the admin route above fires it. Filed as
+            # `DOCUMENT_REPLACE` with `details.action = "rebuild"`: reusing an existing
+            # `AuditEventType` member keeps R-43(7)'s no-CHECK-constraint-surgery rule, and
+            # `record_document_event`'s map is what stops it defaulting to `DOCUMENT_DELETE`.
+            # `actor_id` is NULL on the `tools.reembed` path, which the column already allows.
+            await audit.record_document_event(
+                session, actor_id=actor_id, document_id=document_id, action="rebuild"
+            )
+            await session.commit()
+        except Exception:
+            # One handler for the put, the update, the job insert, the audit and the commit.
+            # Every failure path leaves the old `storage_uri` intact, no v(n+1) object, no job
+            # row, and a document still serving from v(n).
+            await session.rollback()
+            await _delete_quietly(storage, new_key)
+            raise
+
+    log.info(
+        "document.rebuild_queued",
+        document_id=str(document_id),
+        job_id=str(job.id),
+        version=version,
+        previous_version=previous_version,
+    )
+    await _enqueue_quietly(queue.enqueue_ingest, session=session, job=job, document_id=document_id)
+    return RebuildOutcome(
+        document_id=document_id,
+        job_id=job.id,
+        status=DocumentStatus.QUEUED,
+        version=version,
+        previous_version=previous_version,
+    )
+
+
 __all__ = [
     "ByteSource",
     "ConversationNotFoundError",
@@ -1015,16 +1244,21 @@ __all__ = [
     "EmptyFileError",
     "FileTooLargeError",
     "MissingConversationError",
+    "NotRebuildableError",
     "NotReplaceableError",
     "NotRetryableError",
+    "NotStaleError",
     "ObjectTooLargeError",
+    "OriginalCorruptError",
     "QuotaExceededError",
+    "RebuildOutcome",
     "ReplaceOutcome",
     "RetryOutcome",
     "UnsupportedFileTypeError",
     "UploadError",
     "UploadOutcome",
     "UploadScope",
+    "rebuild_document",
     "replace_document",
     "request_deletion",
     "resolve_scope_kb_id",

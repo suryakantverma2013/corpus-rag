@@ -1019,6 +1019,225 @@
         }
       }
     },
+    "/api/v1/admin/documents/stale": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "List documents whose embeddings predate the configured pipeline",
+        "description": "Read-only, and safe to run against production at any moment.\n\nDeclares no `409` and no `503`: it takes no lock, touches no object store and has no state to\nconflict with. R-77(2) — a route may not advertise a status it cannot return.",
+        "operationId": "list_stale_documents",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "owner_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Restrict to one owner's documents.",
+              "title": "Owner Id"
+            },
+            "description": "Restrict to one owner's documents."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StaleDocumentsResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "NFR-SEC-07 — too many attempts. `Retry-After` carries the cooldown.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/documents/{document_id}/reembed": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Re-embed one document under the configured pipeline",
+        "operationId": "reembed_document",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Document Id"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Accepted; the rebuild is queued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RebuildResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such document.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Object storage is unreachable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not ACTIVE, already current, or the stored original is corrupt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RebuildConflictResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "NFR-SEC-07 — too many attempts. `Retry-After` carries the cooldown.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/documents": {
       "post": {
         "tags": [
@@ -3825,6 +4044,30 @@
         "title": "ConfigResponse",
         "description": "Deployment configuration the GUI renders. One field today, by design."
       },
+      "ConfiguredPipelineResponse": {
+        "properties": {
+          "embedding_model": {
+            "type": "string",
+            "title": "Embedding Model"
+          },
+          "chunking_version": {
+            "type": "string",
+            "title": "Chunking Version"
+          },
+          "preprocessing_version": {
+            "type": "string",
+            "title": "Preprocessing Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "embedding_model",
+          "chunking_version",
+          "preprocessing_version"
+        ],
+        "title": "ConfiguredPipelineResponse",
+        "description": "The three non-text inputs to FR-ING-03's fingerprint, as configured right now."
+      },
       "ContextWindowExceededDetail": {
         "properties": {
           "error_code": {
@@ -5349,6 +5592,78 @@
         "title": "ReadinessResponse",
         "description": "NFR-REL-02's readiness body, on both arms (T-405).\n\nTyped so the `503` branch is expressible in the schema at all: the status code is set\nimperatively on the response object, so FastAPI cannot infer it, and before T-405 the whole\nbody was an untyped `dict[str, object]`."
       },
+      "RebuildConflictDetail": {
+        "properties": {
+          "error_code": {
+            "type": "string",
+            "enum": [
+              "NOT_REBUILDABLE",
+              "NOT_STALE",
+              "ORIGINAL_CORRUPT"
+            ],
+            "title": "Error Code"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "error_code",
+          "message"
+        ],
+        "title": "RebuildConflictDetail",
+        "description": "Why a T-608 re-embed was refused (R-84 → 409). Three codes, one status.\n\nAll three are refusals about the *document's state*, not failures, so none carries a\n`FailureClass` — the R-51(5) precedent, and the same reasoning that keeps R-24's gate on\n`409` rather than `423`. They are separate codes because the operator's next action differs\nfor each and no two of them are derivable from the same follow-up read:\n\n- ``NOT_REBUILDABLE`` — the document is not `ACTIVE` (R-84(4)). Transient for anything in\n  flight, permanent for the deletion path; either way, look at the document.\n- ``NOT_STALE`` — it was already built by the configured pipeline (R-84(3)). **The\n  load-bearing one:** it is what keeps this trigger *controlled* rather than a re-embed\n  button, so a client must be able to tell it from the other two and report it as \"nothing\n  to do\" rather than as an error.\n- ``ORIGINAL_CORRUPT`` — the stored original no longer matches `checksum_sha256` (R-84(8)).\n  Neither transient nor a state to wait out: it needs a human, and re-running the batch will\n  report it again forever until one arrives."
+      },
+      "RebuildConflictResponse": {
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/RebuildConflictDetail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "detail"
+        ],
+        "title": "RebuildConflictResponse",
+        "description": "The wire body for R-84's three refusals."
+      },
+      "RebuildResponse": {
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Document Id"
+          },
+          "job_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Job Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DocumentStatus"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "previous_version": {
+            "type": "integer",
+            "title": "Previous Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "document_id",
+          "job_id",
+          "status",
+          "version",
+          "previous_version"
+        ],
+        "title": "RebuildResponse",
+        "description": "What `POST /admin/documents/{id}/reembed` renders.\n\nBoth versions, because both are true at once: `version` is what the worker will build,\n`previous_version` what keeps answering questions until the swap commits (R-36(3)). One\nnumber for both would be the likeliest source of a bug on this surface — the reason\n`ReplaceOutcome` makes the same distinction."
+      },
       "RenameConversationRequest": {
         "properties": {
           "title": {
@@ -5487,6 +5802,109 @@
         ],
         "title": "StageData",
         "description": "R-43(5) made structural: this payload **cannot** carry text.\n\nOne field, so the \"progress frames carry no content\" rule of R-54(2) is a property of the\ntype rather than a discipline at the yield site."
+      },
+      "StaleDocumentResponse": {
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Document Id"
+          },
+          "owner_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Owner Id"
+          },
+          "filename": {
+            "type": "string",
+            "title": "Filename"
+          },
+          "document_version": {
+            "type": "integer",
+            "title": "Document Version"
+          },
+          "chunk_count": {
+            "type": "integer",
+            "title": "Chunk Count"
+          },
+          "token_count": {
+            "type": "integer",
+            "title": "Token Count"
+          },
+          "drifted_inputs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Drifted Inputs"
+          }
+        },
+        "type": "object",
+        "required": [
+          "document_id",
+          "owner_id",
+          "filename",
+          "document_version",
+          "chunk_count",
+          "token_count",
+          "drifted_inputs"
+        ],
+        "title": "StaleDocumentResponse",
+        "description": "One document whose live version was built by a different pipeline.\n\nMetadata only (R-40(5)): no chunk text, no `storage_uri`, no chunk id — which is also what\nkeeps R-31(4)'s revisit trigger untripped, since nothing here re-serves uploaded content."
+      },
+      "StaleDocumentsResponse": {
+        "properties": {
+          "pipeline": {
+            "$ref": "#/components/schemas/ConfiguredPipelineResponse"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/StaleTotalsResponse"
+          },
+          "documents": {
+            "items": {
+              "$ref": "#/components/schemas/StaleDocumentResponse"
+            },
+            "type": "array",
+            "title": "Documents"
+          }
+        },
+        "type": "object",
+        "required": [
+          "pipeline",
+          "totals",
+          "documents"
+        ],
+        "title": "StaleDocumentsResponse",
+        "description": "What `GET /admin/documents/stale` renders."
+      },
+      "StaleTotalsResponse": {
+        "properties": {
+          "documents": {
+            "type": "integer",
+            "title": "Documents"
+          },
+          "chunks": {
+            "type": "integer",
+            "title": "Chunks"
+          },
+          "token_count": {
+            "type": "integer",
+            "title": "Token Count"
+          },
+          "in_flight": {
+            "type": "integer",
+            "title": "In Flight"
+          }
+        },
+        "type": "object",
+        "required": [
+          "documents",
+          "chunks",
+          "token_count",
+          "in_flight"
+        ],
+        "title": "StaleTotalsResponse",
+        "description": "Totals over the whole stale set, not the page.\n\n`token_count` is FR-ING-03's `ceil(len/4)` estimate (R-35(7)) summed over every chunk a full\nrun would re-embed — indicative rather than a quotation, and here because \"re-embed 4,100\ndocuments\" and \"spend ~11M embedding tokens\" are the same sentence to the database and very\ndifferent sentences to whoever is paying.\n\n`in_flight` is reported separately rather than folded in: a document already being rebuilt is\nneither work to do nor work done, and omitting it would read as \"nothing left\" mid-run."
       },
       "TextSegment": {
         "properties": {

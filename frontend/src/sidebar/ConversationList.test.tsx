@@ -205,6 +205,34 @@ describe('FR-SBR-07 rename', () => {
     expect(screen.queryByRole('button', { name: /^Analyzing Market Trends/ })).toBeNull();
   });
 
+  it('selects the seeded title once, and not again on every keystroke', () => {
+    // The defect this pins: the field was wired with an inline `ref={(node) => node?.select()}`.
+    // A ref callback whose identity changes every render is detached and re-attached on every
+    // render, so each keystroke re-selected the whole value and the next character REPLACED it
+    // instead of appending — the field could never hold more than one typed character.
+    //
+    // Every other test here drives the value with a single `fireEvent.change`, which sets the
+    // whole string at once, so none of them can observe a selection that is wrong BETWEEN
+    // keystrokes. The caret is no good either: jsdom clamps a stale selection to the new value's
+    // length, so 0..23 becomes 0..1 and is indistinguishable from a fresh select. What separates
+    // the two is how many times `select()` runs — once per edit, not once per render.
+    const select = vi.spyOn(HTMLInputElement.prototype, 'select');
+    try {
+      list();
+      const input = startRename('Analyzing Market Trends');
+      expect(select).toHaveBeenCalledTimes(1);
+
+      fireEvent.change(input, { target: { value: 'N' } });
+      fireEvent.change(input, { target: { value: 'Ne' } });
+
+      // Under the defect this climbs with every render, and typing 'e' after 'N' yields 'e'.
+      expect(select).toHaveBeenCalledTimes(1);
+      expect(input).toHaveProperty('value', 'Ne');
+    } finally {
+      select.mockRestore();
+    }
+  });
+
   it('commits on Enter', () => {
     const { props } = list();
     const input = startRename('Analyzing Market Trends');

@@ -125,6 +125,7 @@ async def prefetch_query_arm(
     filters: RetrievalFilter,
     sessionmaker: async_sessionmaker[AsyncSession],
     embeddings: EmbeddingClient,
+    embedding_model: str | None = None,
     retriever_factory: Callable[[AsyncSession], Retriever],
     settings: Settings | None = None,
 ) -> None:
@@ -151,7 +152,7 @@ async def prefetch_query_arm(
 
     started = time.perf_counter()
     try:
-        vectors = await embeddings.embed_queries([probe])
+        vectors = await embeddings.embed_queries([probe], model=embedding_model)
         hits = await _search_one(
             probe,
             vectors[0],
@@ -185,6 +186,7 @@ async def retrieve_for_turn(
     filters: RetrievalFilter,
     sessionmaker: async_sessionmaker[AsyncSession],
     embeddings: EmbeddingClient,
+    embedding_model: str | None = None,
     retriever_factory: Callable[[AsyncSession], Retriever],
     prefetch: QueryArmPrefetch | None = None,
     settings: Settings | None = None,
@@ -224,7 +226,7 @@ async def retrieve_for_turn(
 
     # One round trip for every probe, on the query budget (R-46(7)). A failure here is
     # fatal by construction: with no vector there is no dense arm for the original query.
-    vectors = await embeddings.embed_queries(pending) if pending else []
+    vectors = await embeddings.embed_queries(pending, model=embedding_model) if pending else []
 
     searched: list[list[RetrievedChunk] | BaseException] = list(
         await asyncio.gather(

@@ -99,9 +99,12 @@ __all__ = [
 # owns a string. `errors` imports no langgraph — which is the point: T-402's chat route and
 # T-505's error display need the copy without triggering `apply_strict_msgpack()`.
 
-#: R-23 / FR-SYS-02: what the system says when the retrieval scope is empty. §8.4 tracks
-#: "empty-retrieval-scope message copy (FR-SYS-02, R-23)" as an open copy TBD.
-ABSTAIN_EMPTY_SCOPE = (  # TBD(§8.4)
+#: R-23 / FR-SYS-02: what the system says when the retrieval scope is empty.
+#: Author-confirmed 2026-08-18 (R-86(2)) and written into FR-SYS-02, so this derives from
+#: the requirement rather than standing in for a decision nobody had taken. It says what
+#: happened, and then what to do about it — R-67(2)'s shape, where naming the escape is
+#: what stops a user reading a bounded answer as a broken product.
+ABSTAIN_EMPTY_SCOPE = (
     "I can't ground an answer to that — I couldn't find anything relevant in the "
     "documents available to you. Try uploading a relevant document, or rephrasing."
 )
@@ -413,6 +416,7 @@ async def route(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
             filters=filters,
             sessionmaker=ctx.sessionmaker,
             embeddings=embeddings,
+            embedding_model=_model_for(ctx, ModelSlot.EMBEDDING),
             retriever_factory=retriever_factory,
             settings=settings,
         )
@@ -585,8 +589,14 @@ async def retrieve(state: RAGState, runtime: Runtime[RAGContext]) -> RAGState:
         query=state.get("query", ""),
         sub_queries=state.get("sub_queries", []),
         filters=filters,
+        # The query is embedded with the slot in force, which is also the model the *next*
+        # ingest will write with — so after a flip this arm searches a corpus that is partly
+        # the other vector space until `tools.reembed run` drains it. Sanctioned by R-87(1)
+        # and made finite by the staleness report; both arms still fuse under R-37's RRF, and
+        # a 3072-dim vector from either model is a legal operand for `dense_distance`.
         sessionmaker=ctx.sessionmaker,
         embeddings=embeddings,
+        embedding_model=_model_for(ctx, ModelSlot.EMBEDDING),
         retriever_factory=retriever_factory,
         prefetch=ctx.prefetch,
     )

@@ -22,7 +22,10 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 
 from app.db.base import DEFAULT_TENANT_ID
+from app.db.enums import DocumentStatus, JobStatus, JobType
+from app.db.models.document import Document
 from app.db.models.document_chunk import DocumentChunk
+from app.db.models.knowledge_job import KnowledgeJob
 from app.db.repositories.base import BaseRepository
 
 #: Rows per carry-forward statement. asyncpg caps a statement at 32,767 bound parameters
@@ -62,6 +65,59 @@ class CarryForwardRow:
     token_count: int | None
     chunk_text: str
     meta: dict
+
+
+@dataclass(frozen=True, slots=True)
+class StalePipelineDocument:
+    """One `ACTIVE` document whose stored fingerprint inputs no longer match the configured
+    pipeline — T-608's unit of work (R-84(2)).
+
+    Metadata only, and deliberately so: R-31(4)'s revisit trigger fires on any surface that
+    hands out document *content*, and this one is read by an admin route. No `chunk_text`, no
+    `storage_uri`, no chunk id.
+
+    The three `*_drift` flags are what makes a report actionable rather than alarming: they
+    name **which** fingerprint input moved, so an operator can tell a deliberate embedding-model
+    change from an accidental `CHUNKER_*` retune before paying to re-embed either.
+    """
+
+    document_id: uuid.UUID
+    owner_id: uuid.UUID
+    filename: str
+    document_version: int
+    chunk_count: int
+    token_count: int
+    embedding_model_drift: bool
+    chunking_version_drift: bool
+    preprocessing_version_drift: bool
+
+    @property
+    def drifted_inputs(self) -> tuple[str, ...]:
+        """The fingerprint inputs that moved, in the formula's own order."""
+        return tuple(
+            name
+            for name, drifted in (
+                ("embedding_model", self.embedding_model_drift),
+                ("chunking_version", self.chunking_version_drift),
+                ("preprocessing_version", self.preprocessing_version_drift),
+            )
+            if drifted
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class StalePipelineTotals:
+    """Totals over the **whole** stale set, not the page (T-608).
+
+    `in_flight` is reported rather than folded into `documents` because a document already
+    being rebuilt is neither work to do nor work done, and a tool that silently omitted it
+    would read as "nothing left" mid-run.
+    """
+
+    documents: int
+    chunks: int
+    token_count: int
+    in_flight: int
 
 
 class DocumentChunkRepository(BaseRepository[DocumentChunk]):
@@ -129,6 +185,247 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
             )
             for row in rows
         ]
+
+    # --- FR-ING-03 pipeline drift (T-608, R-84(2)) -----------------------------
+
+    def _drift_predicates(
+        self, *, embedding_model: str, chunking_version: str, preprocessing_version: str
+    ) -> dict[str, object]:
+        """`bool_or(stored IS DISTINCT FROM configured)` per fingerprint input.
+
+        **Read, never recomputed.** `document_chunks.metadata` already carries all three
+        non-text inputs to `embedding_fingerprint` — R-35 made that payload a contract
+        precisely so "why did this row re-embed?" is answerable from the row alone, and this
+        is that reader. Recomputing the fingerprint from `chunk_text` would give the same
+        answer at the cost of dragging every chunk's text through Python, and would say only
+        *that* the document is stale, never *which* input moved.
+
+        **`IS DISTINCT FROM`, not `!=`.** A row whose `metadata` predates the contract (the
+        column's server default is `'{}'`) yields SQL NULL for every key, and `NULL != 'x'`
+        is NULL — neither true nor false — so a `!=` predicate would silently classify the
+        oldest rows in the corpus as fresh. Absent provenance is not evidence of a match.
+        """
+        meta = DocumentChunk.meta
+        return {
+            "embedding_model_drift": func.bool_or(
+                meta["embedding_model"].astext.is_distinct_from(embedding_model)
+            ),
+            "chunking_version_drift": func.bool_or(
+                meta["chunking_version"].astext.is_distinct_from(chunking_version)
+            ),
+            "preprocessing_version_drift": func.bool_or(
+                meta["preprocessing_version"].astext.is_distinct_from(preprocessing_version)
+            ),
+        }
+
+    def _stale_grouped(
+        self,
+        *,
+        embedding_model: str,
+        chunking_version: str,
+        preprocessing_version: str,
+        owner_id: uuid.UUID | None,
+        in_flight: bool,
+    ):  # noqa: ANN202 — a SQLAlchemy Select, whose generic parameters are not worth spelling
+        """The grouped drift query both public readers below are built from.
+
+        Joined on ``document_version = documents.current_version`` so the subject is the
+        version that is *answering questions*, never a superseded set a crashed swap left
+        behind. `ACTIVE` only (R-84(4)): a stale `FAILED` document is already reachable
+        through `POST /documents/{id}/retry`, which rebuilds it under the configured pipeline
+        by construction, and every other state is either in flight — where a second dispatch
+        would race the worker (R-39(5)'s argument) — or on the deletion path.
+
+        ``in_flight`` selects between the two halves of the drifted set: documents with **no**
+        open `INGEST` job (the work still to do) and documents with one (already queued). The
+        `NOT EXISTS` half is load-bearing rather than hygiene — it is the whole of R-84(9)'s
+        resumability, since without it every run re-queues the batch the previous run is still
+        rebuilding, and each of those re-queues would burn another version.
+        """
+        drift = self._drift_predicates(
+            embedding_model=embedding_model,
+            chunking_version=chunking_version,
+            preprocessing_version=preprocessing_version,
+        )
+        open_job = (
+            select(KnowledgeJob.id)
+            .where(
+                KnowledgeJob.document_id == Document.id,
+                KnowledgeJob.job_type == JobType.INGEST,
+                KnowledgeJob.status.in_((JobStatus.QUEUED, JobStatus.RUNNING)),
+            )
+            .exists()
+        )
+        stmt = (
+            select(
+                Document.id.label("document_id"),
+                Document.owner_id.label("owner_id"),
+                Document.filename.label("filename"),
+                Document.current_version.label("document_version"),
+                Document.created_at.label("created_at"),
+                func.count().label("chunk_count"),
+                func.coalesce(func.sum(DocumentChunk.token_count), 0).label("token_count"),
+                drift["embedding_model_drift"].label("embedding_model_drift"),
+                drift["chunking_version_drift"].label("chunking_version_drift"),
+                drift["preprocessing_version_drift"].label("preprocessing_version_drift"),
+            )
+            .join(
+                DocumentChunk,
+                (DocumentChunk.document_id == Document.id)
+                & (DocumentChunk.document_version == Document.current_version),
+            )
+            .where(
+                Document.status == DocumentStatus.ACTIVE,
+                Document.deleted_at.is_(None),
+                open_job if in_flight else ~open_job,
+            )
+            .group_by(
+                Document.id,
+                Document.owner_id,
+                Document.filename,
+                Document.current_version,
+                Document.created_at,
+            )
+            .having(
+                drift["embedding_model_drift"]
+                | drift["chunking_version_drift"]
+                | drift["preprocessing_version_drift"]
+            )
+        )
+        if owner_id is not None:
+            stmt = stmt.where(Document.owner_id == owner_id)
+        return stmt
+
+    async def stale_pipeline_documents(
+        self,
+        *,
+        embedding_model: str,
+        chunking_version: str,
+        preprocessing_version: str,
+        owner_id: uuid.UUID | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[StalePipelineDocument]:
+        """Documents whose live version was built by a different pipeline (T-608).
+
+        Ordered ``created_at, id`` — T-108's lesson that timestamps tie, so the id breaks it
+        and a bounded run is reproducible rather than merely bounded.
+        """
+        stmt = self._stale_grouped(
+            embedding_model=embedding_model,
+            chunking_version=chunking_version,
+            preprocessing_version=preprocessing_version,
+            owner_id=owner_id,
+            in_flight=False,
+        )
+        stmt = stmt.order_by(Document.created_at, Document.id).limit(limit).offset(offset)
+        rows = (await self.session.execute(stmt)).all()
+        return [
+            StalePipelineDocument(
+                document_id=row.document_id,
+                owner_id=row.owner_id,
+                filename=row.filename,
+                document_version=row.document_version,
+                chunk_count=row.chunk_count,
+                token_count=row.token_count,
+                embedding_model_drift=row.embedding_model_drift,
+                chunking_version_drift=row.chunking_version_drift,
+                preprocessing_version_drift=row.preprocessing_version_drift,
+            )
+            for row in rows
+        ]
+
+    async def stale_pipeline_totals(
+        self,
+        *,
+        embedding_model: str,
+        chunking_version: str,
+        preprocessing_version: str,
+        owner_id: uuid.UUID | None = None,
+    ) -> StalePipelineTotals:
+        """Totals over the whole stale set — what a bounded run is a fraction of.
+
+        `token_count` is the FR-ING-03 estimate summed over every chunk that will be
+        re-embedded (R-35(7)'s `ceil(len/4)`, so indicative rather than a quotation). It is
+        here because "re-embed 4,100 documents" and "spend ~11M embedding tokens" are the same
+        sentence to the database and very different sentences to whoever is paying.
+        """
+        pipeline = {
+            "embedding_model": embedding_model,
+            "chunking_version": chunking_version,
+            "preprocessing_version": preprocessing_version,
+            "owner_id": owner_id,
+        }
+        documents, chunks, tokens = await self._aggregate(**pipeline, in_flight=False)  # type: ignore[arg-type]
+        in_flight, _, _ = await self._aggregate(**pipeline, in_flight=True)  # type: ignore[arg-type]
+        return StalePipelineTotals(
+            documents=documents, chunks=chunks, token_count=tokens, in_flight=in_flight
+        )
+
+    async def _aggregate(
+        self,
+        *,
+        embedding_model: str,
+        chunking_version: str,
+        preprocessing_version: str,
+        owner_id: uuid.UUID | None,
+        in_flight: bool,
+    ) -> tuple[int, int, int]:
+        """Roll the grouped query up into (documents, chunks, tokens)."""
+        grouped = self._stale_grouped(
+            embedding_model=embedding_model,
+            chunking_version=chunking_version,
+            preprocessing_version=preprocessing_version,
+            owner_id=owner_id,
+            in_flight=in_flight,
+        ).subquery()
+        stmt = select(
+            func.count(),
+            func.coalesce(func.sum(grouped.c.chunk_count), 0),
+            func.coalesce(func.sum(grouped.c.token_count), 0),
+        ).select_from(grouped)
+        row = (await self.session.execute(stmt)).one()
+        return int(row[0]), int(row[1]), int(row[2])
+
+    async def is_pipeline_stale(
+        self,
+        document_id: uuid.UUID,
+        *,
+        embedding_model: str,
+        chunking_version: str,
+        preprocessing_version: str,
+    ) -> bool:
+        """Whether **this** document's live version was built by a different pipeline.
+
+        The precondition R-84(3) turns into a refusal. Deliberately the same
+        `_drift_predicates` the enumeration uses rather than a second reading of the same
+        rule: a route that accepted documents the report never lists — or refused ones it did
+        — would be the more confusing of the two failures, and two spellings of one predicate
+        is how that happens.
+        """
+        drift = self._drift_predicates(
+            embedding_model=embedding_model,
+            chunking_version=chunking_version,
+            preprocessing_version=preprocessing_version,
+        )
+        stmt = (
+            select(
+                drift["embedding_model_drift"]
+                | drift["chunking_version_drift"]
+                | drift["preprocessing_version_drift"]
+            )
+            .select_from(DocumentChunk)
+            .join(Document, Document.id == DocumentChunk.document_id)
+            .where(
+                Document.id == document_id,
+                DocumentChunk.document_version == Document.current_version,
+            )
+        )
+        # `bool_or` over an empty set is NULL, which is the honest answer for a document with
+        # no chunks at its current version: there is nothing whose provenance could differ,
+        # so there is nothing to re-embed. `is True` rather than a truthiness test, because
+        # NULL arrives here as `None`.
+        return (await self.session.execute(stmt)).scalar() is True
 
     async def carry_forward_embeddings(
         self,

@@ -104,6 +104,14 @@ Three rules that are easy to get wrong, each pinned by tests:
 - **A route may not declare a status it cannot return.** Checked mechanically against the live
   application, after two routes were found declaring a `403` they actually answer as `409`.
 
+Document verbs are **owner-or-administrator** — upload, delete, retry and replace all accept the
+owner or an administrator, and answer `404` for anyone else. The one exception is
+`POST /api/v1/admin/documents/{id}/reembed`, which is **administrator-only even for the owner**:
+re-embedding spends the deployment's embedding budget rather than the caller's, so it is an operator
+decision, not a document one. Every route that requires a credential — and every one that does not —
+is enumerated with its gate and the ruling that fixes its status codes in
+`backend/tests/security/__init__.py`; a new route fails the suite until it is declared there.
+
 ## 5. Prompt injection
 
 Screening is **query-only**, and that is a decision rather than an omission. Retrieved document

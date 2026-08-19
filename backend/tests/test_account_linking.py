@@ -154,6 +154,29 @@ def _client(client_id: str) -> dict:
     return match[0]
 
 
+def test_the_realm_enforces_a_password_policy() -> None:
+    """NFR-SEC-04's first clause, as a property of the artifact (R-86(1), OI-38).
+
+    T-606 found the realm carrying **no** `passwordPolicy` key at all — not a weak policy but the
+    absence of one, so Keycloak enforced no length, complexity, history or reuse rule and any
+    password an administrator typed into FR-USR-03's form was accepted. It is filed here rather
+    than in the live suite because the live test needs a running Keycloak, and the property whose
+    silent loss is worst is the one that must be checked in every run.
+
+    **`forceExpiredPasswordChange` is asserted absent, and that is the load-bearing half.** Under
+    backend-mediated ROPC there is no browser (R-28), so any policy that arms a required action
+    locks the account out permanently and undiagnosably — §8.9's standing constraint. A rotation
+    policy is therefore not a stricter version of this one; it is an outage.
+    """
+    policy = _REALM.get("passwordPolicy", "")
+    assert "length(" in policy, f"no length rule in the password policy: {policy!r}"
+    assert "notUsername" in policy, f"the username is still an allowed password: {policy!r}"
+    assert "forceExpiredPasswordChange" not in policy, (
+        "a rotation policy arms a required action, and under ROPC there is no browser to "
+        "complete one — the account is locked out permanently (spec §8.9)"
+    )
+
+
 def test_the_ropc_client_still_refuses_the_browser_flow() -> None:
     """R-28's ROPC-only stance, as a property of the artifact rather than a memory.
 

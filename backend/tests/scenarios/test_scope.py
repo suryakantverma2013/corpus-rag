@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.enums import DocumentStatus
 from app.db.models.document import Document
+from app.services.model_selection import ModelSlot, set_model_override
 from tests.scenarios import scenario
 from tests.scenarios.conftest import (
     DrainingQueue,
@@ -143,28 +144,39 @@ async def test_an_embedding_model_change_re_embeds_the_whole_document(
     session: AsyncSession,
     make_token: Callable[..., str],
     queue: DrainingQueue,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """FR-ING-03, under R-76's reading of "controlled re-embedding job".
+    """FR-ING-03, under R-76's reading of "controlled re-embedding job" — now with the trigger.
 
-    **`JobType` has exactly `INGEST` and `DELETE` — there is no re-embedding job.** So the
-    *control* §11 asks for is not a job type: it is `embedding_fingerprint`, which folds in
-    `embedding_model` (`chunker.compute_embedding_fingerprint`), so a model change
-    invalidates every fingerprint and the next ingest of that document rebuilds it whole.
+    **`JobType` still has exactly `INGEST` and `DELETE` — there is no re-embedding job type.**
+    R-76(2) settled that the *control* §11 asks for is `embedding_fingerprint`, which folds in
+    `embedding_model` (`chunker.compute_embedding_fingerprint`), so a model change invalidates
+    every fingerprint and the next ingest of a document rebuilds it whole, carrying nothing
+    forward.
 
-    The test asserts both halves, and **the first half is the gap, asserted rather than
-    described**: an `ACTIVE` document cannot be re-ingested at all. FR-ING-04's short-circuit
-    ("an `ACTIVE` document short-circuits ingestion") means a same-version job against a
-    healthy document does nothing — so after a model change there is no reachable way to
-    re-embed a healthy corpus. `/retry` requires `FAILED`, and `/replace` with identical
-    bytes answers `200 duplicate` and queues nothing.
+    When this test was written that was the whole story and **the gap was the interesting
+    half**: an `ACTIVE` document could not be re-ingested at all, so after a model change there
+    was no reachable way to re-embed a healthy corpus. T-608 built the trigger (R-84) and this
+    test now walks the whole route:
 
-    The second half drives the one path that does exist — FR-ING-04's retry — and shows the
-    fingerprint doing the work §11 credits to a job. The missing operator trigger is a real
-    gap; it is on the board as its own task rather than papered over here.
+    * the two paths that are *still* refused, which is the point of them — `/replace` with
+      identical bytes and `/retry` on an `ACTIVE` document. R-84 deliberately did **not** widen
+      either, because widening `/retry` would erase FR-ING-04's short-circuit;
+    * `POST /admin/documents/{id}/reembed`, which satisfies that short-circuit instead by
+      presenting a genuinely later build target;
+    * and the resumability property — once rebuilt, the document is no longer stale, so a second
+      `plan_reembed` returns nothing and a second call is refused `NOT_STALE`.
+
+    The model change is simulated the way an operator makes it: `OPENAI_EMBEDDING_MODEL` moves
+    *and* the worker's embedder moves with it. Moving only the worker's would leave the
+    enumeration reading the old value and this test asserting against a pipeline nobody
+    configured.
     """
     from app.services.embeddings import FakeEmbeddingClient
+    from app.services.reembed import plan_reembed
 
     caller = await make_caller(session, make_token)
+    operator = await make_caller(session, make_token, roles=("admin", "user"))
     # The exact bytes, kept: PyMuPDF stamps a fresh document id on every build, so
     # `pdf(ANCHOR)` twice is *not* the same file and would be a genuine replace.
     payload = pdf(ANCHOR)
@@ -180,13 +192,26 @@ async def test_an_embedding_model_change_re_embeds_the_whole_document(
     first_fingerprints = {row.embedding_fingerprint for row in before}
     document = await reload(session, Document, document_id)
     assert document.status is DocumentStatus.ACTIVE
+    # An int, not the attribute: `reload` hands back the identity-mapped instance, so
+    # `document.current_version` moves under the assertions below once the swap commits.
+    first_version = document.current_version
+    assert not (await plan_reembed(session, owner_id=caller.id)).documents, (
+        "a document just built by the configured pipeline is not stale"
+    )
 
-    # The model is read off the embedder the worker is handed (`deps.embedder.model`), which
-    # is what reaches `compute_embedding_fingerprint`.
+    # The operator's change, driven through the mechanism that actually exists (T-612/R-87):
+    # one `model_overrides` row, which the enumeration and the worker both resolve. Until
+    # T-612 this was a monkeypatched setting *plus* a swapped client, and the two agreed only
+    # because nothing joined them — the setting fed the report while the client fed the
+    # fingerprint. Now the id has a single source, and this row is it. The replacement client
+    # remains only so `embedded_inputs` can be counted below.
     new_model = FakeEmbeddingClient(model="text-embedding-3-small")
+    await set_model_override(
+        session, slot=ModelSlot.EMBEDDING, model_id=new_model.model, updated_by="operator"
+    )
+    await session.flush()
 
-    # Half one: a healthy document is unreachable. Re-driving the *same* version short-
-    # circuits, so the model change cannot take effect however the job is delivered.
+    # --- the two paths that are still refused, deliberately ----------------------------
     replaced = await client.post(
         f"/api/v1/documents/{document_id}/replace",
         files=upload_files(payload),
@@ -201,23 +226,31 @@ async def test_an_embedding_model_change_re_embeds_the_whole_document(
         f"/api/v1/documents/{document_id}/retry", headers=caller.headers
     )
     assert retry_while_active.status_code == 409, (
-        "retry is FAILED-only (R-39(5)); if this ever becomes 202 the gap below has closed "
-        "and this test should be re-pointed at the new route"
+        "retry stays FAILED-only (R-39(5)); R-84 added a trigger rather than widening this one"
     )
 
     assert {row.embedding_fingerprint for row in await chunks_of(session, document_id)} == (
         first_fingerprints
-    ), "nothing should have re-embedded: there is no route that re-drives an ACTIVE document"
+    ), "neither refused path may re-embed anything"
 
-    # Half two: the one reachable re-ingest — FR-ING-04's retry of a failed document. This is
-    # what a real operator would be left with after changing the model.
-    document = await reload(session, Document, document_id)
-    document.status = DocumentStatus.FAILED
-    document.searchable = False
-    await session.commit()
+    # --- the trigger -------------------------------------------------------------------
+    stale = await plan_reembed(session, owner_id=caller.id)
+    assert [row.document_id for row in stale.documents] == [document.id]
+    assert stale.documents[0].drifted_inputs == ("embedding_model",)
+    assert stale.totals.token_count > 0, "the report has to price the run, not only count it"
 
-    retried = await client.post(f"/api/v1/documents/{document_id}/retry", headers=caller.headers)
-    assert retried.status_code == 202, retried.text
+    queued = await client.post(
+        f"/api/v1/admin/documents/{document_id}/reembed", headers=operator.headers
+    )
+    assert queued.status_code == 202, queued.text
+    assert queued.json()["version"] == first_version + 1
+    assert queued.json()["previous_version"] == first_version
+
+    # Still answering from the version already indexed: the swap is the worker's (R-36(3)).
+    mid = await reload(session, Document, document_id)
+    assert mid.current_version == first_version
+    assert mid.searchable is True
+
     await queue.drain(embedder_override=new_model)
 
     after = await chunks_of(session, document_id)
@@ -234,8 +267,20 @@ async def test_an_embedding_model_change_re_embeds_the_whole_document(
 
     # Never both models at once: retrieval joins on `document_version = current_version`, so
     # a stale-model vector is unreachable the moment the swap commits.
-    document = await reload(session, Document, document_id)
-    assert {row.document_version for row in after} == {document.current_version}
+    rebuilt = await reload(session, Document, document_id)
+    assert rebuilt.current_version == first_version + 1
+    assert {row.document_version for row in after} == {rebuilt.current_version}
+    assert rebuilt.status is DocumentStatus.ACTIVE
+
+    # --- R-84(9): resumable by construction, not by a cursor ---------------------------
+    assert not (await plan_reembed(session, owner_id=caller.id)).documents, (
+        "a rebuilt document must leave the stale set, or a second run re-queues it forever"
+    )
+    again = await client.post(
+        f"/api/v1/admin/documents/{document_id}/reembed", headers=operator.headers
+    )
+    assert again.status_code == 409, again.text
+    assert again.json()["detail"]["error_code"] == "NOT_STALE"
 
 
 # --- row 8: user loses document permission --------------------------------------------

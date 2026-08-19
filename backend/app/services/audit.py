@@ -29,6 +29,12 @@ _TARGET_CONVERSATION = "conversation"
 _DOCUMENT_EVENTS = {
     "upload": AuditEventType.DOCUMENT_UPLOAD,
     "replace": AuditEventType.DOCUMENT_REPLACE,
+    # T-608's re-embed (R-84(5)). `DOCUMENT_REPLACE` rather than a new member: it repoints
+    # `storage_uri` and bumps the version exactly as a replace does, and adding an
+    # `AuditEventType` would be the CHECK-constraint surgery R-43(7) declined for a
+    # distinction `details.action` already carries. Without this line it would default to
+    # `DOCUMENT_DELETE` — the very miss the docstring below warns about.
+    "rebuild": AuditEventType.DOCUMENT_REPLACE,
 }
 
 

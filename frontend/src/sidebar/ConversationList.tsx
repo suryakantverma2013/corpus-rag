@@ -87,6 +87,30 @@ export function ConversationList({
    *  this, dismissing the menu with Escape drops focus to <body> (NFR-A11Y-04). */
   const triggerRef = useRef<HTMLButtonElement | null>(null);
 
+  /** The rename field, focused and selected **once** when a row enters edit mode.
+   *  It must not be an inline `ref={(node) => node?.select()}`: a ref callback with a fresh
+   *  identity every render is detached and re-attached on every render, so each keystroke
+   *  re-selected the whole title and the next character replaced it instead of appending. */
+  const renameRef = useRef<HTMLInputElement | null>(null);
+  /** The menu's first item, focused once per opening — same reason as `renameRef`: as an inline
+   *  callback, any re-render while the menu was open snapped focus back off the arrowed-to item. */
+  const firstMenuItemRef = useRef<HTMLButtonElement | null>(null);
+
+  // Keyed on the row being edited, so it runs when editing starts and never again while typing.
+  useEffect(() => {
+    if (editingId === null) return;
+    const node = renameRef.current;
+    if (node === null) return;
+    node.focus();
+    node.select();
+  }, [editingId]);
+
+  // Keyed on the open menu, so arrowing to another item is not undone by an unrelated re-render.
+  useEffect(() => {
+    if (menuFor === null) return;
+    firstMenuItemRef.current?.focus();
+  }, [menuFor]);
+
   const closeMenu = useCallback((restoreFocus: boolean) => {
     setMenuFor(null);
     if (restoreFocus) triggerRef.current?.focus();
@@ -210,7 +234,7 @@ export function ConversationList({
                   // explicit accessible name naming the conversation is clearer than a label.
                   aria-label={`Rename ${title}`}
                   value={draft}
-                  ref={(node) => node?.select()}
+                  ref={renameRef}
                   onChange={(event) => setDraft(event.target.value)}
                   onKeyDown={(event) => onEditKeyDown(event, conversation)}
                   onBlur={() => commitRename(conversation)}
@@ -283,7 +307,7 @@ export function ConversationList({
                         type="button"
                         role="menuitem"
                         className={styles.menuItem}
-                        ref={(node) => node?.focus()}
+                        ref={firstMenuItemRef}
                         onClick={() => startRename(conversation)}
                       >
                         Rename

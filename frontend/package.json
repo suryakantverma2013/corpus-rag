@@ -14,7 +14,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "preview": "vite preview",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "a11y": "node a11y/run.mjs"
   },
   "dependencies": {
     "openapi-fetch": "^0.17.0",

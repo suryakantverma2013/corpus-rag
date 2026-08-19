@@ -223,8 +223,14 @@ def embedder() -> FakeEmbeddingClient:
 
     Rows 2 and 7 are claims about *how many* chunks were embedded, so the counter has to
     survive across drains — a fresh client per job would reset the evidence.
+
+    **Constructed with the configured model id, exactly as `build_embedding_client` does.** A
+    bare `FakeEmbeddingClient()` answers `"fake-embedding"`, and `deps.embedder.model` is what
+    reaches `compute_embedding_fingerprint` — so the harness would stamp every chunk with a
+    model no deployment configures, and T-608's drift report would call a freshly ingested
+    document stale (found exactly that way, by row 7).
     """
-    return FakeEmbeddingClient()
+    return FakeEmbeddingClient(get_settings().openai.embedding_model)
 
 
 @pytest.fixture

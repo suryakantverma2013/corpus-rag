@@ -170,9 +170,15 @@ export interface paths {
     };
     /**
      * Deployment configuration
-     * @description FR-SYS-03's model id.
+     * @description FR-SYS-03's model id — the one **in force**, not the one in the environment.
      *
      *     `user` is unused and is the point: it is the dependency that makes this authenticated.
+     *
+     *     The read goes through `resolve_models` (T-611, R-83) rather than straight to
+     *     `settings.openai.chat_model`, because since T-611 those two can differ: an operator may
+     *     have repointed generation without a deploy. Reporting the environment here would make the
+     *     FR-ANL-02 card name a model that is not answering — the precise silent drift this route
+     *     was added to remove, reintroduced one layer down.
      */
     get: operations['get_config'];
     put?: never;
@@ -230,6 +236,46 @@ export interface paths {
     get: operations['list_audit_events'];
     put?: never;
     post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/admin/documents/stale': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List documents whose embeddings predate the configured pipeline
+     * @description Read-only, and safe to run against production at any moment.
+     *
+     *     Declares no `409` and no `503`: it takes no lock, touches no object store and has no state to
+     *     conflict with. R-77(2) — a route may not advertise a status it cannot return.
+     */
+    get: operations['list_stale_documents'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/admin/documents/{document_id}/reembed': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Re-embed one document under the configured pipeline */
+    post: operations['reembed_document'];
     delete?: never;
     options?: never;
     head?: never;
@@ -945,9 +991,21 @@ export interface components {
     ConfigResponse: {
       /**
        * Chat Model
-       * @description The configured answer model (`OPENAI_CHAT_MODEL`), for FR-ANL-02's MODEL card. The *configured* id, not the one that answered any particular turn — that is `MessageResponse.model_name`, which the GUI prefers where it exists.
+       * @description The answer model in force, for FR-ANL-02's MODEL card: the operator's runtime override if one is set, else `OPENAI_CHAT_MODEL`. Still not the model that answered any particular turn — that is `MessageResponse.model_name`, which the GUI prefers where it exists.
        */
       chat_model: string;
+    };
+    /**
+     * ConfiguredPipelineResponse
+     * @description The three non-text inputs to FR-ING-03's fingerprint, as configured right now.
+     */
+    ConfiguredPipelineResponse: {
+      /** Embedding Model */
+      embedding_model: string;
+      /** Chunking Version */
+      chunking_version: string;
+      /** Preprocessing Version */
+      preprocessing_version: string;
     };
     /**
      * ContextWindowExceededDetail
@@ -1756,6 +1814,67 @@ export interface components {
       };
     };
     /**
+     * RebuildConflictDetail
+     * @description Why a T-608 re-embed was refused (R-84 → 409). Three codes, one status.
+     *
+     *     All three are refusals about the *document's state*, not failures, so none carries a
+     *     `FailureClass` — the R-51(5) precedent, and the same reasoning that keeps R-24's gate on
+     *     `409` rather than `423`. They are separate codes because the operator's next action differs
+     *     for each and no two of them are derivable from the same follow-up read:
+     *
+     *     - ``NOT_REBUILDABLE`` — the document is not `ACTIVE` (R-84(4)). Transient for anything in
+     *       flight, permanent for the deletion path; either way, look at the document.
+     *     - ``NOT_STALE`` — it was already built by the configured pipeline (R-84(3)). **The
+     *       load-bearing one:** it is what keeps this trigger *controlled* rather than a re-embed
+     *       button, so a client must be able to tell it from the other two and report it as "nothing
+     *       to do" rather than as an error.
+     *     - ``ORIGINAL_CORRUPT`` — the stored original no longer matches `checksum_sha256` (R-84(8)).
+     *       Neither transient nor a state to wait out: it needs a human, and re-running the batch will
+     *       report it again forever until one arrives.
+     */
+    RebuildConflictDetail: {
+      /**
+       * Error Code
+       * @enum {string}
+       */
+      error_code: 'NOT_REBUILDABLE' | 'NOT_STALE' | 'ORIGINAL_CORRUPT';
+      /** Message */
+      message: string;
+    };
+    /**
+     * RebuildConflictResponse
+     * @description The wire body for R-84's three refusals.
+     */
+    RebuildConflictResponse: {
+      detail: components['schemas']['RebuildConflictDetail'];
+    };
+    /**
+     * RebuildResponse
+     * @description What `POST /admin/documents/{id}/reembed` renders.
+     *
+     *     Both versions, because both are true at once: `version` is what the worker will build,
+     *     `previous_version` what keeps answering questions until the swap commits (R-36(3)). One
+     *     number for both would be the likeliest source of a bug on this surface — the reason
+     *     `ReplaceOutcome` makes the same distinction.
+     */
+    RebuildResponse: {
+      /**
+       * Document Id
+       * Format: uuid
+       */
+      document_id: string;
+      /**
+       * Job Id
+       * Format: uuid
+       */
+      job_id: string;
+      status: components['schemas']['DocumentStatus'];
+      /** Version */
+      version: number;
+      /** Previous Version */
+      previous_version: number;
+    };
+    /**
      * RenameConversationRequest
      * @description FR-SBR-04. `title` is required — this route renames and does nothing else.
      */
@@ -1835,6 +1954,67 @@ export interface components {
      */
     StageData: {
       stage: components['schemas']['TurnStage'];
+    };
+    /**
+     * StaleDocumentResponse
+     * @description One document whose live version was built by a different pipeline.
+     *
+     *     Metadata only (R-40(5)): no chunk text, no `storage_uri`, no chunk id — which is also what
+     *     keeps R-31(4)'s revisit trigger untripped, since nothing here re-serves uploaded content.
+     */
+    StaleDocumentResponse: {
+      /**
+       * Document Id
+       * Format: uuid
+       */
+      document_id: string;
+      /**
+       * Owner Id
+       * Format: uuid
+       */
+      owner_id: string;
+      /** Filename */
+      filename: string;
+      /** Document Version */
+      document_version: number;
+      /** Chunk Count */
+      chunk_count: number;
+      /** Token Count */
+      token_count: number;
+      /** Drifted Inputs */
+      drifted_inputs: string[];
+    };
+    /**
+     * StaleDocumentsResponse
+     * @description What `GET /admin/documents/stale` renders.
+     */
+    StaleDocumentsResponse: {
+      pipeline: components['schemas']['ConfiguredPipelineResponse'];
+      totals: components['schemas']['StaleTotalsResponse'];
+      /** Documents */
+      documents: components['schemas']['StaleDocumentResponse'][];
+    };
+    /**
+     * StaleTotalsResponse
+     * @description Totals over the whole stale set, not the page.
+     *
+     *     `token_count` is FR-ING-03's `ceil(len/4)` estimate (R-35(7)) summed over every chunk a full
+     *     run would re-embed — indicative rather than a quotation, and here because "re-embed 4,100
+     *     documents" and "spend ~11M embedding tokens" are the same sentence to the database and very
+     *     different sentences to whoever is paying.
+     *
+     *     `in_flight` is reported separately rather than folded in: a document already being rebuilt is
+     *     neither work to do nor work done, and omitting it would read as "nothing left" mid-run.
+     */
+    StaleTotalsResponse: {
+      /** Documents */
+      documents: number;
+      /** Chunks */
+      chunks: number;
+      /** Token Count */
+      token_count: number;
+      /** In Flight */
+      in_flight: number;
     };
     /**
      * TextSegment
@@ -2716,6 +2896,152 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+    };
+  };
+  list_stale_documents: {
+    parameters: {
+      query?: {
+        /** @description Restrict to one owner's documents. */
+        owner_id?: string | null;
+        limit?: number;
+        offset?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['StaleDocumentsResponse'];
+        };
+      };
+      /** @description Missing, malformed or expired bearer token, or no local user record. */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description The account is deactivated, or the operation is administrator-only (NFR-SEC-01). */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+      /** @description NFR-SEC-07 — too many attempts. `Retry-After` carries the cooldown. */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+    };
+  };
+  reembed_document: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        document_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Accepted; the rebuild is queued. */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RebuildResponse'];
+        };
+      };
+      /** @description Missing, malformed or expired bearer token, or no local user record. */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description The account is deactivated, or the operation is administrator-only (NFR-SEC-01). */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description No such document. */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description Not ACTIVE, already current, or the stored original is corrupt. */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RebuildConflictResponse'];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+      /** @description NFR-SEC-07 — too many attempts. `Retry-After` carries the cooldown. */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description Object storage is unreachable. */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
         };
       };
     };

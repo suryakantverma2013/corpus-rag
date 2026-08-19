@@ -14,7 +14,7 @@ the precedent. A `PUT /api/v1/admin/models` is purely additive later, and the da
 brings an *authenticated administrator*, which is also the day an NFR-SEC-08 audit row
 becomes both possible and right (see `app.db.models.model_override`).
 
-**The probe before the write is the point of this tool.** Three of the four slots fail open
+**The probe before the write is the point of this tool.** Three of the six slots fail open
 — a bad router, reranker or judge id costs a wasted call and a degraded stage (R-45(2),
 R-47(2), R-50(3)) — but generation fails **closed** (R-48(2)), so a typo there makes every
 subsequent turn answer `LLM_ERROR`. `set` therefore asks the provider whether it serves the
@@ -22,10 +22,21 @@ id *before* persisting it, which turns an outage into a rejected command. `--no-
 exists for the deployment whose network cannot reach the provider from wherever this runs;
 it is the operator taking that risk knowingly, and it says so.
 
-**Embeddings is absent and that is not an oversight.** `OPENAI_EMBEDDING_MODEL` is an
-FR-ING-03 fingerprint input, so changing it live would leave old chunks holding model-A
-vectors and new ones model-B, compared in the same cosine query with nothing failing
-anywhere. T-608 owns the controlled re-embed that has to come first (R-83(4)).
+**Embeddings is the sixth slot and it is not like the other five** (T-612, R-87). The other
+five change what the *next call* asks. This one changes what gets **written**: the id is an
+FR-ING-03 fingerprint input, so from the moment it moves, new chunks land in a different
+vector space from the existing ones and both are compared in the same cosine query. R-83(4)
+refused the slot on exactly that ground, and none of it stopped being true — T-608 changed
+the *consequence*, by making the drift visible (the staleness report reads the provenance
+each chunk recorded) and finite (`tools.reembed run` converts it). So this write path differs
+from the other five in two ways, both deliberate:
+
+* it **prices the flip before writing** and refuses without `--yes` when the corpus would be
+  left holding two spaces — an operator should not learn that cost from the next invoice; and
+* it **refuses `--no-verify`**, because the probe here is not asking whether the id exists.
+  The column is `VECTOR(3072)` and nothing widens it at runtime, so the probe embeds one
+  string and measures what comes back. No offline source answers that question, and the
+  failure it prevents is a corpus that will not ingest at all rather than a degraded stage.
 
 Stdout is ASCII. R-80(7)'s lesson, one tool over: a Windows `cp1252` console raises
 `UnicodeEncodeError` on anything else, and `--help` reaches stdout too.
@@ -39,7 +50,13 @@ import getpass
 import sys
 
 from app.config import get_settings
+from app.db.base import EMBEDDING_DIM
 from app.db.session import get_sessionmaker
+from app.services.embeddings import (
+    EmbeddingDimensionError,
+    EmbeddingError,
+    build_embedding_client,
+)
 from app.services.llm import ChatError, build_chat_client
 from app.services.model_selection import (
     ModelSelection,
@@ -50,6 +67,7 @@ from app.services.model_selection import (
     resolve_models,
     set_model_override,
 )
+from app.services.reembed import configured_pipeline, plan_reembed
 
 #: `--help` text. Not `__doc__` — see the module docstring's last paragraph.
 _CLI_DESCRIPTION = (
@@ -62,10 +80,12 @@ _CLI_DESCRIPTION = (
     "same id, because that would leave a row pinning a value the deployment could no\n"
     "longer move by redeploying.\n"
     "\n"
-    "Embeddings is deliberately not a slot: OPENAI_EMBEDDING_MODEL is an FR-ING-03\n"
-    "fingerprint input, so changing it live splits the corpus into two vector spaces\n"
-    "that are then compared in the same query. T-608 owns the re-embed that must come\n"
-    "first."
+    "The embedding slot is different: OPENAI_EMBEDDING_MODEL is an FR-ING-03\n"
+    "fingerprint input, so moving it leaves existing chunks in the old vector space\n"
+    "until they are rebuilt. `set embedding` prices the flip first and needs --yes to\n"
+    "proceed, and refuses --no-verify because its probe measures the vector dimension,\n"
+    "which cannot be checked offline. Drain the backlog with:\n"
+    "  python -m tools.reembed run --limit N"
 )
 
 
@@ -94,7 +114,79 @@ async def _show() -> int:
     return 0
 
 
-async def _set(slot: ModelSlot, model_id: str, *, verify: bool) -> int:
+async def _set_embedding(model_id: str, *, verify: bool, yes: bool) -> int:
+    """The sixth slot's write path, which differs from the other five on purpose (R-87(3)).
+
+    Two refusals and a price. The refusals are not extra caution — each prevents a failure the
+    other five slots cannot have.
+    """
+    settings = get_settings()
+
+    if not verify:
+        # There is nothing for `--no-verify` to skip here that would still leave a useful
+        # check behind. The probe is not "does this id exist" (the runtime would find that
+        # out in one wasted call) but "does it return 3072 numbers", and no offline source
+        # answers that. Setting it unchecked risks a corpus that refuses to ingest at all.
+        print("refused: --no-verify is not available for the embedding slot.", file=sys.stderr)
+        print(
+            "the probe measures the vector dimension against the fixed "
+            f"VECTOR({EMBEDDING_DIM}) column, and nothing offline can tell you that.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Probed before the transaction opens, for `_set`'s reason. One real embed call: it
+    # establishes existence and dimension together, which no pair of cheaper checks does.
+    client = build_embedding_client(settings)
+    try:
+        await client.embed_query("dimension probe", model=model_id)
+    except EmbeddingDimensionError as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        print(
+            "the column is fixed; a different dimension needs an ALTER and a full "
+            "re-embed, which is a migration rather than a setting.",
+            file=sys.stderr,
+        )
+        return 2
+    except EmbeddingError as exc:
+        print(f"refused: the provider did not embed with {model_id!r} ({exc})", file=sys.stderr)
+        return 2
+    finally:
+        await client.aclose()
+
+    # Price the flip *before* writing, against the candidate rather than the id in force.
+    async with get_sessionmaker()() as session:
+        plan = await plan_reembed(
+            session,
+            limit=1,
+            settings=settings,
+            pipeline=configured_pipeline(settings, embedding_model=model_id),
+        )
+    totals = plan.totals
+    if totals.documents:
+        print(
+            f"this flip strands {totals.documents} document(s) / {totals.chunks} chunk(s) "
+            f"(~{totals.token_count:,} tokens) in the previous vector space."
+        )
+        print("they keep answering, from the old space, until rebuilt with:")
+        print("  python -m tools.reembed run --limit N")
+        if not yes:
+            print("refused: re-run with --yes to accept that cost.", file=sys.stderr)
+            return 2
+
+    async with get_sessionmaker()() as session:
+        await set_model_override(
+            session, slot=ModelSlot.EMBEDDING, model_id=model_id, updated_by=_operator()
+        )
+        await session.commit()
+    print(f"{ModelSlot.EMBEDDING.value} -> {model_id}")
+    return 0
+
+
+async def _set(slot: ModelSlot, model_id: str, *, verify: bool, yes: bool = False) -> int:
+    if slot is ModelSlot.EMBEDDING:
+        return await _set_embedding(model_id, verify=verify, yes=yes)
+
     settings = get_settings()
     if verify:
         # Verified *before* the transaction opens, never inside it: a provider round trip
@@ -162,6 +254,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="skip the provider check (you accept the risk of a wrong id)",
     )
+    set_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="accept the re-embed cost when moving the embedding slot",
+    )
 
     clear_parser = sub.add_parser("clear", help="revert a slot to its environment default")
     clear_parser.add_argument("slot", help="one of: " + ", ".join(s.value for s in ModelSlot))
@@ -178,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.command == "set":
-        return asyncio.run(_set(slot, args.model_id, verify=not args.no_verify))
+        return asyncio.run(_set(slot, args.model_id, verify=not args.no_verify, yes=args.yes))
     return asyncio.run(_clear(slot))
 
 

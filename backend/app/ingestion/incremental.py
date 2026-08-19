@@ -198,7 +198,17 @@ async def plan_chunk_set(
     for chunk in diff.added:
         unique.setdefault(chunk.embedding_fingerprint, chunk.text)
 
-    vectors = await client.embed_texts(list(unique.values())) if unique else []
+    # **The model comes from `chunked`, never from `client.model`** (T-612/R-87(2)). The id
+    # that entered every `embedding_fingerprint` above is `chunked.embedding_model`, so
+    # embedding with anything else would stamp each row with a model that did not produce
+    # its vector — and the staleness report reads exactly that stamp, so nothing downstream
+    # could ever notice. Taking both from one object makes the divergence unrepresentable
+    # rather than something a test has to keep catching.
+    vectors = (
+        await client.embed_texts(list(unique.values()), model=chunked.embedding_model)
+        if unique
+        else []
+    )
     by_fingerprint = dict(zip(unique.keys(), vectors, strict=True))
 
     added_rows = build_chunk_rows(

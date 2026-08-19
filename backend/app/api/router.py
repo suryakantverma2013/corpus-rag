@@ -8,7 +8,18 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api import audit, auth, cloud, config, conversations, documents, jobs, messages, users
+from app.api import (
+    admin,
+    audit,
+    auth,
+    cloud,
+    config,
+    conversations,
+    documents,
+    jobs,
+    messages,
+    users,
+)
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
@@ -17,6 +28,11 @@ api_router.include_router(auth.router)
 api_router.include_router(config.router)
 api_router.include_router(users.router)
 api_router.include_router(audit.router)
+# The FR-ING-03 re-embed trigger (T-608, R-84) — the first `/admin` surface, rendered by no GUI
+# screen. Its own prefix rather than two more `/documents` routes: they are administrator-only,
+# and hanging them off the user-facing family would put an admin gate inside a router every other
+# route of which is owner-scoped.
+api_router.include_router(admin.router)
 api_router.include_router(documents.router)
 # FR-AUT-11 linking + the FR-KBM-10 file list (T-214). The *import* route is not here — it
 # lives on `/documents`, beside the upload it shares a response contract with.

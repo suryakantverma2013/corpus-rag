@@ -12,15 +12,15 @@ Audited: **2026-08-14**, tasks T-511 and T-514 (§8.63), against the full live s
 
 Every check below ran in a **headed** browser. Headless is inadmissible here and that is a measured constraint, not a preference: headless Chromium and Firefox render **no scrollbars at all** (every width 0px, including an element forced to `scrollbar-width: auto`), and headless Chromium never matches `:focus` because the page has no window focus. A 0px scrollbar reading is inconclusive, never a pass (R-60(4)).
 
-| Instrument                                               | What it covered                                                                      |
-| -------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `axe-core` 4.13 (devDependency), injected over CDP       | 10 surfaces × 2 themes (see coverage below)                                          |
-| Raw CDP keyboard driving, no pointer input               | the full flow: login → upload → ask → cite → feedback → regenerate → rename → delete |
-| OS-level pointer input (DPI-aware, two-point calibrated) | `:focus-visible` must **not** paint on a mouse click                                 |
-| `Emulation.setEmulatedMedia`                             | `prefers-reduced-motion`                                                             |
-| Firefox 153 + `ui.prefersReducedMotion`                  | cross-engine motion and scrollbars                                                   |
-| CDP Accessibility domain                                 | live-region roles and politeness                                                     |
-| `oxlint --jsx-a11y-plugin`, `vitest`                     | static and regression coverage                                                       |
+| Instrument                                                                         | What it covered                                                                      |
+| ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `axe-core` 4.13, injected over CDP by **`npm run a11y`** (`frontend/a11y/`, T-614) | 10 surfaces × 2 themes (see coverage below) — **59 checks, re-runnable**             |
+| Raw CDP keyboard driving, no pointer input                                         | the full flow: login → upload → ask → cite → feedback → regenerate → rename → delete |
+| OS-level pointer input (DPI-aware, two-point calibrated)                           | `:focus-visible` must **not** paint on a mouse click                                 |
+| `Emulation.setEmulatedMedia`                                                       | `prefers-reduced-motion`                                                             |
+| Firefox 153 + `ui.prefersReducedMotion`                                            | cross-engine motion and scrollbars                                                   |
+| CDP Accessibility domain                                                           | live-region roles and politeness                                                     |
+| `oxlint --jsx-a11y-plugin`, `vitest`                                               | static and regression coverage                                                       |
 
 ---
 
@@ -45,11 +45,22 @@ _The lesson is about the two gaps, not the surfaces: T-511 gave one of them a bo
 
 No other rule reports a violation on any surface in either theme. There is **no WCAG 2.2 AA violation outside the accepted palette exceptions**.
 
+> **This claim was false when written, and T-614 found it by making the pass runnable.** The
+> statement above covers WCAG 2.2, but the T-511/T-514 runs did not include the `wcag22aa` tag, so
+> **`target-size` (2.5.8) was never evaluated**. `npm run a11y` includes it, and its first run
+> reported the login screen's password **Show/Hide** button at **39.6 x 19 px** — under the 24 x 24
+> minimum, and failing the spacing exception too (19 px safe clickable diameter against 24 px).
+> Fixed in `LoginScreen.module.css` by giving it `min-height: 24px` and centring the label: the
+> text does not move, because the button is absolutely positioned and re-centred by
+> `translateY(-50%)`. The §4.17 auth UI is NFR-VIS-01's Rev 0.6 carve-out, where the spec is the
+> baseline rather than the prototype's pixels, so enlarging a hit area here is not a fidelity
+> change. **The claim now holds because it is checked, rather than because it was written down.**
+
 ### What axe cannot decide here
 
 - **`--line` borders (NFR-A11Y-06's fifth group, 1.18–1.23:1) are not covered.** WCAG 1.4.11 non-text contrast is not automatable, and axe does not attempt it. That group remains verified by the original R-59 measurement, not by this pass.
 - **`color-contrast` is evaluated per element, not per token pair**, so 559 nodes collapse to 29 distinct foreground/background/size combinations, all of which are the same handful of tokens on different surfaces.
-- **Run over the whole document with a modal open, axe measures the content behind the scrim.** With the unlink confirmation up, the picker's rows and the sidebar report **1.01:1** — light `--text` against the overlay's dark wash. It reads as a catastrophic defect and means nothing: that text is obscured by design. **Scope the probe to the panel under test** (`axe.run(panel)`), which is how T-514's picker figures were taken.
+- **Run over the whole document with a modal open, axe measures the content behind the scrim.** With the unlink confirmation up, the picker's rows and the sidebar report **1.01:1** — light `--text` against the overlay's dark wash. It reads as a catastrophic defect and means nothing: that text is obscured by design. **Scope the probe to the panel under test** (`axe.run(panel)`), which is how T-514's picker figures were taken. **Re-measured at axe-core 4.13 by T-614 and the symptom no longer reproduces**: obscured nodes now land in `incomplete` (_"background color could not be determined because it partially overlaps"_) rather than in violations — with the unlink confirmation open, unscoping the probe changed no result and produced no sub-1.5:1 violation. The scoping rule stands on what a surface under test _means_, and because `incomplete` handling is a library detail that can move again; it no longer stands on a symptom you can still see.
 
 ---
 

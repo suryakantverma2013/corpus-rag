@@ -10,6 +10,7 @@
   "permanentLockout": false,
   "maxFailureWaitSeconds": 900,
   "failureFactor": 30,
+  "passwordPolicy": "length(12) and notUsername and passwordHistory(3)",
   "roles": {
     "realm": [
       {

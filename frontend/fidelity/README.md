@@ -86,3 +86,14 @@ outer-width check kept passing.
 - **Cross-engine rendering.** Firefox is covered by T-511's pass; this runs in Chromium.
 - **The FR-KBM-10 cloud picker without a linked Drive account.** It reports the environment fact
   rather than failing, since an unlinked account is not a fidelity defect.
+
+## Run it against the dev server, not a built origin
+
+`APP_URL` defaults to the Vite dev server for a reason that only shows up if you point it
+elsewhere: Vite's CSS minifier rewrites `rgba(...)` to 8-digit hex in the built bundle, so
+against `http://localhost:8088/` the four `rgba()`-authored tokens report
+`--accent-soft: #7c86f824` and `--scrollbar-thumb: #8088a040`. Those are the _same colours_ —
+`0x24/255 = 0.141` — but `checkTokens` compares the custom property's literal token stream, which
+only survives unminified. It costs **6 false failures** (2 tokens x 2 themes, `--accent-soft`
+carrying two assertions each) and nothing else: every geometry, copy and layout check is
+origin-independent and passes either way. Measured during T-614.

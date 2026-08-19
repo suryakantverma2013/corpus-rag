@@ -152,6 +152,20 @@
   cursor: pointer;
   font-family: inherit;
   padding: 2px 4px;
+  /* WCAG 2.5.8 Target Size (Minimum), AA in WCAG 2.2. At `font-size: 12px` the box measured
+     39.6x19 and axe reported both failures: under 24x24, and a 19px safe clickable diameter
+     where the spacing exception needs 24px. Found by `npm run a11y` on its first run (T-614),
+     which is the defect that pass exists to catch.
+
+     The text does not move: the button is absolutely positioned and re-centred by
+     `translateY(-50%)`, so a taller box grows symmetrically about the same midpoint, and
+     centring the label keeps it where it was. This is the §4.17 auth UI, where NFR-VIS-01's
+     Rev 0.6 carve-out makes the spec the baseline rather than the prototype's pixels, so
+     enlarging a hit area here is not a fidelity change. */
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 /* --- error (FR-AUT-04) --- */

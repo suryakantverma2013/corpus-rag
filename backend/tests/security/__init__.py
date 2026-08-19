@@ -516,6 +516,26 @@ ROUTE_DECISIONS: Final[tuple[RouteDecision, ...]] = (
         Gate.ADMIN,
         "NFR-SEC-08 — the audit trail is an administrator surface.",
     ),
+    _r(
+        "GET",
+        f"{API}/admin/documents/stale",
+        "list_stale_documents",
+        Gate.ADMIN,
+        "R-84(5) — the FR-ING-03 re-embed report is an operator surface. Administrator-only "
+        "rather than owner-scoped because it enumerates across owners, and because deciding "
+        "to re-embed is a cost decision no document's owner makes.",
+    ),
+    _r(
+        "POST",
+        f"{API}/admin/documents/{{document_id}}/reembed",
+        "reembed_document",
+        Gate.ADMIN,
+        "R-84(5) — administrator-only, and deliberately NOT owner-or-administrator like the "
+        "other document verbs (R-39(1)): a user re-embedding their own document spends the "
+        "deployment's embedding budget. `owns` is therefore NONE — there is no owner cell to "
+        "drive, since a non-administrator never reaches the ownership check at all.",
+        bucket=Bucket.UPLOAD,
+    ),
 )
 
 
@@ -619,7 +639,14 @@ DEFERRED_NFRS: Final[dict[str, str]] = {
     # Lockout is realm configuration (bruteForceProtected, failureFactor 30), read and
     # recorded by R-72. Keycloak masks a lockout as `invalid_grant` and sends no `Retry-After`,
     # so there is nothing in this codebase to assert beyond the mapping `test_auth.py` covers.
-    "NFR-SEC-04": "(D) — R-28/R-72: Keycloak realm configuration, not application code.",
+    # Still deferred *by this package* — there is no request-path surface to drive — but no
+    # longer uncovered: R-86(1) set the policy in the realm artifact and
+    # `tests/test_account_linking.py::test_the_realm_enforces_a_password_policy` guards it
+    # offline, including the assertion that no rotation policy is armed (§8.9).
+    "NFR-SEC-04": (
+        "(D) — R-28/R-72/R-86(1): Keycloak realm configuration, guarded in "
+        "tests/test_account_linking.py rather than here."
+    ),
 }
 
 _ROW_ATTR = "__nfr_sec_rows__"
