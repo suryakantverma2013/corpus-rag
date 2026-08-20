@@ -25,6 +25,7 @@ here: change how text comes out of these modules and every affected chunk must r
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import ClassVar, Protocol
@@ -34,7 +35,18 @@ from app.config import ParserSettings
 #: Bump on **any** change to extracted text: normalisation rules, block grouping,
 #: table rendering, whitespace handling. Feeds FR-ING-03's `embedding_fingerprint`,
 #: so a bump forces re-embedding of affected chunks — which is the point.
-PREPROCESSING_VERSION = "1"
+#:
+#: ``"2"`` (T-220, R-88(7)): Rev 0.55 changed what comes out of `pdf.py` twice over —
+#: FR-ING-07 recognises pages that previously yielded nothing, and FR-ING-08 lifts a
+#: table's cells out of the page's positionally-sorted text and re-renders them as
+#: ``Region | Q3 | Q4`` rows. Both are new preprocessing by definition, so every stored
+#: fingerprint is invalidated by construction.
+#:
+#: **This bump is only safe because T-608 exists.** R-76(2) recorded that no reachable
+#: path re-embedded a *healthy* corpus, so before T-608 this line would have stranded
+#: every existing document on a fingerprint nothing could refresh — correct, and forever.
+#: The migration is `tools.reembed plan` to price it, then a bounded `run`.
+PREPROCESSING_VERSION = "2"
 
 
 # --- failures -----------------------------------------------------------------
@@ -199,14 +211,15 @@ class Extraction(StrEnum):
     complaint diagnosable at all — without it, "the citation is garbled" cannot be
     distinguished from "the document is garbled".
 
-    ``TABLE`` is declared here and emitted by nothing yet: FR-ING-08 is T-219's, and a
-    consumer that has to grow a third case later is worse than one that already has it.
+    All three members have a producer: `pdf.py` emits ``OCR`` for a recognised page or figure
+    (T-218) and ``TABLE`` for a serialised table (T-219); every other parser leaves the default.
 
-    Not a fingerprint input — it travels in `document_chunks.metadata`, which
-    `embedding_fingerprint` does not read. Enabling recognition on an existing corpus is
-    therefore purely additive: every text block still hashes identically and keeps its vector,
-    and only the newly recognised blocks are embedded. The fleet-wide re-embed belongs to
-    T-220's `PREPROCESSING_VERSION` bump, not to this marker.
+    **Not a fingerprint input** — it travels in `document_chunks.metadata`, which
+    `embedding_fingerprint` does not read. That is what makes *turning recognition on* purely
+    additive: an existing corpus's text blocks still hash identically and keep their vectors,
+    and only the newly recognised blocks are embedded. It is deliberately not the same question
+    as whether the extracted **text** changed — when it does, the fingerprint must move, which is
+    why R-88(7) bumps `PREPROCESSING_VERSION` rather than leaning on this marker (T-220).
     """
 
     TEXT = "text"
@@ -224,6 +237,15 @@ class ParsedBlock:
     #: Defaulted **and trailing** so the three formats that can only ever produce extracted
     #: text — DOCX, MD, CSV — need no change. `pdf.py` is the one parser that sets it.
     extraction: Extraction = Extraction.TEXT
+    #: The block's own first line, when it labels every line below it — R-35's repeated CSV
+    #: header generalised to FR-ING-08's tables (R-88(6)). The chunker repeats it on chunks
+    #: 2..n, so a chunk of a table is never a grid of numbers with no column names.
+    #:
+    #: **Declared by the parser, never inferred by the chunker.** `_row_header` recovers the CSV
+    #: header by counting lines against the locator's row range, which a `page` locator cannot
+    #: express; and a table whose header cells are empty must not have its first *data* row
+    #: repeated as one. The producer is the only thing that knows.
+    header: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,6 +289,18 @@ class CharBudget:
             raise DocumentTooComplexError(
                 f"document expands to more than {self.limit:,} characters of text"
             )
+
+
+def render_row(cells: Iterable[str]) -> str:
+    """One record on one line, cells pipe-separated, inner whitespace collapsed.
+
+    Kept here because three parsers already rendered a row exactly this way — `csv.py`, `docx.py`
+    and `markdown.py` — and T-219 would have been a fourth copy. Keeping a row on one line is
+    what preserves the adjacency that makes it meaningful (`Region | Q3 | Q4`); splitting cells
+    onto separate lines scatters a row's values across a chunk boundary and leaves the numbers
+    unattributable.
+    """
+    return " | ".join(" ".join(cell.split()) for cell in cells)
 
 
 def split_text(text: str, max_chars: int) -> list[str]:

@@ -297,6 +297,7 @@ output would be** — not from how important the component feels.
 | `lock` | Advisory by design: expiry mid-turn degrades UX, never correctness. |
 | Rate limiter | A limiter that takes the product down when its store blips is worse than the abuse it prevents. |
 | Evaluation | Runs after the answer was served. Its degraded output is "no score chips", which the UI already renders. |
+| OCR recognition | A page that cannot be recognised degrades to no text; the document still ingests. The *document-level* rule stays closed, so nothing goes `ACTIVE` with zero chunks. |
 
 | Fails **closed** (refuse) | Because the degraded output would be a lie |
 |---|---|
@@ -367,6 +368,18 @@ The synchronous half does only what must be durable before a `202`: magic-byte t
 original, write rows, enqueue.
 
 The worker does the rest, scanning **before** parsing so untrusted bytes meet the scanner first.
+
+Parsing does two things beyond extracting characters, both PDF-only and both decided **per page**.
+A page with no text layer — or a large enough image inside a textual page — is rasterised and sent
+to the OCR sidecar, which runs outside the worker process because it is the only ingestion step
+that *renders* attacker-supplied content. A ruled table is extracted with its rows and columns
+intact and its cells excluded from the page's ordinary text, so one passage is never indexed
+twice. Recognition never competes with a text layer: extracted characters always win.
+
+Both are why recognition has to be **byte-reproducible**, which is a correctness property rather
+than a nicety. `embedding_fingerprint` reuse is set membership, so a recogniser whose output
+varied between two passes over one page would leave that set permanently empty — and step 2 below
+would silently stop reusing anything, at full embedding cost, with nothing failing.
 
 **Re-ingestion is incremental, and the ordering is the interesting part** — copy, swap, collect:
 

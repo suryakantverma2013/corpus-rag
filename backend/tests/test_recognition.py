@@ -24,12 +24,22 @@ from __future__ import annotations
 import math
 import os
 import time
+import uuid
 
 import pymupdf
 import pytest
 import structlog
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import OcrSettings, ParserSettings, Settings, WorkerSettings
+from app.db.base import DEFAULT_TENANT_ID
+from app.db.enums import DocumentStatus
+from app.db.models.document import Document
+from app.db.repositories.documents import DocumentRepository
+from app.db.repositories.knowledge_bases import KnowledgeBaseRepository
+from app.db.repositories.users import UserRepository
+from app.ingestion.chunker import chunk_document_sync
+from app.ingestion.incremental import persist_chunk_set, plan_chunk_set
 from app.ingestion.parsers import parse_document_sync
 from app.ingestion.parsers import pdf as pdf_parser
 from app.ingestion.parsers.base import (
@@ -45,6 +55,7 @@ from app.ingestion.parsers.recognition import (
     has_renderable_content,
     qualifying_images,
 )
+from app.services.embeddings import FakeEmbeddingClient
 from app.services.ocr import (
     OcrClient,
     OcrImageTooLargeError,
@@ -55,6 +66,7 @@ from app.services.ocr import (
 )
 
 LABEL = "Quarterly revenue rose to 4,218 units."
+MODEL = "text-embedding-3-large"
 
 
 # --- fixtures -----------------------------------------------------------------
@@ -668,3 +680,105 @@ def test_live_a_figure_on_a_textual_page_becomes_searchable() -> None:
     kinds = [block.extraction for block in parsed.blocks]
     assert Extraction.TEXT in kinds and Extraction.OCR in kinds
     assert "4,218" in parsed.text
+
+
+# --- R-88(1) at the level that matters: vector reuse (T-220) -------------------
+
+
+async def _reuse_plan(session, chunked, *, version: int):
+    """`plan_chunk_set` for ``chunked`` at ``version``, against a throwaway document."""
+    user = await UserRepository(session).upsert_from_claims(
+        sub=uuid.uuid4(), email=f"{uuid.uuid4().hex}@example.com"
+    )
+    kb = await KnowledgeBaseRepository(session).get_or_create_default(user.id)
+    document = await DocumentRepository(session).add(
+        Document(
+            owner_id=user.id,
+            knowledge_base_id=kb.id,
+            tenant_id=DEFAULT_TENANT_ID,
+            filename="scan.pdf",
+            storage_uri="s3://corpus/scan.pdf",
+            checksum_sha256=uuid.uuid4().hex * 2,
+            status=DocumentStatus.ACTIVE,
+            searchable=True,
+        )
+    )
+    client = FakeEmbeddingClient()
+    plan = await plan_chunk_set(
+        session=session,
+        client=client,
+        chunked=chunked,
+        document_id=document.id,
+        document_version=version,
+        knowledge_base_id=kb.id,
+    )
+    await persist_chunk_set(session, plan=plan)
+    return document, kb, client
+
+
+async def test_re_ingesting_a_recognised_document_reuses_every_vector(
+    session: AsyncSession,
+) -> None:
+    """R-88(1) stated as the property that actually costs money if it fails.
+
+    `plan_chunk_set` reuses a stored vector by **set membership on `embedding_fingerprint`**, so
+    a recogniser whose output varies between two passes over one file leaves `reused` permanently
+    empty: every `/replace`, every FR-ING-04 retry and every T-608 rebuild silently re-embeds the
+    whole document, and nothing fails — only the bill moves. The parse-level determinism tests
+    say the text is stable; this says the pipeline *acts* on that stability.
+    """
+    payload = make_scanned_pdf()
+    fake = _FakeOcr()
+    limits = _limits()
+
+    first = chunk_document_sync(_parse(payload, limits=limits, fake=fake), embedding_model=MODEL)
+    assert [chunk.extraction for chunk in first.chunks] == [Extraction.OCR]
+    document, kb, _ = await _reuse_plan(session, first, version=1)
+
+    # A second ingestion of the *same bytes* — the shape of `/replace` and of a T-608 rebuild.
+    second = chunk_document_sync(
+        _parse(payload, limits=limits, fake=_FakeOcr()), embedding_model=MODEL
+    )
+    client = FakeEmbeddingClient()
+    plan = await plan_chunk_set(
+        session=session,
+        client=client,
+        chunked=second,
+        document_id=document.id,
+        document_version=2,
+        knowledge_base_id=kb.id,
+    )
+
+    assert plan.added_rows == ()
+    assert len(plan.reused_rows) == plan.total == len(second.chunks) > 0
+    assert plan.embedded_inputs == 0
+    assert client.embedded_inputs == 0, "a recognised document was re-embedded for no reason"
+
+
+@live
+async def test_live_re_ingesting_a_real_scan_reuses_every_vector(session: AsyncSession) -> None:
+    """The same property against the real engine, which is the only place it can actually break."""
+    payload = make_scanned_pdf(dpi=300)
+    limits = _limits()
+
+    first = chunk_document_sync(
+        parse_document_sync(payload, filename="scan.pdf", limits=limits), embedding_model=MODEL
+    )
+    document, kb, _ = await _reuse_plan(session, first, version=1)
+
+    second = chunk_document_sync(
+        parse_document_sync(payload, filename="scan.pdf", limits=limits), embedding_model=MODEL
+    )
+    client = FakeEmbeddingClient()
+    plan = await plan_chunk_set(
+        session=session,
+        client=client,
+        chunked=second,
+        document_id=document.id,
+        document_version=2,
+        knowledge_base_id=kb.id,
+    )
+
+    assert plan.added_rows == ()
+    assert len(plan.reused_rows) == plan.total > 0
+    assert client.embedded_inputs == 0

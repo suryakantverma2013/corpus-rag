@@ -42,6 +42,7 @@ from app.ingestion.parsers.base import (
     NoExtractableTextError,
     ParsedBlock,
     ParsedDocument,
+    render_row,
     section_locator,
     split_text,
 )
@@ -110,9 +111,9 @@ def _render_table(table: Table) -> str:
     """
     lines = []
     for row in table.rows:
-        cells = [" ".join(cell.text.split()) for cell in row.cells]
-        if any(cells):
-            lines.append(" | ".join(cells))
+        cells = [cell.text for cell in row.cells]
+        if any(cell.strip() for cell in cells):
+            lines.append(render_row(cells))
     return "\n".join(lines)
 
 

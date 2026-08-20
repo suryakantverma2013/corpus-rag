@@ -237,6 +237,23 @@ class ParserSettings(BaseSettings):
     ocr_min_image_area: float = Field(default=0.15)  # TBD(§8.4)
     ocr_min_image_pixels: int = Field(default=400)  # TBD(§8.4)
 
+    # FR-ING-08 tabular structure (T-219, R-88(5)/(6) §8.78). **There is deliberately no
+    # `PARSER_TABLE_ENABLED`.** R-88(12) gives recognition an off switch because it adds a
+    # container, a language pack and a large latency term; none of that applies here — table
+    # extraction is PyMuPDF, already a dependency, and costs a fraction of a millisecond on a
+    # page with no ruling lines. So R-79(5)'s test governs instead: FR-ING-08 says *shall*, and
+    # a switch that stopped it would turn a requirement off rather than remove an enrichment.
+    #
+    # What follows is the false-positive floor. Detection is heuristic, so each of these leaves
+    # a rejected region exactly as it was — its characters stay in the page's ordinary text —
+    # which is what makes a bad detection degrade rather than mangle a page. Provisional (§8.4)
+    # and to be settled by measurement on a real corpus.
+    table_min_rows: int = Field(default=2)  # TBD(§8.4)
+    table_min_columns: int = Field(default=2)  # TBD(§8.4)
+    # Bounds the per-page cost of a pathological layout. Surplus tables are *not* hidden: they
+    # are simply not detected, so their text is still extracted.
+    table_max_per_page: int = Field(default=10)  # TBD(§8.4)
+
     @model_validator(mode="after")
     def _coherent(self) -> ParserSettings:
         if not 72 <= self.ocr_dpi <= 600:
@@ -253,6 +270,14 @@ class ParserSettings(BaseSettings):
             raise ValueError("PARSER_OCR_MIN_IMAGE_AREA must be in (0, 1]")
         if self.ocr_min_image_pixels < 1:
             raise ValueError("PARSER_OCR_MIN_IMAGE_PIXELS must be >= 1")
+        # Zero is not "unbounded" for any of these three — it is FR-ING-08 silently switched
+        # off, which is exactly what the absent enable flag says must not be expressible.
+        if self.table_min_rows < 1:
+            raise ValueError("PARSER_TABLE_MIN_ROWS must be >= 1")
+        if self.table_min_columns < 1:
+            raise ValueError("PARSER_TABLE_MIN_COLUMNS must be >= 1")
+        if self.table_max_per_page < 1:
+            raise ValueError("PARSER_TABLE_MAX_PER_PAGE must be >= 1")
         return self
 
 

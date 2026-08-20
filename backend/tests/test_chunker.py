@@ -336,6 +336,59 @@ def test_a_headerless_csv_block_gets_no_repeated_first_row() -> None:
     assert not chunked.chunks[1].text.startswith("row1 |")
 
 
+# --- PDF table blocks (T-219, FR-ING-08) --------------------------------------
+
+
+def _table_block(rows: int, *, header: str = "Region | Q3 | Q4") -> ParsedDocument:
+    """A table as `pdf.py` emits one: `page` locator, `table` provenance, declared header."""
+    lines = [f"R{index} | {index} | {index * 2}" for index in range(1, rows + 1)]
+    block = ParsedBlock(
+        text="\n".join(([header] if header else []) + lines),
+        locator=page_locator(7),
+        order=0,
+        extraction=Extraction.TABLE,
+        header=header,
+    )
+    return ParsedDocument(suffix=".pdf", blocks=(block,))
+
+
+def test_table_chunks_repeat_the_header_row() -> None:
+    """R-88(6) inherits R-35's CSV rule: a chunk of a table without its column names is a grid
+    of numbers no retrieval can use and no citation can explain."""
+    chunked = chunk_document_sync(
+        _table_block(40), embedding_model=MODEL, settings=_settings(target_chars=120)
+    )
+    assert chunked.chunk_count > 1
+    for chunk in chunked.chunks:
+        assert chunk.text.startswith("Region | Q3 | Q4")
+
+
+def test_table_chunks_break_on_row_boundaries() -> None:
+    """A `page` locator carries no row range, so the rule has to key on the provenance marker."""
+    chunked = chunk_document_sync(
+        _table_block(40), embedding_model=MODEL, settings=_settings(target_chars=120)
+    )
+    assert chunked.chunk_count > 1
+    for chunk in chunked.chunks:
+        for line in chunk.text.split("\n"):
+            assert line.count("|") == 2, "a table row was bisected"
+
+
+def test_a_table_block_with_no_header_repeats_nothing() -> None:
+    """The parser declares the header; a table whose cells named nothing declares ``""``, and
+    promoting its first *data* row into a header would duplicate it into every citation."""
+    chunked = chunk_document_sync(
+        _table_block(40, header=""), embedding_model=MODEL, settings=_settings(target_chars=120)
+    )
+    assert chunked.chunk_count > 1
+    assert not chunked.chunks[1].text.startswith("R1 |")
+
+
+def test_a_table_chunk_carries_the_table_provenance() -> None:
+    chunked = chunk_document_sync(_table_block(3), embedding_model=MODEL, settings=_settings())
+    assert chunked.meta_for(chunked.chunks[0])["extraction"] == "table"
+
+
 # --- hash & fingerprint -------------------------------------------------------
 
 

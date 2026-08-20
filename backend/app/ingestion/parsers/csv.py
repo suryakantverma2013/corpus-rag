@@ -32,6 +32,7 @@ from app.ingestion.parsers.base import (
     NoExtractableTextError,
     ParsedBlock,
     ParsedDocument,
+    render_row,
     rows_locator,
     split_text,
 )
@@ -98,11 +99,6 @@ def _looks_like_header(cells: list[str]) -> bool:
     return not any(_is_numeric(value) for value in values)
 
 
-def _render(cells: list[str]) -> str:
-    """One record on one line, cells pipe-separated, inner whitespace collapsed."""
-    return " | ".join(" ".join(cell.split()) for cell in cells)
-
-
 def parse(payload: bytes, *, limits: ParserSettings) -> ParsedDocument:
     """Extract row-grouped text from a CSV."""
     text = _decode(payload)
@@ -144,7 +140,7 @@ def parse(payload: bytes, *, limits: ParserSettings) -> ParsedDocument:
                 )
 
             if index == 0 and _looks_like_header(cells):
-                header_line = _render(cells)
+                header_line = render_row(cells)
                 continue
 
             record_number += 1
@@ -154,7 +150,7 @@ def parse(payload: bytes, *, limits: ParserSettings) -> ParsedDocument:
                     "upload the parts"
                 )
 
-            line = _render(cells)
+            line = render_row(cells)
             if line.strip(" |"):
                 pending.append(line)
 

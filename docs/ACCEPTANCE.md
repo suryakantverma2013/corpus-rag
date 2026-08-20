@@ -17,7 +17,7 @@ cd backend && uv run pytest tests/acceptance         # the rule the report canno
 
 The requirements come in two shapes and are checked differently.
 
-**Acceptance-critical literal values** — 57 rows covering the design tokens, the copy strings, the
+**Acceptance-critical literal values** — 60 rows covering the design tokens, the copy strings, the
 route and response contracts, the closed vocabularies and the numeric budgets. Each is mapped to
 one or more evidence pointers in `backend/tests/acceptance/`. Six kinds:
 
@@ -35,13 +35,20 @@ ships, so they fail on a changed literal even when every behavioural test still 
 matters, because four of them were previously pinned nowhere at all — the grounding top-K, the
 context-window budget, the upload size and quota limits, and the two normative failure strings.
 
-**Non-functional requirements** — all 41, each carrying one of four dispositions:
+The three most recent rows are Rev 0.55's: the recognition policy (off by default, its DPI,
+confidence floor, page ceiling and budget), the tabular-structure floors, and
+`PREPROCESSING_VERSION`. The last is a second oracle twice over, and deliberately so — it is an
+input to the embedding fingerprint, so it is one of the few literals in the product whose value
+being wrong costs a full re-embed of the corpus rather than a failing assertion.
+
+**Non-functional requirements** — all 42, each carrying one of four dispositions:
 
 - **met by test** (34) — a named test or harness check fails if the property stops holding;
-- **met by construction** (4) — there is no behaviour to drive because the code path does not
+- **met by construction** (5) — there is no behaviour to drive because the code path does not
   exist; hover treatments are per-component rather than blanket, the displayed token counts *are*
   the stored columns rather than a second store agreeing with them, no image asset is tracked
-  anywhere under `frontend/`, and no request-path state lives in a process;
+  anywhere under `frontend/`, no request-path state lives in a process, and recognition has no
+  in-process engine to isolate from and no destination but the configured local sidecar;
 - **accepted exception** (2) — see §3;
 - **open** (1) — see §4.
 
@@ -118,18 +125,19 @@ under backend-mediated ROPC there is no browser, so a required action locks the 
 permanently, which makes rotation an outage rather than a stricter rule. Its absence is asserted by
 a test. Three provisional rejection strings were also confirmed and moved into their requirements.
 
-**Three further gaps** are filed rather than fixed, each with an owner:
+**Two further gaps** are filed rather than fixed, each with an owner:
 
-1. `axe-core` is a dependency with no committed runner, so the accessibility conformance claim
-   rests on a written audit rather than on a command anyone can repeat.
-2. The audit trail has no stated retention period. Telemetry retention is settled at 90 days; the
+1. The audit trail has no stated retention period. Telemetry retention is settled at 90 days; the
    audit log's own period is a compliance decision nobody has taken.
-3. Sidebar history pagination is deferred until conversation counts justify it.
+2. Sidebar history pagination is deferred until conversation counts justify it.
 
-The fourth — the uncommitted environment-variable coverage check — was closed by T-613:
-`backend/tests/test_env_templates.py` now diffs `backend/.env.example` against the settings model
-and `deployment/.env.prod.example` against the compose file's interpolations, both directions, and
-boots `Settings` from each to catch what a name diff cannot see.
+The other two the review filed have since been closed. The uncommitted environment-variable
+coverage check was closed by T-613: `backend/tests/test_env_templates.py` now diffs
+`backend/.env.example` against the settings model and `deployment/.env.prod.example` against the
+compose file's interpolations, both directions, and boots `Settings` from each to catch what a
+name diff cannot see. The unrunnable accessibility audit was closed by T-614, which committed the
+axe pass as `frontend/a11y/` — so NFR-A11Y-06's conformance claim is now a command anyone can
+repeat rather than a written result.
 
 ## 5. Two findings worth generalising
 

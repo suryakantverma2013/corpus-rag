@@ -511,6 +511,58 @@ SPEC_9_ROWS: dict[str, tuple[Evidence, ...]] = {
         ),
         PyTest("tests/test_documents_api.py::test_get_of_a_foreign_document_is_404_not_403"),
     ),
+    # FR-ING-07. The five ParserSettings defaults and the three OcrSettings ones are the
+    # policy R-88(11) bounds the feature with; the two PyTests are the properties those
+    # numbers exist to buy - the ceiling stops recognition WITHOUT failing the document, and
+    # the shipped defaults provably fit inside the shipped job timeout.
+    "OCR (Rev 0.55, FR-ING-07, R-88)": (
+        Default("app.config:ParserSettings", "ocr_enabled", False),
+        Default("app.config:ParserSettings", "ocr_dpi", 300),
+        Default("app.config:ParserSettings", "ocr_min_confidence", 60.0),
+        Default("app.config:ParserSettings", "ocr_max_pages", 200),
+        Default("app.config:ParserSettings", "ocr_budget_seconds", 600.0),
+        Default("app.config:OcrSettings", "port", 8884),
+        Default("app.config:OcrSettings", "timeout_seconds", 60.0),
+        Default("app.config:OcrSettings", "languages", "eng"),
+        PyTest("tests/test_ocr.py::test_the_feature_ships_off"),
+        PyTest(
+            "tests/test_recognition.py::test_the_shipped_defaults_fit_inside_the_shipped_job_timeout"
+        ),
+        PyTest(
+            "tests/test_recognition.py"
+            "::test_the_page_ceiling_stops_recognition_without_failing_the_document"
+        ),
+    ),
+    # FR-ING-08. The absent flag is the claim worth pinning and it cannot be pinned as a
+    # Default - so the three floors stand for the policy, and the third PyTest carries the
+    # recorded limitation (an unruled table is not detected), which is the half of this row
+    # a reader is most likely to discover by surprise.
+    "Tabular structure (Rev 0.55, FR-ING-08, R-88(5)/(6))": (
+        Default("app.config:ParserSettings", "table_min_rows", 2),
+        Default("app.config:ParserSettings", "table_min_columns", 2),
+        Default("app.config:ParserSettings", "table_max_per_page", 10),
+        PyTest("tests/test_tables.py::test_a_table_is_one_block_on_its_pages_own_locator"),
+        PyTest(
+            "tests/test_tables.py"
+            "::test_a_table_split_by_the_block_ceiling_repeats_its_header_on_every_part"
+        ),
+        PyTest(
+            "tests/test_tables.py::test_an_unruled_table_is_not_detected_and_is_the_recorded_limitation"
+        ),
+    ),
+    # R-88(7), and the row T-220 asked for. Two of these three are second oracles (R-85(1)):
+    # `Constant` and `Vocabulary` read the shipped value back, so they fail on a changed
+    # literal even when every behavioural test still passes. That matters more here than
+    # almost anywhere else - `PREPROCESSING_VERSION` is an `embedding_fingerprint` input, so
+    # moving it re-embeds the corpus and leaving it stationary when the text changes is
+    # worse: chunks keep vectors built from text that no longer exists.
+    "Preprocessing version (Rev 0.55, R-88(7))": (
+        Constant("app.ingestion.parsers.base:PREPROCESSING_VERSION", "2"),
+        Vocabulary("app.ingestion.parsers.base:Extraction", ("text", "ocr", "table")),
+        PyTest(
+            "tests/test_recognition.py::test_re_ingesting_a_recognised_document_reuses_every_vector"
+        ),
+    ),
     "Retrieval default (Rev 0.5)": (
         PyTest("tests/test_fusion.py::test_agreement_between_arms_beats_a_single_arms_top_hit"),
         PyTest("tests/test_router.py::test_every_class_routes_the_way_fr_ret_03_says"),
@@ -739,12 +791,6 @@ RESIDUAL_GAPS: tuple[ResidualGap, ...] = (
         "not leave the deployment. What remains is **encryption at rest**, configured nowhere "
         "and a deployment decision rather than application code",
         "spec (D) - deployment decision",
-    ),
-    ResidualGap(
-        "axe-core has no runner",
-        "NFR-A11Y-06's conformance claim rests on frontend/ACCESSIBILITY.md, a prose write-up "
-        "of an ad-hoc CDP injection; re-running it means re-authoring the script",
-        "follow-up task",
     ),
     ResidualGap(
         "audit_log retention",

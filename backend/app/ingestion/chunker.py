@@ -289,11 +289,28 @@ def _row_header(block: ParsedBlock, *, target_chars: int) -> str:
     lines = block.text.split("\n")
     if len(lines) != locator.row_end - locator.row_start + 2:
         return ""
-    header = lines[0]
-    # A header wide enough to crowd out the rows it labels is worse than no header.
+    return _usable_header(lines[0], target_chars=target_chars)
+
+
+def _usable_header(header: str, *, target_chars: int) -> str:
+    """``header`` unless it would crowd out the rows it labels, which is worse than none."""
     if not header or len(header) + 1 > target_chars // 2:
         return ""
     return header
+
+
+def _repeated_header(block: ParsedBlock, *, target_chars: int) -> str:
+    """The line to repeat on this block's chunks 2..n, or ``""``.
+
+    Two producers, one rule (R-35(11), extended by R-88(6)). A **table** block declares its
+    header — `pdf.py` guarantees it is line 0 verbatim — because a `page` locator cannot express
+    the row range `_row_header` counts against, and because a table whose header cells are empty
+    must not have its first data row promoted into one. A **CSV** block is still inferred, since
+    its parser omits the header when the first record is data and only the line count can tell.
+    """
+    if block.header:
+        return _usable_header(block.header, target_chars=target_chars)
+    return _row_header(block, target_chars=target_chars)
 
 
 # --- results ------------------------------------------------------------------
@@ -390,8 +407,13 @@ def chunk_document_sync(
 
     chunks: list[Chunk] = []
     for block in parsed.blocks:
-        rows_block = block.locator.kind is LocatorKind.ROWS
-        header = _row_header(block, target_chars=settings.target_chars)
+        # A table row is atomic exactly as a CSV record is — both render one row per line, so
+        # the finer separators would let a word-aligned overlap open a chunk in the middle of
+        # `EU | 12 | 15`. R-35(4) states the rule for `rows` blocks; FR-ING-08 produces the
+        # second kind of line-structured block, and leaving it out is invisible until a citation
+        # quotes half a row.
+        rows_block = block.locator.kind is LocatorKind.ROWS or block.extraction is Extraction.TABLE
+        header = _repeated_header(block, target_chars=settings.target_chars)
         target = settings.target_chars - (len(header) + 1 if header else 0)
 
         spans = split_spans(

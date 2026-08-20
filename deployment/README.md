@@ -18,6 +18,7 @@ via the environment for anything shared.
 | MinIO console | http://localhost:9001 | Web UI — login `minioadmin` / `minioadmin` |
 | Postgres *(profile)* | `localhost:5432` | Local instance, or `--profile postgres`; DB `corpus` |
 | ClamAV *(profile)* | `localhost:3310` | Malware screening at the head of the ingestion worker (R-32); `--profile clamav` |
+| OCR *(profile)* | `localhost:8884` | Tesseract sidecar for FR-ING-07 recognition (R-88); `--profile ocr`. Only reached when `PARSER_OCR_ENABLED=true` |
 
 ## Bring services up / down
 
@@ -43,6 +44,13 @@ docker compose -f deployment/docker-compose.yml --profile postgres up -d
 # accepts connections; the named volume means later starts skip the download.
 docker compose -f deployment/docker-compose.yml --profile clamav up -d clamav
 
+# ...also the OCR sidecar, for FR-ING-07 recognition of scanned PDFs. Built rather than
+# pulled (the image pins its engine and language pack by version, because recognition has
+# to be byte-reproducible), so the first start compiles an image rather than downloading
+# signatures. Needs PARSER_OCR_ENABLED=true in backend/.env to be reached at all, and the
+# OCR_LIVE_TEST=1 tests in tests/test_ocr.py and tests/test_recognition.py need it running.
+docker compose -f deployment/docker-compose.yml --profile ocr up -d --build ocr
+
 # status / logs
 docker compose -f deployment/docker-compose.yml ps
 docker compose -f deployment/docker-compose.yml logs -f
@@ -61,6 +69,12 @@ redis-cli -u redis://localhost:6379/0 ping          # -> PONG
 # ClamAV — ask the daemon itself, not `docker ps`:
 docker exec deployment-clamav-1 clamdscan --ping 1  # -> PONG
 docker exec deployment-clamav-1 clamdscan --version # -> ClamAV <ver>/<sigs>/<date>
+
+# OCR — the sidecar reports its engine version and a digest per language pack, which is
+# the only way to tell what it actually loaded: the tessdata volume seeds itself from the
+# image only while it is empty, so a rebuilt image with a different pack is ignored until
+# the volume is removed.
+curl -s http://localhost:8884/health                # -> {"status":"ok","tesseract":"5.5.0",...}
 ```
 
 > **The `clamav` container reports `unhealthy` even when clamd is working.** The

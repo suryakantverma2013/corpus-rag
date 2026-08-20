@@ -305,7 +305,127 @@ What to expect while it runs:
 Prefer off-peak. Each rebuild ends with a version swap, and a swap landing in the middle of a chat
 turn can cost that one turn its citations — the same window a document replacement already opens.
 
-## 9. Verifying a deployment
+## 9. Optical character recognition (optional)
+
+A scanned PDF carries no character data, so without recognition it fails ingestion outright with
+`NO_EXTRACTABLE_TEXT` — an honest answer, and a poor one for a corpus of scans. FR-ING-07 makes
+those pages searchable by recognising them in a sidecar. It ships **off**, and what follows is
+what you are accepting by turning it on.
+
+### Two switches, and they must agree
+
+| Switch | Effect |
+|---|---|
+| `--profile ocr` | starts the `ocr` container. A bare `up` does not. |
+| `PARSER_OCR_ENABLED=true` | tells the worker to call it. |
+
+```bash
+docker compose -f deployment/docker-compose.prod.yml --env-file deployment/.env.prod \
+    --profile ocr up -d --wait --build
+```
+
+Neither half fails loudly on its own, which is exactly why they are worth stating together:
+
+- **Flag on, no sidecar.** `GET /health/ready/worker` answers **503** with `ocr: error`, while
+  `GET /health/ready` stays **200** — the arm is on the worker probe and deliberately not the
+  API's, so the chat surface is untouched. Recognition itself fails open: the worker logs
+  `pdf.recognition_degraded` and the page simply contributes no text. But note what that means
+  for a document that is *nothing but* scan — it now yields no text at all, so it fails with
+  `NO_EXTRACTABLE_TEXT`, exactly as it did before Rev 0.55. Recognition failing open does not make
+  the document-level rule fail open, and it must not: that rule is what stops a document going
+  `ACTIVE` with zero chunks. Bring the sidecar back and Retry those documents.
+- **Sidecar up, flag off.** A container holding memory that nothing calls. The worker probe
+  reports `ocr: ok` with `"error": "not probed: PARSER_OCR_ENABLED=false"` — the same treatment
+  `clamav` gets under `SCANNER_BACKEND=structural`, so read the reason and not just the status.
+
+Nothing `depends_on` the sidecar, for the same reason: a dead recognition engine must not hold back
+a worker whose other work is fine. Contrast ClamAV, which the worker *does* wait for, because
+malware screening fails closed and recognition does not.
+
+**Toggling the flag recreates `api` and `worker`**, because it changes their environment — and
+nginx resolves its upstreams once, at configuration load. If you flip it without also recreating
+`web`, the edge keeps the old container's IP and every request through it answers **502** with
+`connect() failed (113: Host is unreachable)` in the `web` log. Restart the edge after any change
+to `x-corpus-env`:
+
+```bash
+docker compose … restart web
+```
+
+### What it costs
+
+| | |
+|---|---|
+| Memory | `mem_limit: 1g` — headroom for one large page at 300 DPI, not a resident working set. Unlike ClamAV's signature database, nothing is held between pages. |
+| Disk | the image, plus one `.traineddata` language pack per language. |
+| CPU | one page at a time, single-threaded on purpose — OpenMP work-sharing is switched off so the same page recognises identically on a busy host and an idle one. |
+| Latency | **~2.25 s per recognised page**, measured. This is the term that dominates everything else. |
+
+That latency is why recognition is bounded twice over, and why its bounds interact with the job
+timeout rather than standing alone:
+
+| Setting | Default | Bounds |
+|---|---|---|
+| `OCR_TIMEOUT_SECONDS` | 60 s | one page |
+| `PARSER_OCR_BUDGET_SECONDS` | 600 s | the whole document — a wall clock, checked *between* pages |
+| `PARSER_OCR_MAX_PAGES` | 200 | pages recognised per document |
+| `WORKER_JOB_TIMEOUT_SECONDS` | 900 s | the ingestion job as a whole |
+
+`PARSER_OCR_BUDGET_SECONDS + OCR_TIMEOUT_SECONDS` must stay **below**
+`WORKER_JOB_TIMEOUT_SECONDS` or the application refuses to boot: the worst case is the budget
+expiring with one page still in flight. Raise the job timeout *before* raising either of the
+others. There is a second consumer of that job timeout — the knowledge-base list derives its
+`stalled` flag from it, so an unbounded recognition pass would render a perfectly healthy long
+ingestion as stalled in the user's own view.
+
+A document that hits the ceiling or the budget is **not failed**. It ingests the pages it managed
+to recognise, and the worker logs which limit stopped it. Prefer to bind with the page ceiling
+rather than the clock: a ceiling is a deterministic function of the document, while a
+clock-truncated scan recognises more pages on a fast host than on a slow one and so produces a
+different chunk set each time it is ingested.
+
+### Language packs
+
+Only `eng` ships in the image. To add one, put its `.traineddata` in the `ocr-tessdata` volume and
+set `OCR_LANGUAGES` — Tesseract's own syntax, so `eng` or `eng+deu`.
+
+**The volume is the trap.** A named volume seeds itself from the image *only while it is empty*, so
+rebuilding with a different pinned pack leaves the old data in place and the deployment quietly
+goes on recognising with it. Ask the sidecar what it actually loaded rather than assuming:
+
+```bash
+docker compose … exec ocr python3 -c \
+    "import urllib.request as u; print(u.urlopen('http://127.0.0.1:8884/health').read().decode())"
+```
+
+It answers a digest per pack alongside the engine version. If that disagrees with the image you
+just built, `docker volume rm` the volume and bring the service back up.
+
+### Turning it on over an existing corpus
+
+Three separate things, and they cost different amounts:
+
+1. **Enabling recognition is additive.** A block's provenance marker is not part of the embedding
+   fingerprint, so every existing chunk keeps its vector. Nothing re-embeds because you flipped
+   the flag.
+2. **Scanned documents that already failed can be retried in place.** They are stored as `FAILED`
+   with their original bytes, so `POST /api/v1/documents/{id}/retry` — the Retry affordance in the
+   knowledge-base list — re-runs ingestion with recognition now available. They do not need
+   re-uploading.
+3. **Rev 0.55 moved `PREPROCESSING_VERSION` to `"2"`**, and that *is* a fingerprint input. Every
+   document ingested before this upgrade is stale and keeps answering from its old vectors until
+   it is rebuilt. That is the re-embed in §8: `tools.reembed plan` prices it, `run` drains it. It
+   is a spend event, so do it deliberately and off-peak rather than as housekeeping.
+
+### What it does not do
+
+- **A scanned table comes back as text in reading order, not as a grid.** Tabular structure
+  (FR-ING-08) is layout analysis over a *text layer*, which a scanned page by definition does not
+  have. This is the case most people test first, so it is worth knowing before you demonstrate it.
+- **A poor baked-in text layer is not improved.** Recognition never competes with extracted
+  characters: if a page yields any text at all, that text wins.
+
+## 10. Verifying a deployment
 
 Beyond the three probes, the end-to-end suite drives a real browser through the whole journey —
 sign in, upload, ingest, ask, cite, rate, regenerate, rename, delete — against a running stack:
@@ -319,7 +439,7 @@ It takes about 20 seconds, makes real model calls, and is the only check that ex
 the SSE streaming path, the multipart upload path and the session cookie together. See
 [`frontend/e2e/README.md`](../frontend/e2e/README.md).
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -336,8 +456,13 @@ the SSE streaming path, the multipart upload path and the session cookie togethe
 | Answers arrive all at once instead of streaming; document list stops updating | proxy buffering re-enabled | `deployment/nginx/streaming.inc` must stay included by the `/api/` location |
 | `413` on a large upload | `client_max_body_size` below the 50 MB limit | it is 64m in the shipped config |
 | Everything times out on first `--wait` | Docker memory | give Docker ~6 GB (§1) |
+| A scanned PDF fails with `NO_EXTRACTABLE_TEXT` | recognition off, or the sidecar unreachable | §9 — **both** `--profile ocr` and `PARSER_OCR_ENABLED=true`; then Retry the document |
+| A figure inside an otherwise *textual* PDF is not searchable | that page's recognition was skipped — usually an unreachable sidecar | the document still ingests (recognition fails open); `/health/ready/worker` answers 503 with `ocr: error` and the worker logs `pdf.recognition_degraded` |
+| The app refuses to boot naming `PARSER_OCR_BUDGET_SECONDS` | recognition budget + per-page timeout ≥ the job timeout | §9 — raise `WORKER_JOB_TIMEOUT_SECONDS` first |
+| A new language pack is ignored | the `ocr-tessdata` volume seeds only while empty | §9 — `docker volume rm` it; the sidecar's `/health` reports the digest it actually loaded |
+| Everything answers `502` after changing `PARSER_OCR_ENABLED` (or any `x-corpus-env` value) | `api` was recreated with a new IP; nginx resolved its upstream once at load | `restart web` — §9 |
 
-## 11. Design decisions and rejected alternatives
+## 12. Design decisions and rejected alternatives
 
 | Decision | Rejected | Why |
 |---|---|---|
@@ -354,7 +479,7 @@ the SSE streaming path, the multipart upload path and the session cookie togethe
 | The bootstrap creates the bucket | rely on `STORAGE_AUTO_CREATE_BUCKET` | Auto-create fires on first *use*, and `HeadBucket` is not a use — so a fresh stack answered `503` forever and never became healthy. Found by running it. |
 | Compose for the reference deployment | Kubernetes manifests / Helm chart | Compose is what a reader can run in one command to evaluate the system. Orchestrator manifests are a deployment-target choice, and are deliberately left out (§12). |
 
-## 12. What this deployment is and is not
+## 13. What this deployment is and is not
 
 Honest scope, so nobody mistakes the reference stack for a production topology.
 
@@ -379,6 +504,9 @@ bootstrap, a realm with its placeholders replaced, and an end-to-end journey pas
 8. **Continuously integrated.** No pipeline builds these images or runs the suites on a change.
 9. **Cost-metered.** Every chat turn makes model calls and every answered turn is judged; nothing
    here caps spend beyond the application's own rate limits.
+10. **Tuned for recognition throughput.** OCR (§9) is optional, CPU-only, single-threaded by
+    design and ships one language pack. The single thread is a determinism control and not a
+    performance oversight, so "make it faster" means more worker processes, never more threads.
 
 For a production rollout the shortest sensible path is: put the images behind your own
 orchestrator, replace PostgreSQL/Redis/object storage with managed equivalents, point

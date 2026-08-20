@@ -21,6 +21,7 @@ real and none of them is phrased away.
 | Uploaded file bytes | **Untrusted, always** — sniffed, size-capped, scanned, parsed under decompression limits. |
 | Retrieved document text | **Untrusted input to the model** — fenced and neutralised, never in the system message. |
 | Model output | Untrusted — citation markers are resolved against a supplied list, never followed. |
+| Worker → OCR sidecar | One-way, local, and the sidecar is **untrusted in both directions**: it receives a page raster and answers text and confidences, nothing else. |
 | Keycloak | The authority for identity. Corpus mirrors users; it does not own credentials. |
 | Google Drive (optional) | Untrusted third party; its token never reaches Corpus's database. |
 
@@ -37,6 +38,7 @@ The threats that actually shaped the design, and what carries each one.
 | Prompt injection via **document text** | Structural prompt isolation; text is never blocked | A prior assistant answer re-enters as trusted speech (§11) |
 | Model exfiltrating data it should not see | Retrieval scope is SQL, not prompt text; **no tools are exposed** | — |
 | Malicious upload | Magic-byte typing, ClamAV INSTREAM, structural checks, decompression caps | Zero-day malware; scanner is defence-in-depth, not the only layer |
+| Malicious PDF reaching an image decoder or the OCR engine | Recognition runs **out of process** in an unprivileged sidecar with no credentials and no third-party destination | A defect there costs the sidecar, not the worker's database session or object-storage keys |
 | Resource exhaustion | Per-file and per-user quotas, rate limits, SSE stream caps, worker timeouts | Quota is best-effort under concurrency |
 | Stolen third-party (Drive) token | Corpus never stores one — Keycloak brokers it | Compromise of Keycloak |
 | Insider / operator error | Audit log; telemetry with no FKs so it cannot be cascade-deleted | Audit retention is unset (§11) |
@@ -159,8 +161,29 @@ Applied in this order, before anything expensive happens:
 4. **Decompression caps in the parsers** — expanded bytes, compression ratio, member count, page and
    row ceilings. Caps **reject**; nothing is ever silently truncated.
 
-Two properties worth stating plainly:
+**Recognition (FR-ING-07) adds a fifth step and a new kind of exposure**, so it is bounded on its
+own terms. It is the first ingestion step that *renders* attacker-supplied content rather than
+only parsing it, which is why NFR-SEC-09 puts the image decoders and the engine **outside the
+worker process**, in a sidecar reached over a local socket — the same argument as ClamAV, one
+requirement along. Rasterisation itself stays in the worker; the sidecar only ever sees a raster.
+It ships **off** (`PARSER_OCR_ENABLED=false`), runs unprivileged, and its bounds are:
 
+- `PARSER_OCR_MAX_RENDER_PIXELS` caps the *render*, and it is the one that matters most, because
+  it is reached with **no decoder defect at all**: rendering allocates raw samples in-process
+  before anything can weigh the encoded image, and an A0 page is ~418 megapixels while an A4 page
+  at 300 DPI is a harmless ~26. An oversized page is scaled down, not skipped.
+- `OCR_MAX_IMAGE_BYTES` refuses an oversized raster **before the request is made**, so it costs no
+  transfer; the sidecar enforces the same ceiling independently.
+- `PARSER_OCR_MAX_PAGES` and `PARSER_OCR_BUDGET_SECONDS` bound the work per document, and the
+  application refuses to boot if the budget could outlive the ingestion job (DEPLOYMENT.md §9).
+
+Three properties worth stating plainly:
+
+- **Recognition fails open, and the document-level rule still fails closed.** A dead sidecar or a
+  page the engine cannot read degrades that page to no text; the document still ingests. But a
+  document that yields nothing at all — *after* recognition has been attempted — still fails with
+  `NO_EXTRACTABLE_TEXT`, so no document ever goes `ACTIVE` with zero chunks. The two must not be
+  collapsed into one handler; the asymmetry is the requirement.
 - **The scanner fails closed.** An unreachable clamd fails the ingestion job, retryably — the
   deliberate opposite of the rate limiter, which fails open.
 - **`SCANNER_BACKEND=structural` is not an off switch.** It disables the ClamAV signature pass only;
@@ -242,6 +265,10 @@ Three properties built in deliberately, each because the obvious version of the 
   reads the live application back.
 - **Every `404` cell drives a row that exists and belongs to someone else.** A request for a random
   id passes whether the ownership predicate exists or not.
+- **NFR-SEC-09's isolation is asserted as an absence**, in `tests/test_ocr.py`, because that is the
+  only form an isolation claim can take: no in-process recognition engine in the dependency set,
+  no `subprocess` or `ctypes` in the client, and a destination composed solely from settings. A
+  positive test could only show that the sidecar works, never that nothing bypasses it.
 - **The injection band asserts structure, not detection rate.** There is deliberately no threshold
   on evasions caught: such a number creates pressure to add regexes, and disabling the screen does
   **not** fail that band — the structural controls are what carry the requirement.
@@ -263,3 +290,7 @@ Three properties built in deliberately, each because the obvious version of the 
 8. **Secrets are environment variables**, not a managed secret store; rotation is a redeploy.
 9. **No CI**, so none of §10 runs automatically on a change.
 10. **The malware scanner is signature-based** and catches known threats only.
+11. **A table on a *scanned* page comes back as reading-order text, not a grid.** Tabular
+    structure is layout analysis over a text layer, which such a page does not have.
+12. **A degraded baked-in text layer is not improved by recognition.** Extracted characters always
+    win over recognised ones — ground truth is never re-derived — so a bad text layer stays bad.

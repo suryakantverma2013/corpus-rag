@@ -50,6 +50,16 @@ x-corpus-env: &corpus-env
   # StreamMaxLength in deployment/clamav/clamd.conf, which nothing in the app can validate.
   CLAMAV_MAX_STREAM_BYTES: "104857600"
 
+  # FR-ING-07 recognition (R-88 §8.78). Off unless BOTH this flag and the `ocr` profile are
+  # enabled — a bare `up` does not start the sidecar. OCR_HOST is the load-bearing line: the
+  # shipped default is `localhost`, which is right for a natively-run dev application
+  # (§8.67) and wrong for a worker inside a container. Getting it wrong degrades silently,
+  # because recognition fails open (R-88(9)): every scanned page would ingest with no text.
+  PARSER_OCR_ENABLED: ${PARSER_OCR_ENABLED:-false}
+  OCR_HOST: ocr
+  OCR_PORT: "8884"
+  OCR_LANGUAGES: ${OCR_LANGUAGES:-eng}
+
   EMBEDDING_BACKEND: ${EMBEDDING_BACKEND:-openai}
   LLM_BACKEND: ${LLM_BACKEND:-openai}
   OPENAI_API_KEY: ${OPENAI_API_KEY}
@@ -153,6 +163,49 @@ services:
       # A cold volume downloads ~1 GB of signatures before clamd answers anything.
       start_period: 300s
     restart: unless-stopped
+
+  # FR-ING-07's recognition engine (T-217, R-88 §8.78) — the sidecar NFR-SEC-09 requires.
+  # This is the first ingestion step that *renders* attacker-supplied content rather than
+  # only parsing it, so the image decoders and the engine live outside the worker process,
+  # where a memory-safety defect in either cannot reach its database session or its
+  # object-storage credentials. Rasterisation stays in the worker (R-31 unchanged); this
+  # container only ever sees a page raster, and it never reaches a third party.
+  #
+  # Profile-gated, because R-88(12) ships the feature off: recognition costs a container, a
+  # language pack on disk and a large per-page latency term, and an operator with no scanned
+  # documents should pay none of it. The profile and PARSER_OCR_ENABLED are two switches
+  # that must agree — docs/DEPLOYMENT.md §9 says what each half-configured state looks like.
+  #
+  # Built rather than pulled: the image pins its base by digest and Tesseract by Debian
+  # version, because R-88(1) makes byte-reproducible recognition a *correctness* property.
+  # Text that differs between two passes over one page leaves `embedding_fingerprint` reuse
+  # permanently empty, and every re-ingestion then re-embeds the whole document in silence.
+  ocr:
+    build: ./ocr
+    image: corpus-ocr:${IMAGE_TAG:-local}
+    profiles: ["ocr"]
+    volumes:
+      # The extension point for extra language packs: drop a `.traineddata` in and set
+      # OCR_LANGUAGES. A named volume seeds itself from the image ONLY while it is empty, so
+      # after rebuilding with a different pinned pack this volume must be removed — otherwise
+      # the deployment quietly keeps recognising with the old data. The sidecar's
+      # `GET /health` reports a digest per pack, so that state is visible rather than assumed.
+      - ocr-tessdata:/usr/share/tesseract-ocr/5/tessdata
+    # Headroom for one large page at 300 DPI, not a resident working set: unlike clamd's
+    # signature database, recognition is CPU- and memory-bounded per page.
+    mem_limit: 1g
+    healthcheck:
+      # The image carries Python and deliberately not curl. Probed over the loopback address
+      # rather than a name, on R-81(5)'s lesson: the stock ClamAV probe pinged `localhost`,
+      # resolved ::1, and reported a perfectly healthy daemon unhealthy forever.
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8884/health').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    # No published port: the worker reaches it as `ocr:8884` on the compose network. The dev
+    # stack publishes one only because the dev application runs natively (§8.67).
 
   # ================================================================= identity
   keycloak:
@@ -321,6 +374,12 @@ services:
       # chat carries on.
       clamav:
         condition: service_healthy
+      # ...and deliberately NOT `ocr`. That edge would be the wrong shape twice over.
+      # Recognition fails OPEN (R-88(9)), so a dead sidecar degrades a scanned page to no
+      # text rather than stopping ingestion — the exact inverse of the scanner above, which
+      # fails closed and therefore earns its edge. And a depends_on onto a profile-gated
+      # service refuses to start the DEFAULT stack, where that profile is off. The `ocr`
+      # arm of GET /health/ready/worker is what reports the sidecar instead.
     restart: unless-stopped
     # No healthcheck: the worker runs no HTTP server. Its liveness is the arq heartbeat key
     # in Redis, which the API surfaces at GET /health/ready/worker.
@@ -355,3 +414,4 @@ volumes:
   redis-data:
   minio-data:
   clamav-data:
+  ocr-tessdata:
