@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.base import DEFAULT_TENANT_ID
 from app.db.models.conversation import Conversation
 from app.db.repositories.users import UserRepository
-from app.services.checkpoint_retention import prune_checkpoints
+from app.services.checkpoint_retention import _ORPHAN_THREADS, prune_checkpoints
 
 _NS = ""
 
@@ -81,6 +81,17 @@ async def _seed_write(session: AsyncSession, thread: str, n: int) -> None:
         ),
         {"t": thread, "ns": _NS, "id": _cid(n), "task": str(uuid.uuid4()), "b": b"x"},
     )
+
+
+async def _qualifying_orphans(session: AsyncSession, *, min_age: float) -> int:
+    """How many threads the orphan sweep would consider right now.
+
+    Reuses the production predicate deliberately. A count written by hand here would stop
+    agreeing with the sweep the moment that predicate changed, which is the whole failure
+    this helper exists to prevent.
+    """
+    rows = await session.execute(text(_ORPHAN_THREADS), {"min_age": min_age, "limit": 10_000_000})
+    return len(rows.all())
 
 
 async def _count(session: AsyncSession, table: str, thread: str) -> int:
@@ -235,7 +246,12 @@ async def test_a_thread_with_no_conversation_is_removed_entirely(session: AsyncS
     await _seed_blob(session, orphan, "c", "v1")
     await _seed_write(session, orphan, 1)
 
-    await prune_checkpoints(session, keep=3, min_age_seconds=60, orphan_batch=1000)
+    # `orphan_batch` is a throughput knob, not part of the property under test, and
+    # `_ORPHAN_THREADS` has no ORDER BY -- so a batch smaller than the development database's
+    # standing orphan backlog decides by hash order whether this row is considered at all.
+    # Size it past the field so the LIMIT cannot bind (T-222).
+    competing = await _qualifying_orphans(session, min_age=60)
+    await prune_checkpoints(session, keep=3, min_age_seconds=60, orphan_batch=competing + 10)
 
     for table in ("checkpoints", "checkpoint_blobs", "checkpoint_writes"):
         assert await _count(session, table, orphan) == 0
