@@ -64,12 +64,11 @@ from app.ingestion.parsers.base import (
     DocumentTooComplexError,
     EncryptedDocumentError,
     Extraction,
-    Locator,
     NoExtractableTextError,
     ParsedBlock,
     ParsedDocument,
+    emit_blocks,
     page_locator,
-    split_text,
 )
 from app.ingestion.parsers.recognition import (
     RecognitionBudget,
@@ -89,46 +88,6 @@ SUFFIX = ".pdf"
 #: The whole page, as opposed to a clip within it. Named so the region loop reads the same
 #: for a scanned page and for a figure on a textual one.
 _WHOLE_PAGE: pymupdf.Rect | None = None
-
-
-def _emit(
-    blocks: list[ParsedBlock],
-    text: str,
-    *,
-    locator: Locator,
-    budget: CharBudget,
-    limits: ParserSettings,
-    extraction: Extraction,
-    headed: bool = False,
-) -> None:
-    """Normalise, charge and append ``text`` as one or more blocks on ``locator``.
-
-    One place for all three provenances, so a change to the block ceiling or the budget cannot
-    reach extracted text and miss recognised or tabular text.
-
-    ``headed`` says the first line labels every line below it. The header is then re-read **from
-    the normalised content** rather than carried in from the caller, which is what guarantees the
-    chunker's invariant: line 0 of the block *is* `block.header`, byte for byte, so the line it
-    repeats on chunks 2..n is the one the user's document actually contains. `split_text` may cut
-    a very large table before the chunker ever sees it, so each part past the first opens with the
-    header too — otherwise the split R-88(6) is written about would lose the column names one
-    level above the one it names.
-    """
-    content = normalize(text)
-    if is_blank(content):
-        return
-    budget.add(content)
-    header = content.split("\n", 1)[0] if headed else ""
-    for index, part in enumerate(split_text(content, limits.max_block_chars)):
-        blocks.append(
-            ParsedBlock(
-                text=f"{header}\n{part}" if header and index else part,
-                locator=locator,
-                order=len(blocks),
-                extraction=extraction,
-                header=header,
-            )
-        )
 
 
 def parse(
@@ -209,7 +168,7 @@ def parse(
                     items = [content]
                 for item in items:
                     if isinstance(item, DetectedTable):
-                        _emit(
+                        emit_blocks(
                             blocks,
                             item.text,
                             locator=locator,
@@ -219,7 +178,7 @@ def parse(
                             headed=bool(item.header),
                         )
                     else:
-                        _emit(
+                        emit_blocks(
                             blocks,
                             item,
                             locator=locator,
@@ -266,7 +225,7 @@ def parse(
                     continue
                 # Charged against the same ceiling as extracted text: without this a long
                 # scan would bypass `PARSER_MAX_EXTRACTED_CHARS` entirely.
-                _emit(
+                emit_blocks(
                     blocks,
                     text,
                     locator=locator,

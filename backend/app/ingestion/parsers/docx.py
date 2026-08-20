@@ -15,6 +15,16 @@ nothing else — the failure would look like a bad retrieval result months later
 parse error. Walking `document.element.body` visits paragraphs and tables interleaved in
 true document order.
 
+**A table is its own block inside its section (FR-ING-08, R-89, T-223).** It was previously
+appended to the section buffer and flushed inside the prose block around it, which left it
+marked `text` with no declared header — so the chunker's row-atomicity and repeated-header
+rules, both of which were already generic, were simply never reached from this format and a
+long table shipped its later chunks as bare `EU | 12 | 15`. A section holding prose, a table
+and more prose now yields three blocks on **one** `section` locator, exactly as a PDF page
+yields several blocks on one page locator (no fourth `LocatorKind` — R-88(6)). Unlike the PDF
+path this needs no detection: a DOCX *declares* its tables, and it declares its header rows
+too, in the two ways :func:`_declares_a_header_row` reads.
+
 There are no page numbers here, and none are invented (R-34). DOCX stores no pagination —
 page breaks are computed by the renderer from font metrics and page size, so any "page 7"
 this module produced would be fiction that a citation then points at. The locator is the
@@ -27,6 +37,7 @@ import io
 import re
 import zipfile
 from collections.abc import Iterator
+from dataclasses import replace
 
 # Absolute imports: `docx` here is python-docx, not this module (PEP 328).
 from docx import Document as open_docx
@@ -39,12 +50,15 @@ from app.ingestion.parsers.base import (
     CharBudget,
     CorruptDocumentError,
     DocumentTooComplexError,
+    Extraction,
     NoExtractableTextError,
     ParsedBlock,
     ParsedDocument,
+    Segment,
+    clears_table_floor,
+    emit_blocks,
     render_row,
     section_locator,
-    split_text,
 )
 from app.ingestion.parsers.text import is_blank, normalize
 
@@ -57,6 +71,9 @@ _HEADING_STYLE = re.compile(r"^heading\s+([1-9])$", re.IGNORECASE)
 #: Ratio checks only apply above this expanded size. Small XML parts legitimately
 #: compress 50:1 or better, so testing them would reject every real document.
 _RATIO_FLOOR_BYTES = 1024 * 1024
+
+#: The two `w:val` spellings that turn a toggle property off. Absent means on.
+_HEADER_OFF = frozenset({"0", "false"})
 
 
 def _check_zip_limits(payload: bytes, limits: ParserSettings) -> None:
@@ -100,21 +117,82 @@ def _check_zip_limits(payload: bytes, limits: ParserSettings) -> None:
                 )
 
 
-def _render_table(table: Table) -> str:
-    """Flatten a table to one line per row, cells pipe-separated.
+def _declares_a_header_row(table: Table) -> bool:
+    """Whether row 0 of ``table`` names the columns, from the two signals OOXML carries.
+
+    **`w:trPr/w:tblHeader` on row 0 is the strong one.** The author ticked "Repeat as header
+    row", so Word reprints that row at every page break — which is the same claim R-35(11)
+    makes about a chunk boundary, arrived at independently by the person who wrote the
+    document. Nothing else in a DOCX states it as directly.
+
+    **`w:tblPr/w:tblLook/@w:firstRow` is the weak one, and the weakness is recorded rather
+    than hidden.** It enables a table style's first-row formatting, and Word's default table
+    insert writes `w:tblLook w:firstRow="1" w:val="04A0"` — measured, and python-docx's own
+    default template does the same — so in practice nearly every table asserts it. The
+    consequence is a table whose first row is data declaring a header it does not have, which
+    costs **one duplicated line on chunks 2..n of a table long enough to split at all**, and
+    nothing whatever on a table that fits in one chunk. The alternative is honouring
+    `w:tblHeader` alone, which almost no real document sets: that leaves genuine headers
+    undeclared on virtually every DOCX, which is precisely the defect T-223 exists to fix. A
+    cheap wrong header beats a systematically absent right one.
+
+    **Not inferred from the cells.** `csv.py` guesses because a CSV states nothing; a DOCX
+    states something, and second-guessing it here would put an inference in the one place
+    `ParsedBlock.header`'s contract says the producer must be authoritative.
+    """
+    rows = table.rows
+    if not rows:
+        return False
+
+    row_properties = rows[0]._tr.find(qn("w:trPr"))
+    if row_properties is not None:
+        flag = row_properties.find(qn("w:tblHeader"))
+        if flag is not None:
+            # A toggle property: present with no `w:val` means on, and only these two values
+            # turn it off (ECMA-376 §17.17.4 — Word writes "0", other producers "false").
+            return flag.get(qn("w:val")) not in _HEADER_OFF
+
+    properties = table._tbl.tblPr
+    if properties is None:
+        return False
+    look = properties.find(qn("w:tblLook"))
+    return look is not None and look.get(qn("w:firstRow")) == "1"
+
+
+def _render_table(table: Table, limits: ParserSettings) -> tuple[str, bool, bool]:
+    """``(serialised table, is it a table block, does line 0 head it)``.
 
     Keeping a row on one line preserves the cell adjacency that makes a table row
     meaningful ("Region | Q3 | Q4"); splitting cells into separate lines would scatter
     a row's values across a chunk boundary and make the numbers unattributable.
     Nested tables are not descended into — python-docx exposes a cell's own paragraphs
-    only, and nested layout tables are rare enough not to justify the recursion.
+    only, and nested layout tables are rare enough not to justify the recursion. A
+    vertically merged cell repeats its text on every row it spans, because `row.cells`
+    reports the grid rather than the merge; that is python-docx's model and predates T-223.
+
+    The second flag is `clears_table_floor` — below it the rendering is unchanged and the
+    caller folds it into the surrounding prose, which is exactly the pre-T-223 output.
+
+    The header claim is **positional**, and both guards below exist because
+    :func:`emit_blocks` re-reads the header off line 0 of the normalised text. A blank row 0
+    is dropped, so the row that would then sit on line 0 is data; and a header with nothing
+    under it labels nothing, so declaring it would make the chunker repeat a line that is
+    already the block's only content.
     """
-    lines = []
-    for row in table.rows:
+    declared = _declares_a_header_row(table)
+    lines: list[str] = []
+    headed = False
+    columns = 0
+    for index, row in enumerate(table.rows):
         cells = [cell.text for cell in row.cells]
-        if any(cell.strip() for cell in cells):
-            lines.append(render_row(cells))
-    return "\n".join(lines)
+        if not any(cell.strip() for cell in cells):
+            continue
+        if not lines:
+            columns = len(cells)
+            headed = index == 0 and declared
+        lines.append(render_row(cells))
+    tabular = clears_table_floor(rows=len(lines), columns=columns, limits=limits)
+    return "\n".join(lines), tabular, headed and len(lines) > 1
 
 
 def _iter_body(document) -> Iterator[Paragraph | Table]:  # noqa: ANN001 — python-docx Document
@@ -149,35 +227,80 @@ def parse(payload: bytes, *, limits: ParserSettings) -> ParsedDocument:
     budget = CharBudget(limits.max_extracted_chars)
     blocks: list[ParsedBlock] = []
     heading_path: tuple[str, ...] = ()
-    buffer: list[str] = []
+    segments: list[Segment] = []
     section_index = 0
     paragraph_ordinal = 0
     section_first_paragraph = 1
 
+    def add_prose(text: str) -> None:
+        """Extend the section's open prose run, or start one.
+
+        The blank-line join reproduces the pre-T-223 `"\\n\\n".join(buffer)` exactly, which is
+        what makes a table-free document byte-identical. A table between two paragraphs ends
+        the run: they were never adjacent, and running them together invents a sentence
+        boundary the chunker would then embed — `compose_page`'s reason, one format over.
+        """
+        if segments and segments[-1].extraction is Extraction.TEXT:
+            segments[-1] = replace(segments[-1], text=f"{segments[-1].text}\n\n{text}")
+        else:
+            segments.append(Segment(text=text))
+
     def flush(path: tuple[str, ...], first_paragraph: int) -> None:
-        nonlocal buffer, section_index
-        content = normalize("\n\n".join(buffer))
-        buffer = []
-        if is_blank(content):
+        """Emit this section's segments as an ordered run of blocks on **one** locator.
+
+        One `section_index` per section, not per block: a section holding prose, a table and
+        more prose is one section that yields three blocks, exactly as a PDF page yields
+        several blocks on one page locator (R-88(6)). Numbering per block would make
+        `section_index` a block ordinal wearing a section's name, and every citation into a
+        table-bearing document would then name a section the document does not have.
+
+        Normalised here rather than only inside `emit_blocks` so the emptiness test is the one
+        the emitter will apply — a section of nothing but control bytes must not consume a
+        `section_index` and then emit no blocks. `normalize` is idempotent, so the emitter's
+        own call is a no-op and the emitted text is unchanged.
+        """
+        nonlocal segments, section_index
+        pending = [replace(segment, text=normalize(segment.text)) for segment in segments]
+        segments = []
+        pending = [segment for segment in pending if not is_blank(segment.text)]
+        if not pending:
             return
-        budget.add(content)
         section_index += 1
         locator = section_locator(
             path,
             section_index,
             fallback_label=f"paragraph {first_paragraph}",  # TBD(§8.4)
         )
-        for part in split_text(content, limits.max_block_chars):
-            blocks.append(ParsedBlock(text=part, locator=locator, order=len(blocks)))
+        for segment in pending:
+            emit_blocks(
+                blocks,
+                segment.text,
+                locator=locator,
+                budget=budget,
+                limits=limits,
+                extraction=segment.extraction,
+                headed=segment.headed,
+            )
 
     try:
         for item in _iter_body(document):
             if isinstance(item, Table):
-                rendered = _render_table(item)
-                if rendered:
-                    buffer.append(rendered)
+                rendered, tabular, headed = _render_table(item, limits)
+                if not rendered:
+                    continue
+                if tabular:
+                    # Its own segment, always: `extraction: "table"` has to be true of the
+                    # whole block, and the chunker's row-atomicity rule keys off it — a block
+                    # that were half prose would forbid word-level splits in the prose half.
+                    segments.append(
+                        Segment(text=rendered, extraction=Extraction.TABLE, headed=headed)
+                    )
+                else:
+                    add_prose(rendered)
                 continue
 
+            # Deliberately not incremented for a table: the fallback label reads
+            # "paragraph N", so counting a table would name something the reader cannot find.
             paragraph_ordinal += 1
             text = item.text
             level = _heading_level(item)
@@ -188,13 +311,20 @@ def parse(payload: bytes, *, limits: ParserSettings) -> ParsedDocument:
                 heading_path = heading_path[: level - 1] + (text.strip(),)
                 section_first_paragraph = paragraph_ordinal
                 # The heading leads its own section so a chunk carries its context.
-                buffer.append(text.strip())
+                add_prose(text.strip())
                 continue
 
             if not is_blank(text):
-                if not buffer:
+                # A section opening with a table leaves `segments` non-empty, so the start
+                # ordinal is not reset for the paragraph after it. `section_locator` consults
+                # `fallback_label` only when the heading path is empty, and with no headings
+                # there is exactly one section whose first paragraph is #1 by construction —
+                # so the only reachable wrong output is "paragraph 1" on a headingless
+                # document that opens with a table. Display copy, already `# TBD(§8.4)`, and
+                # "paragraph 0" would be worse.
+                if not segments:
                     section_first_paragraph = paragraph_ordinal
-                buffer.append(text)
+                add_prose(text)
     except Exception as exc:
         if isinstance(exc, DocumentTooComplexError):
             raise

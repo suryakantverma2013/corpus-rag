@@ -175,7 +175,7 @@ It ships **off** (`PARSER_OCR_ENABLED=false`), runs unprivileged, and its bounds
 - `OCR_MAX_IMAGE_BYTES` refuses an oversized raster **before the request is made**, so it costs no
   transfer; the sidecar enforces the same ceiling independently.
 - `PARSER_OCR_MAX_PAGES` and `PARSER_OCR_BUDGET_SECONDS` bound the work per document, and the
-  application refuses to boot if the budget could outlive the ingestion job (DEPLOYMENT.md §9).
+  application refuses to boot if the budget could outlive the ingestion job (DEPLOYMENT.md §10).
 
 Three properties worth stating plainly:
 
@@ -282,8 +282,13 @@ Three properties built in deliberately, each because the obvious version of the 
 3. **Prompt-injection screening is evadable** by design (§5); bounded, not eliminated.
 4. **A prior assistant answer re-enters the next turn as trusted speech**, outside the fence. Known
    and accepted; bounded by that answer having itself passed the groundedness gate.
-5. **Audit-log retention is unset**, deliberately — it needs a compliance decision this project has
-   not been given.
+5. **The audit trail is kept indefinitely and is never pruned** (R-90(2)). That is the decision,
+   not an omission: "append-only" is the requirement's own wording, no retention obligation has
+   been stated for this deployment, and a horizon picked from nothing destroys the one record
+   whose value is being complete. If an obligation lands, the mechanism is a mirror of
+   `prune_turn_telemetry` — same batch bound, same never-raises rule, same `0 = keep forever`
+   polarity — and it is deliberately *not* the same knob as telemetry retention, which answers to
+   an operator rather than to a regulator.
 6. **No download/export surface** — a limitation as much as a control (§9). Adding one makes a real
    scanner mandatory rather than defence-in-depth.
 7. **Quota enforcement is best-effort** under concurrent uploads.
@@ -294,3 +299,10 @@ Three properties built in deliberately, each because the obvious version of the 
     structure is layout analysis over a text layer, which such a page does not have.
 12. **A degraded baked-in text layer is not improved by recognition.** Extracted characters always
     win over recognised ones — ground truth is never re-derived — so a bad text layer stays bad.
+13. **Nothing is encrypted at rest by the application** (R-90(1)). Access control at rest *is*
+    provided — neither store is reachable without credentials — and password storage left the
+    application entirely at R-28, but PostgreSQL has no in-core at-rest encryption and MinIO's
+    needs an external key service, so this is an operator responsibility the deployment documents
+    rather than provides: encrypted volumes, or managed services that encrypt by default
+    (DEPLOYMENT.md §8). Backups are the part most often missed — an encrypted volume protects the
+    running disk and nothing else.

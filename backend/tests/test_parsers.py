@@ -31,7 +31,7 @@ from app.ingestion.parsers import (
     parse_document,
     parse_document_sync,
 )
-from app.ingestion.parsers.base import split_text
+from app.ingestion.parsers.base import Extraction, split_text
 from app.ingestion.parsers.text import is_blank, normalize
 
 # --- fixtures -----------------------------------------------------------------
@@ -257,9 +257,18 @@ def test_docx_sections_carry_nested_heading_paths() -> None:
     assert parsed.suffix == ".docx"
     assert parsed.page_count is None  # R-34: DOCX stores no pagination
     paths = [block.locator.section_path for block in parsed.blocks]
-    assert paths == [("Introduction",), ("Introduction", "Setup")]
+    assert paths == [
+        ("Introduction",),
+        ("Introduction", "Setup"),
+        ("Introduction", "Setup"),
+    ]
     assert parsed.blocks[1].locator.label == "§ Introduction › Setup"
     assert all(block.locator.kind is LocatorKind.SECTION for block in parsed.blocks)
+    # The fixture's §2 is prose plus a table: two blocks, **one** section (T-223/R-89).
+    # Numbering per block would make `section_index` a block ordinal wearing a section's
+    # name, and every citation into a table-bearing document would name a section the
+    # document does not have.
+    assert [block.locator.section_index for block in parsed.blocks] == [1, 2, 2]
 
 
 def test_docx_tables_survive_and_keep_row_adjacency() -> None:
@@ -269,17 +278,30 @@ def test_docx_tables_survive_and_keep_row_adjacency() -> None:
     assert "EU | 12 | 15" in text
 
 
-def test_docx_table_stays_in_body_order_after_its_paragraph() -> None:
+def test_a_docx_table_is_its_own_block_after_the_paragraph_it_follows() -> None:
+    """Body order survives the T-223 promotion, and the table is no longer folded into prose.
+
+    Before R-89 the rendered table was appended to the section buffer, so it shipped inside
+    the prose block with `extraction: text` and no header — which is why the chunker's
+    row-atomicity and repeated-header rules never fired for this format.
+    """
     parsed = parse_document_sync(make_docx(), filename="handbook.docx")
-    body = parsed.blocks[-1].text
-    assert body.index("Install the thing.") < body.index("Region | Q3 | Q4")
+
+    assert [block.extraction for block in parsed.blocks] == [
+        Extraction.TEXT,
+        Extraction.TEXT,
+        Extraction.TABLE,
+    ]
+    assert parsed.blocks[1].text.endswith("Install the thing.")
+    assert parsed.blocks[2].text == "Region | Q3 | Q4\nEU | 12 | 15"
+    # One locator instance for the whole section, exactly as a PDF page shares one.
+    assert parsed.blocks[1].locator is parsed.blocks[2].locator
 
 
 def test_docx_without_headings_falls_back_to_a_paragraph_label() -> None:
     parsed = parse_document_sync(make_docx(headings=False), filename="notes.docx")
-    assert len(parsed.blocks) == 1
-    assert parsed.blocks[0].locator.section_path == ()
-    assert parsed.blocks[0].locator.label.startswith("paragraph ")
+    assert all(block.locator.section_path == () for block in parsed.blocks)
+    assert all(block.locator.label.startswith("paragraph ") for block in parsed.blocks)
 
 
 def test_deep_heading_paths_shorten_the_label_but_not_the_metadata() -> None:
@@ -449,14 +471,20 @@ def test_markdown_sections_and_line_ranges() -> None:
 
     assert parsed.suffix == ".md"
     assert parsed.page_count is None
-    assert [block.locator.section_path for block in parsed.blocks] == [
+    assert {block.locator.section_path for block in parsed.blocks} == {
         ("Guide",),
         ("Guide", "Setup"),
-    ]
-    first, second = parsed.blocks
+    }
+    first = next(b for b in parsed.blocks if b.locator.section_index == 1)
+    rest = [b for b in parsed.blocks if b.locator.section_index == 2]
     assert first.locator.line_start == 1
-    assert first.locator.line_end < second.locator.line_start
+    assert first.locator.line_end < rest[0].locator.line_start
     assert first.locator.as_metadata()["line_start"] == 1
+    # §2 is prose / table / prose after T-223, and the range is the **section's** — every
+    # block of it carries the same one. Narrowing the table's is possible here and
+    # impossible in `docx.py`, and one format citing a sub-section range while the other
+    # cannot would make the same content read differently in the FR-CIT-03 card (R-89).
+    assert len({(b.locator.line_start, b.locator.line_end) for b in rest}) == 1
 
 
 def test_markdown_strips_syntax_but_keeps_content() -> None:
@@ -476,12 +504,15 @@ def test_markdown_refuses_raw_html() -> None:
     assert "script" not in parsed.text.lower()
 
 
-def test_markdown_keeps_code_fences_and_groups_lists_and_tables() -> None:
+def test_markdown_keeps_code_fences_and_groups_list_items() -> None:
+    """The table half of this moved to `test_tables.py` when T-223 gave it its own block."""
     parsed = parse_document_sync(MD_BYTES, filename="guide.md")
-    body = parsed.blocks[-1].text
-    assert "uv run pytest" in body
+    body = next(
+        block.text
+        for block in parsed.blocks
+        if block.extraction is Extraction.TEXT and "uv run pytest" in block.text
+    )
     assert "- first item\n- second item" in body  # one block, not two paragraphs
-    assert "Region | Q3\nEU | 12" in body
 
 
 def test_markdown_without_headings_uses_a_line_range_label() -> None:

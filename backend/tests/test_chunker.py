@@ -12,11 +12,13 @@ keeps the assertions readable.
 from __future__ import annotations
 
 import hashlib
+import io
 import uuid
 from pathlib import Path
 
 import pymupdf
 import pytest
+from docx import Document as new_docx
 from pydantic import ValidationError
 
 from app.config import EMBEDDING_MAX_INPUT_CHARS, ChunkerSettings
@@ -336,11 +338,15 @@ def test_a_headerless_csv_block_gets_no_repeated_first_row() -> None:
     assert not chunked.chunks[1].text.startswith("row1 |")
 
 
-# --- PDF table blocks (T-219, FR-ING-08) --------------------------------------
+# --- table blocks (T-219 detected, T-223 declared; FR-ING-08) -----------------
 
 
 def _table_block(rows: int, *, header: str = "Region | Q3 | Q4") -> ParsedDocument:
-    """A table as `pdf.py` emits one: `page` locator, `table` provenance, declared header."""
+    """A table as `pdf.py` emits one: `page` locator, `table` provenance, declared header.
+
+    `docx.py` and `markdown.py` emit the same shape on a `section` locator (T-223); the
+    end-to-end test at the foot of this block drives one of them through a real parse.
+    """
     lines = [f"R{index} | {index} | {index * 2}" for index in range(1, rows + 1)]
     block = ParsedBlock(
         text="\n".join(([header] if header else []) + lines),
@@ -387,6 +393,42 @@ def test_a_table_block_with_no_header_repeats_nothing() -> None:
 def test_a_table_chunk_carries_the_table_provenance() -> None:
     chunked = chunk_document_sync(_table_block(3), embedding_model=MODEL, settings=_settings())
     assert chunked.meta_for(chunked.chunks[0])["extraction"] == "table"
+
+
+def test_a_docx_table_chunk_repeats_its_header_and_never_bisects_a_row() -> None:
+    """Parse a real DOCX and chunk it — the only evidence the chunker needed no change.
+
+    Every other test in this block hand-builds the `ParsedBlock`, so it proves the chunker
+    honours a declared header and a `table` marker but says nothing about whether any parser
+    actually produces them. T-223 made `docx.py` a producer; this is what shows the two halves
+    meet. `page`/`rows` locators are unreachable from a DOCX, so the row-atomicity rule here
+    can only be firing on `Extraction.TABLE`.
+    """
+    document = new_docx()
+    document.add_heading("Data", level=1)
+    document.add_paragraph("Quarterly results follow.")
+    grid = document.add_table(rows=40, cols=3)
+    for row_index in range(40):
+        for col_index in range(3):
+            grid.cell(row_index, col_index).text = (
+                ("Region", "Q3", "Q4")[col_index] if row_index == 0 else f"R{row_index}C{col_index}"
+            )
+    buffer = io.BytesIO()
+    document.save(buffer)
+
+    parsed = parse_document_sync(buffer.getvalue(), filename="data.docx")
+    chunked = chunk_document_sync(
+        parsed, embedding_model=MODEL, settings=_settings(target_chars=120)
+    )
+
+    table_chunks = [chunk for chunk in chunked.chunks if chunk.extraction is Extraction.TABLE]
+    assert len(table_chunks) > 1
+    for chunk in table_chunks:
+        assert chunk.text.startswith("Region | Q3 | Q4")
+        for line in chunk.text.split("\n"):
+            assert line.count("|") == 2, "a table row was bisected"
+    assert chunked.meta_for(table_chunks[0])["extraction"] == "table"
+    assert chunked.meta_for(table_chunks[0])["locator"]["kind"] == "section"
 
 
 # --- hash & fingerprint -------------------------------------------------------

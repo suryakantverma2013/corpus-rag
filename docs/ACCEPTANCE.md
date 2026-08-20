@@ -109,35 +109,39 @@ ranking rather than BM25, and reranking is batched pointwise scoring rather than
 
 Printed from the manifest by `python -m tools.acceptance`; summarised here.
 
-**One requirement is open**, and it was narrowed to a single clause rather than left vague.
-Password hashing left the application entirely when identity moved to Keycloak — there is no
-password column to hash. TLS is an operator responsibility the deployment *documents* rather than
-provides: the stack speaks plain HTTP behind its edge and expects termination in front of it. Data
-egress is now settled as a **prohibition** — prompt text, completion text and retrieved document
-text shall not leave the deployment, which is why the external tracing vendors remain declined on a
-requirement rather than on an open question. What remains is **encryption at rest**, configured
-nowhere, and a deployment decision rather than application code.
+**Nothing.** The residual list is empty and no §5 requirement carries an `OPEN` disposition. That
+is a recent state and it is worth saying how it was reached, because "empty" is the easiest thing
+in this document to fake.
 
-**Two findings were closed the same day.** The review found the realm carrying **no password policy
-at all** — the absence of one, so any password an administrator typed was accepted — and it now
-sets a length, username and history rule. What is deliberately *not* set is a rotation policy:
-under backend-mediated ROPC there is no browser, so a required action locks the account out
-permanently, which makes rotation an outage rather than a stricter rule. Its absence is asserted by
-a test. Three provisional rejection strings were also confirmed and moved into their requirements.
+The review filed **eight** gaps. Two were missing *instruments* and were closed by building them:
+T-613 committed the environment-variable coverage check, and T-614 committed the accessibility
+pass as `frontend/a11y/`, so NFR-A11Y-06's conformance claim became a command anyone can repeat.
+Three more were closed the same day the review ran — the realm's absent password policy, and two
+provisional copy strings moved into their requirements.
 
-**Two further gaps** are filed rather than fixed, each with an owner:
+The last three were never engineering work. Each was a **decision nobody had taken**, which is a
+different thing and had started to read as a backlog. R-90 took them:
 
-1. The audit trail has no stated retention period. Telemetry retention is settled at 90 days; the
-   audit log's own period is a compliance decision nobody has taken.
-2. Sidebar history pagination is deferred until conversation counts justify it.
+1. **NFR-SEC-03's final clause** — encryption at rest — closes as an operator responsibility the
+   deployment *documents* rather than provides, the same disposition the TLS clause beside it
+   already carried. The requirement's own wording is what settles it: access control at rest is
+   required and is provided, while encryption at rest is *recommended*, and it is the one clause
+   application code cannot honour — PostgreSQL has no in-core at-rest encryption and MinIO's needs
+   an external key service. `DEPLOYMENT.md` §8 names the two mechanisms that discharge it. The row
+   is an **accepted exception, not met**: documenting a control is weaker than providing one, and
+   overclaiming it is exactly what this register exists to prevent.
+2. **The audit trail** is kept **indefinitely**, with no pruning mechanism shipped. "Append-only"
+   is the requirement's first word, no obligation has been stated, and a period chosen from
+   nothing destroys the one record whose value is being complete.
+3. **The sidebar list** is **unbounded by decision**. This one carried a finding: the entry
+   deferring it said "the conversations route pages", and it does not — `list_conversations`
+   returns a bare, unpaged array and says so in its own docstring. The claim was wrong in the
+   direction that makes a gap look smaller. *A gap closed by citing what the code does is only as
+   good as the citation.*
 
-The other two the review filed have since been closed. The uncommitted environment-variable
-coverage check was closed by T-613: `backend/tests/test_env_templates.py` now diffs
-`backend/.env.example` against the settings model and `deployment/.env.prod.example` against the
-compose file's interpolations, both directions, and boots `Settings` from each to catch what a
-name diff cannot see. The unrunnable accessibility audit was closed by T-614, which committed the
-axe pass as `frontend/a11y/` — so NFR-A11Y-06's conformance claim is now a command anyone can
-repeat rather than a written result.
+Each of the three carries a revisit trigger in §8.80, and two of them are measurements rather than
+opinions: a stated retention obligation, and a real account whose conversation list is large enough
+to show up in first paint.
 
 ## 5. Two findings worth generalising
 

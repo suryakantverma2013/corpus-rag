@@ -106,10 +106,17 @@ def render_report(*, verbose: bool) -> str:
 
     lines.append("")
     lines.append(f"RESIDUAL - what the review did not close: {len(RESIDUAL_GAPS)}")
-    lines.append("  Each is filed. An unowned gap is indistinguishable from an oversight.")
-    for gap in RESIDUAL_GAPS:
-        lines.append(f"  {gap.item}  [{gap.filed_as}]")
-        lines.append(f"      {gap.detail}")
+    if RESIDUAL_GAPS:
+        lines.append("  Each is filed. An unowned gap is indistinguishable from an oversight.")
+        for gap in RESIDUAL_GAPS:
+            lines.append(f"  {gap.item}  [{gap.filed_as}]")
+            lines.append(f"      {gap.detail}")
+    else:
+        # The empty state gets its own sentence rather than a caption about a list that is not
+        # there. It also says what "empty" does and does not claim: the accepted exceptions above
+        # are still exceptions, and re-describing a gap as a feature is the way this number lies.
+        lines.append("  Nothing outstanding. Accepted exceptions above are still exceptions -")
+        lines.append("  this counts what was filed and left unowned, not what was waived.")
 
     return _ascii("\n".join(lines))
 

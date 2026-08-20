@@ -31,6 +31,7 @@ from enum import StrEnum
 from typing import ClassVar, Protocol
 
 from app.config import ParserSettings
+from app.ingestion.parsers.text import is_blank, normalize
 
 #: Bump on **any** change to extracted text: normalisation rules, block grouping,
 #: table rendering, whitespace handling. Feeds FR-ING-03's `embedding_fingerprint`,
@@ -46,7 +47,20 @@ from app.config import ParserSettings
 #: path re-embedded a *healthy* corpus, so before T-608 this line would have stranded
 #: every existing document on a fingerprint nothing could refresh — correct, and forever.
 #: The migration is `tools.reembed plan` to price it, then a bounded `run`.
-PREPROCESSING_VERSION = "2"
+#:
+#: ``"3"`` (T-223, R-89): DOCX and Markdown stop folding a table into the section block
+#: around it. A table-bearing document in either format changes **block grouping** — one
+#: section block becomes prose / table / prose — and a Markdown table changes **table
+#: rendering** too, because its cells now go through :func:`render_row` and an inner
+#: whitespace run collapses the way it always has in every other format. Both are named in
+#: this constant's own bump rule two paragraphs up, so the fingerprint has to move.
+#:
+#: **A table-free DOCX or Markdown file is byte-identical** to what shipped before, and a
+#: PDF is untouched — so the real blast radius is far smaller than a version bump can
+#: express. It re-embeds them anyway, because the version string is per-pipeline and not
+#: per-document, and a fingerprint that were selective would have to be computed from the
+#: very text it is supposed to certify.
+PREPROCESSING_VERSION = "3"
 
 
 # --- failures -----------------------------------------------------------------
@@ -211,8 +225,12 @@ class Extraction(StrEnum):
     complaint diagnosable at all — without it, "the citation is garbled" cannot be
     distinguished from "the document is garbled".
 
-    All three members have a producer: `pdf.py` emits ``OCR`` for a recognised page or figure
-    (T-218) and ``TABLE`` for a serialised table (T-219); every other parser leaves the default.
+    All three members have a producer. `pdf.py` emits ``OCR`` for a recognised page or figure
+    (T-218) and is its only producer. ``TABLE`` has three: `pdf.py` for a *detected* table
+    (T-219) and `docx.py` / `markdown.py` for a *declared* one (T-223) — two mechanisms, one
+    marker, deliberately, because what a consumer needs to know is that the block is a grid of
+    rows and not prose, which is equally true however it was found. ``TEXT`` is the default and
+    `csv.py` is the one parser that only ever leaves it.
 
     **Not a fingerprint input** — it travels in `document_chunks.metadata`, which
     `embedding_fingerprint` does not read. That is what makes *turning recognition on* purely
@@ -234,8 +252,10 @@ class ParsedBlock:
     text: str
     locator: Locator
     order: int  # 0-based position in the document
-    #: Defaulted **and trailing** so the three formats that can only ever produce extracted
-    #: text — DOCX, MD, CSV — need no change. `pdf.py` is the one parser that sets it.
+    #: Defaulted **and trailing** so `csv.py` — the one format that can only ever produce
+    #: extracted text — needs no change. The other three set it: `pdf.py` for recognised and
+    #: detected content (T-218/T-219), `docx.py` and `markdown.py` for a declared table
+    #: (T-223). Set it through :func:`emit_blocks`, which takes it undefaulted on purpose.
     extraction: Extraction = Extraction.TEXT
     #: The block's own first line, when it labels every line below it — R-35's repeated CSV
     #: header generalised to FR-ING-08's tables (R-88(6)). The chunker repeats it on chunks
@@ -246,6 +266,26 @@ class ParsedBlock:
     #: express; and a table whose header cells are empty must not have its first *data* row
     #: repeated as one. The producer is the only thing that knows.
     header: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class Segment:
+    """One unit of a flow-format section, waiting for the section's locator (T-223).
+
+    `docx.py` and `markdown.py` build a section out of prose runs and declared tables in body
+    order, and every one of them lands on **one** `Locator` — exactly as `compose_page` hands
+    `pdf.py` an ordered `str | DetectedTable` list that lands on one page locator. This is that
+    list without the geometry: `DetectedTable` carries a `Rect` because the PDF path has to keep
+    a region out of the page's ordinary text, and a *declared* table has no such problem — the
+    format already said where it ends.
+
+    Three fields because that is exactly what :func:`emit_blocks` takes. Frozen, and extended
+    with `dataclasses.replace`, so a half-built section cannot be mutated from two places.
+    """
+
+    text: str
+    extraction: Extraction = Extraction.TEXT
+    headed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,13 +334,41 @@ class CharBudget:
 def render_row(cells: Iterable[str]) -> str:
     """One record on one line, cells pipe-separated, inner whitespace collapsed.
 
-    Kept here because three parsers already rendered a row exactly this way — `csv.py`, `docx.py`
-    and `markdown.py` — and T-219 would have been a fourth copy. Keeping a row on one line is
-    what preserves the adjacency that makes it meaningful (`Region | Q3 | Q4`); splitting cells
-    onto separate lines scatters a row's values across a chunk boundary and leaves the numbers
-    unattributable.
+    Keeping a row on one line is what preserves the adjacency that makes it meaningful
+    (`Region | Q3 | Q4`); splitting cells onto separate lines scatters a row's values across a
+    chunk boundary and leaves the numbers unattributable.
+
+    T-219 promoted this out of the parsers on the strength of a claim that was **already false**
+    when it was written: it said `csv.py`, `docx.py` and `markdown.py` all rendered a row this
+    way, and `markdown.py` did a bare `" | ".join` instead — so a Markdown cell kept the inner
+    whitespace runs every other format collapsed, and the same table in two formats hashed
+    differently for no reason a reader could see. T-223 made the claim true by repointing
+    `markdown.py` here, which is one of the two text changes that bump paid for.
     """
     return " | ".join(" ".join(cell.split()) for cell in cells)
+
+
+def clears_table_floor(*, rows: int, columns: int, limits: ParserSettings) -> bool:
+    """Whether a table is big enough to be worth structuring (R-89).
+
+    Counted from the source grid, never from the rendered lines: a cell containing a literal
+    pipe would make a column count read back off `" | "` wrong, and re-deriving a fact from
+    the serialisation of that same fact is how the two stop agreeing.
+
+    For `pdf.py` these two floors guard a **heuristic** detector against false positives.
+    `docx.py` and `markdown.py` declare their tables, so there is no false positive to guard —
+    what the same numbers happen to catch there is the **layout table**, the Word idiom of
+    putting paragraphs of prose in a one-row grid to position them. Promoted, that block would
+    be marked `table`, and the chunker's row-atomicity rule would then forbid it the sentence
+    and word separators (`chunker.py`), leaving a page of prose on one enormous line that can
+    only be hard-sliced. Below the floor a table is rendered into the surrounding prose exactly
+    as it was before T-223, so the cost of the floor is *structure*, never *content*.
+
+    `table_max_per_page` is deliberately not consulted here: it bounds the per-page cost of a
+    pathological layout for a detector that has to look, and these two formats have neither
+    pages nor looking.
+    """
+    return rows >= limits.table_min_rows and columns >= limits.table_min_columns
 
 
 def split_text(text: str, max_chars: int) -> list[str]:
@@ -331,6 +399,60 @@ def split_text(text: str, max_chars: int) -> list[str]:
     if current:
         parts.append("\n".join(current))
     return [part for part in parts if part.strip()]
+
+
+def emit_blocks(
+    blocks: list[ParsedBlock],
+    text: str,
+    *,
+    locator: Locator,
+    budget: CharBudget,
+    limits: ParserSettings,
+    extraction: Extraction,
+    headed: bool = False,
+) -> None:
+    """Normalise, charge and append ``text`` as one or more blocks on ``locator``.
+
+    One place for every provenance and every format, so a change to the block ceiling or to the
+    budget cannot reach extracted text and miss recognised or tabular text. Promoted out of
+    `pdf.py` by T-223 on :func:`render_row`'s precedent: `docx.py` and `markdown.py` would
+    otherwise have been a second and third copy of an invariant that is only worth anything if
+    it is identical everywhere.
+
+    ``extraction`` is deliberately **not defaulted**, although `ParsedBlock.extraction` is. That
+    default serves a caller who cannot produce anything but text; this one has three producers,
+    and a default here would let a new call site label a table as prose silently — the one error
+    the marker exists to make impossible.
+
+    ``headed`` says the first line labels every line below it. The header is then re-read **from
+    the normalised content** rather than carried in from the caller, which is what guarantees the
+    chunker's invariant: line 0 of the block *is* `block.header`, byte for byte, so the line it
+    repeats on chunks 2..n is one the user's document actually contains. :func:`split_text` may
+    cut a very large table before the chunker ever sees it, so each part past the first opens
+    with the header too — otherwise the split R-88(6) is written about would lose the column
+    names one level above the one it names.
+
+    **Recorded, because it is the one place this function breaks its own ceiling:** a re-prefixed
+    part is `len(header) + 1` characters longer than `limits.max_block_chars` allows. Charging
+    the split text instead would make the budget depend on where the splitter happened to cut,
+    and shrinking the parts by the header length would make the ceiling depend on a table's
+    widest row. Both are worse than a block that overshoots by one line it already contains.
+    """
+    content = normalize(text)
+    if is_blank(content):
+        return
+    budget.add(content)
+    header = content.split("\n", 1)[0] if headed else ""
+    for index, part in enumerate(split_text(content, limits.max_block_chars)):
+        blocks.append(
+            ParsedBlock(
+                text=f"{header}\n{part}" if header and index else part,
+                locator=locator,
+                order=len(blocks),
+                extraction=extraction,
+                header=header,
+            )
+        )
 
 
 class Parser(Protocol):

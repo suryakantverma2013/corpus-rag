@@ -205,7 +205,37 @@ If you must run a non-localhost origin over plain HTTP for a local trial, set
 `CHECKPOINTER_BACKEND=postgres` is set explicitly anyway — so you are consciously stepping around
 two guards, not silently weakening the rest. Do not do it in production.
 
-## 8. Operations
+## 8. Encryption at rest
+
+**This deployment does not encrypt data at rest, and it cannot.** PostgreSQL has no in-core
+at-rest encryption, and MinIO's server-side encryption requires an external key service (KES).
+Every real implementation of this control lives below or beside the application — which is why it
+is documented here rather than configured somewhere in `backend/`.
+
+Two mechanisms discharge it. Either is sufficient; pick by where you are running.
+
+- **Encrypt the volumes.** The two that matter are the Postgres data directory and the MinIO data
+  directory — between them they hold every message, every citation, every uploaded document and
+  its extracted text. Use LUKS/dm-crypt on a self-managed host, or the cloud provider's disk
+  encryption (EBS, Persistent Disk, Azure Disk), which is usually a checkbox and often the
+  default. This covers both stores at once and needs no application change.
+- **Use managed services that encrypt by default.** A managed PostgreSQL (RDS, Cloud SQL, Azure
+  Database) and an object store with default encryption (S3 SSE-S3 or SSE-KMS) both do this
+  without a key service of your own. Point `DATABASE_URL` and the `STORAGE_*` settings at them;
+  the application is indifferent to which it is talking to.
+
+**What is already covered, so you can scope the work.** Access control at rest *is* provided —
+neither store is reachable without the credentials the deployment supplies, and object keys are
+namespaced per tenant and document version. Password storage left the application entirely when
+identity moved to Keycloak: there is no password column here to encrypt or to hash. And no
+document text leaves the deployment at all, so there is no third-party copy to protect.
+
+**Backups are the part people miss.** An encrypted volume protects the running disk and nothing
+else. `pg_dump` output, object-store replicas and snapshot exports are all plaintext unless you
+encrypt them where they land — and they are the copies most likely to be somewhere nobody is
+watching.
+
+## 9. Operations
 
 **Logs.** `docker compose … logs -f api worker`. Structured JSON, with `conversation_id` and
 `turn_index` bound to every event in a turn, plus an `X-Request-ID` echoed on every response.
@@ -305,7 +335,7 @@ What to expect while it runs:
 Prefer off-peak. Each rebuild ends with a version swap, and a swap landing in the middle of a chat
 turn can cost that one turn its citations — the same window a document replacement already opens.
 
-## 9. Optical character recognition (optional)
+## 10. Optical character recognition (optional)
 
 A scanned PDF carries no character data, so without recognition it fails ingestion outright with
 `NO_EXTRACTABLE_TEXT` — an honest answer, and a poor one for a corpus of scans. FR-ING-07 makes
@@ -412,10 +442,23 @@ Three separate things, and they cost different amounts:
    with their original bytes, so `POST /api/v1/documents/{id}/retry` — the Retry affordance in the
    knowledge-base list — re-runs ingestion with recognition now available. They do not need
    re-uploading.
-3. **Rev 0.55 moved `PREPROCESSING_VERSION` to `"2"`**, and that *is* a fingerprint input. Every
-   document ingested before this upgrade is stale and keeps answering from its old vectors until
-   it is rebuilt. That is the re-embed in §8: `tools.reembed plan` prices it, `run` drains it. It
-   is a spend event, so do it deliberately and off-peak rather than as housekeeping.
+3. **Rev 0.55 moved `PREPROCESSING_VERSION` to `"2"` and Rev 0.56 moved it to `"3"`**, and that
+   *is* a fingerprint input. Every document ingested before this upgrade is stale and keeps
+   answering from its old vectors until it is rebuilt. That is the re-embed in §9:
+   `tools.reembed plan` prices it, `run` drains it. It is a spend event, so do it deliberately
+   and off-peak rather than as housekeeping.
+4. **Rev 0.56 also changed how DOCX and Markdown tables are extracted.** A table in either format
+   is now its own block carrying its header row, so a long table no longer loses its column names
+   partway down. Two consequences worth knowing before the re-embed: a table-bearing DOCX or MD
+   document will come back with a different chunk count, and a Markdown table cell containing a
+   run of spaces now collapses it the way every other format always has. A document with no table
+   is unchanged byte for byte — it is re-embedded anyway, because the version is per-pipeline.
+5. **Rev 0.56 also fixes a defect in *PDF* tables, so this upgrade is a correction and not only
+   a feature.** On some layouts a ruled table was indexed with its column-name row printed
+   **twice** inside the block — PyMuPDF reports a header drawn inside the grid as sitting
+   *outside* it, and that flag was being used to decide whether the header row also came back
+   from the row extraction. If your corpus has PDFs with ruled tables, the re-embed in item 3 is
+   what corrects them; there is nothing extra to run.
 
 ### What it does not do
 
@@ -425,7 +468,7 @@ Three separate things, and they cost different amounts:
 - **A poor baked-in text layer is not improved.** Recognition never competes with extracted
   characters: if a page yields any text at all, that text wins.
 
-## 10. Verifying a deployment
+## 11. Verifying a deployment
 
 Beyond the three probes, the end-to-end suite drives a real browser through the whole journey —
 sign in, upload, ingest, ask, cite, rate, regenerate, rename, delete — against a running stack:
@@ -439,7 +482,7 @@ It takes about 20 seconds, makes real model calls, and is the only check that ex
 the SSE streaming path, the multipart upload path and the session cookie together. See
 [`frontend/e2e/README.md`](../frontend/e2e/README.md).
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -456,13 +499,13 @@ the SSE streaming path, the multipart upload path and the session cookie togethe
 | Answers arrive all at once instead of streaming; document list stops updating | proxy buffering re-enabled | `deployment/nginx/streaming.inc` must stay included by the `/api/` location |
 | `413` on a large upload | `client_max_body_size` below the 50 MB limit | it is 64m in the shipped config |
 | Everything times out on first `--wait` | Docker memory | give Docker ~6 GB (§1) |
-| A scanned PDF fails with `NO_EXTRACTABLE_TEXT` | recognition off, or the sidecar unreachable | §9 — **both** `--profile ocr` and `PARSER_OCR_ENABLED=true`; then Retry the document |
+| A scanned PDF fails with `NO_EXTRACTABLE_TEXT` | recognition off, or the sidecar unreachable | §10 — **both** `--profile ocr` and `PARSER_OCR_ENABLED=true`; then Retry the document |
 | A figure inside an otherwise *textual* PDF is not searchable | that page's recognition was skipped — usually an unreachable sidecar | the document still ingests (recognition fails open); `/health/ready/worker` answers 503 with `ocr: error` and the worker logs `pdf.recognition_degraded` |
-| The app refuses to boot naming `PARSER_OCR_BUDGET_SECONDS` | recognition budget + per-page timeout ≥ the job timeout | §9 — raise `WORKER_JOB_TIMEOUT_SECONDS` first |
-| A new language pack is ignored | the `ocr-tessdata` volume seeds only while empty | §9 — `docker volume rm` it; the sidecar's `/health` reports the digest it actually loaded |
-| Everything answers `502` after changing `PARSER_OCR_ENABLED` (or any `x-corpus-env` value) | `api` was recreated with a new IP; nginx resolved its upstream once at load | `restart web` — §9 |
+| The app refuses to boot naming `PARSER_OCR_BUDGET_SECONDS` | recognition budget + per-page timeout ≥ the job timeout | §10 — raise `WORKER_JOB_TIMEOUT_SECONDS` first |
+| A new language pack is ignored | the `ocr-tessdata` volume seeds only while empty | §10 — `docker volume rm` it; the sidecar's `/health` reports the digest it actually loaded |
+| Everything answers `502` after changing `PARSER_OCR_ENABLED` (or any `x-corpus-env` value) | `api` was recreated with a new IP; nginx resolved its upstream once at load | `restart web` — §10 |
 
-## 12. Design decisions and rejected alternatives
+## 13. Design decisions and rejected alternatives
 
 | Decision | Rejected | Why |
 |---|---|---|
@@ -479,7 +522,7 @@ the SSE streaming path, the multipart upload path and the session cookie togethe
 | The bootstrap creates the bucket | rely on `STORAGE_AUTO_CREATE_BUCKET` | Auto-create fires on first *use*, and `HeadBucket` is not a use — so a fresh stack answered `503` forever and never became healthy. Found by running it. |
 | Compose for the reference deployment | Kubernetes manifests / Helm chart | Compose is what a reader can run in one command to evaluate the system. Orchestrator manifests are a deployment-target choice, and are deliberately left out (§12). |
 
-## 13. What this deployment is and is not
+## 14. What this deployment is and is not
 
 Honest scope, so nobody mistakes the reference stack for a production topology.
 
@@ -494,7 +537,7 @@ bootstrap, a realm with its placeholders replaced, and an end-to-end journey pas
    certificate automation here.
 3. **Orchestrator-ready.** No Kubernetes manifests, no Helm chart. The images are ordinary and
    would port straightforwardly; nobody has done it.
-4. **Backed up.** `pgdata` and `minio-data` are named volumes with no backup job. §8 says what to
+4. **Backed up.** `pgdata` and `minio-data` are named volumes with no backup job. §9 says what to
    copy; nothing copies it for you.
 5. **Secret-managed.** Configuration is environment variables from a file on disk. Rotation is a
    redeploy, and there is no integration with a managed secret store.
@@ -504,7 +547,7 @@ bootstrap, a realm with its placeholders replaced, and an end-to-end journey pas
 8. **Continuously integrated.** No pipeline builds these images or runs the suites on a change.
 9. **Cost-metered.** Every chat turn makes model calls and every answered turn is judged; nothing
    here caps spend beyond the application's own rate limits.
-10. **Tuned for recognition throughput.** OCR (§9) is optional, CPU-only, single-threaded by
+10. **Tuned for recognition throughput.** OCR (§10) is optional, CPU-only, single-threaded by
     design and ships one language pack. The single thread is a determinism control and not a
     performance oversight, so "make it faster" means more worker processes, never more threads.
 

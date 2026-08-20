@@ -369,14 +369,21 @@ original, write rows, enqueue.
 
 The worker does the rest, scanning **before** parsing so untrusted bytes meet the scanner first.
 
-Parsing does two things beyond extracting characters, both PDF-only and both decided **per page**.
-A page with no text layer — or a large enough image inside a textual page — is rasterised and sent
-to the OCR sidecar, which runs outside the worker process because it is the only ingestion step
-that *renders* attacker-supplied content. A ruled table is extracted with its rows and columns
-intact and its cells excluded from the page's ordinary text, so one passage is never indexed
-twice. Recognition never competes with a text layer: extracted characters always win.
+Parsing does two things beyond extracting characters. **Recognition is PDF-only and decided per
+page:** a page with no text layer — or a large enough image inside a textual page — is rasterised
+and sent to the OCR sidecar, which runs outside the worker process because it is the only
+ingestion step that *renders* attacker-supplied content. Recognition never competes with a text
+layer: extracted characters always win.
 
-Both are why recognition has to be **byte-reproducible**, which is a correctness property rather
+**Tabular structure is not PDF-only.** A table becomes its own block, marked `table`, carrying its
+header row so that a table split across chunks never loses its column names. How the table is
+*found* differs by format and nothing downstream depends on which: in a PDF it is **detected** by
+layout analysis over the text layer — heuristic, so it is floored against false positives, and a
+detected table's cells are excluded from the page's ordinary text so one passage is never indexed
+twice — while in DOCX and Markdown it is **declared**, the format stating the grid and its header
+outright, so there is nothing to guess and nothing to exclude.
+
+Recognition has to be **byte-reproducible**, which is a correctness property rather
 than a nicety. `embedding_fingerprint` reuse is set membership, so a recogniser whose output
 varied between two passes over one page would leave that set permanently empty — and step 2 below
 would silently stop reusing anything, at full embedding cost, with nothing failing.

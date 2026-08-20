@@ -302,11 +302,14 @@ def _usable_header(header: str, *, target_chars: int) -> str:
 def _repeated_header(block: ParsedBlock, *, target_chars: int) -> str:
     """The line to repeat on this block's chunks 2..n, or ``""``.
 
-    Two producers, one rule (R-35(11), extended by R-88(6)). A **table** block declares its
-    header — `pdf.py` guarantees it is line 0 verbatim — because a `page` locator cannot express
-    the row range `_row_header` counts against, and because a table whose header cells are empty
-    must not have its first data row promoted into one. A **CSV** block is still inferred, since
-    its parser omits the header when the first record is data and only the line count can tell.
+    Two kinds of producer, one rule (R-35(11), extended by R-88(6) and R-89). A **table** block
+    declares its header, and `base.emit_blocks` is what guarantees it is line 0 verbatim for all
+    three of its producers — `pdf.py` for a detected table, `docx.py` and `markdown.py` for a
+    declared one. It has to be declared because neither a `page` nor a `section` locator can
+    express the row range `_row_header` counts against, and because a table whose header cells
+    are empty must not have its first data row promoted into one. A **CSV** block is still
+    inferred, since its parser omits the header when the first record is data and only the line
+    count can tell.
     """
     if block.header:
         return _usable_header(block.header, target_chars=target_chars)
@@ -331,10 +334,11 @@ class Chunk:
     char_start: int  # span into the parent block's text (block-relative)
     char_end: int
     #: R-88(7) provenance, inherited from the parent block. Deliberately **not** defaulted,
-    #: unlike `ParsedBlock.extraction`: that default serves three formats which can only ever
-    #: produce extracted text, whereas this has exactly one producer, and a default here would
-    #: let a future call site silently label recognised text as `text` — the one error the
-    #: marker exists to make impossible.
+    #: unlike `ParsedBlock.extraction`: that default serves `csv.py`, the one format that can
+    #: only ever produce extracted text. Since T-223 three parsers set the marker, which makes
+    #: the argument *stronger* rather than weaker — the more producers there are, the more
+    #: likely a default here is that a future call site silently labels recognised or tabular
+    #: text as `text`, the one error the marker exists to make impossible.
     extraction: Extraction
 
 

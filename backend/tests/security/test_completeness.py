@@ -240,7 +240,12 @@ def test_the_manifest_still_matches_the_specification() -> None:
     catches the manifest drifting away from its source.
     """
     text = _SPEC.read_text(encoding="utf-8")
-    found = re.findall(r"^- \*\*(NFR-SEC-\d+)", text, flags=re.MULTILINE)
+    # `(?:~~)?` is load-bearing: a requirement whose `(D)` has been resolved keeps the old
+    # heading struck through beside the new one — `~~**NFR-SEC-03 (D)**~~ **NFR-SEC-03**` — which
+    # is the convention NFR-OBS-04 established in Rev 0.46. Without it, resolving a `(D)` makes
+    # the requirement vanish from this guard's view and the manifest looks like it drifted.
+    # `tests/acceptance`'s twin already tolerated the form; this one had never been asked to.
+    found = re.findall(r"^- (?:~~)?\*\*(NFR-SEC-\d+)", text, flags=re.MULTILINE)
     assert found, "§5.2 could not be located — the requirement bullets changed shape"
     assert set(found) == set(NFR_SEC_ROWS), (
         f"§5.2 declares {sorted(set(found))} but the manifest carries "

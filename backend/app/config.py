@@ -244,14 +244,21 @@ class ParserSettings(BaseSettings):
     # page with no ruling lines. So R-79(5)'s test governs instead: FR-ING-08 says *shall*, and
     # a switch that stopped it would turn a requirement off rather than remove an enrichment.
     #
-    # What follows is the false-positive floor. Detection is heuristic, so each of these leaves
-    # a rejected region exactly as it was — its characters stay in the page's ordinary text —
-    # which is what makes a bad detection degrade rather than mangle a page. Provisional (§8.4)
-    # and to be settled by measurement on a real corpus.
+    # What follows is the false-positive floor **for the PDF detector**. Detection is heuristic,
+    # so each of these leaves a rejected region exactly as it was — its characters stay in the
+    # page's ordinary text — which is what makes a bad detection degrade rather than mangle a
+    # page. Provisional (§8.4) and to be settled by measurement on a real corpus.
+    #
+    # The first two are consulted by the *declared* path too (`docx.py`, `markdown.py`, R-89),
+    # where there is no false positive to floor against — a declared table is not guessed. What
+    # they catch there is the **layout table**: prose positioned with a one-row grid, which
+    # promoted would be marked `table` and so denied the sentence and word separators by the
+    # chunker's row-atomicity rule, leaving a page of prose that can only be hard-sliced.
     table_min_rows: int = Field(default=2)  # TBD(§8.4)
     table_min_columns: int = Field(default=2)  # TBD(§8.4)
     # Bounds the per-page cost of a pathological layout. Surplus tables are *not* hidden: they
-    # are simply not detected, so their text is still extracted.
+    # are simply not detected, so their text is still extracted. Detector-only — the declared
+    # formats have neither pages nor a search to bound.
     table_max_per_page: int = Field(default=10)  # TBD(§8.4)
 
     @model_validator(mode="after")

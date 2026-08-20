@@ -1,5 +1,12 @@
 """Tabular structure for the PDF parser — FR-ING-08 (T-219, R-88(5)/(6) §8.78).
 
+**PDF only, and that is now a statement about *this file* rather than about the requirement.**
+FR-ING-08 covers any format that carries a table; `docx.py` and `markdown.py` satisfy it without
+any of the machinery here, because their tables are **declared** — the format states the grid, so
+there is nothing to detect, no region to exclude and no threshold to floor against (R-89, T-223).
+Everything below is the detector, and the two mechanisms meet only at the shared output contract:
+one block marked `table`, header on line 0, serialised by :func:`~…base.render_row`.
+
 **A separate mechanism from FR-ING-07, with a separate trigger.** OCR recovers characters that
 are absent; this recovers *structure* that was never encoded, from characters that are already
 present. A born-digital table therefore needs no recognition at all — running OCR over one would
@@ -11,8 +18,9 @@ order they land and what degrades is the requirement, and it stays in `pdf.py`. 
 the arithmetic — detection, serialisation, and the geometry that keeps a table's cells out of the
 page's ordinary text.
 
-**The serialised form is the one three parsers already share:** one row per line, cells joined by
-``" | "``. `csv.py`, `docx.py` and `markdown.py` each render a row that way, and R-88(6) presumes
+**The serialised form is the one every other parser shares:** one row per line, cells joined by
+``" | "`` through `render_row`. That claim was *false* when T-219 wrote it — `markdown.py` did a
+bare join and kept inner whitespace no other format kept — and T-223 made it true. R-88(6) presumes
 it when it inherits R-35's rule that a split table repeats its header — a form with no header line
 would have nothing to repeat. The header is *declared* on the block rather than inferred from it
 (:attr:`~app.ingestion.parsers.base.ParsedBlock.header`), because a table whose header cells are
@@ -31,7 +39,10 @@ false-positive corpus to govern it, not a flag.
 **There is no `PARSER_TABLE_ENABLED`.** R-88(12) gives recognition an off switch because it adds a
 container, a language pack and a large latency term; none of that applies here — this is PyMuPDF,
 already a dependency — so R-79(5)'s test governs instead: FR-ING-08 says *shall*, and a switch
-that stopped it would turn a requirement off. The thresholds below are the tuning levers.
+that stopped it would turn a requirement off. The thresholds below are the tuning levers, and
+they are **detector** policy: `table_min_rows` and `table_min_columns` are also consulted by the
+declared path (see `base.clears_table_floor`, where they catch the layout table rather than a
+false positive), while `table_max_per_page` bounds a search that only happens here.
 
 **Determinism is a correctness property** (R-88(1)): the emitted text feeds `embedding_fingerprint`
 through `chunk_text`, so tables are ordered by **geometry, never by content-stream order**, and
@@ -80,20 +91,28 @@ class DetectedTable:
 def _rendered_rows(table: pymupdf.table.Table) -> tuple[str, list[str]]:
     """``(header_line, body_lines)`` for ``table``, blank rows dropped.
 
-    Two facts about `header.external` are load-bearing and neither is obvious. It reports whether
-    the header sits *outside* the table's bounding box — which decides the exclusion region — and
-    it equally decides whether ``extract()[0]`` **is** that header: when it is not external, row 0
-    is the header row, and emitting it as a body line prints the column names twice.
+    `header.external` reports whether the header sits *outside* the table's bounding box, which
+    is what decides the **exclusion region** in :func:`detect_tables`. T-219 also used it to
+    decide whether ``extract()[0]`` **is** the header row, and that was wrong — the two are
+    independent, and conflating them printed the column names twice inside one block. Measured
+    on a header drawn *inside* the grid: PyMuPDF derives the header's box from its text, which
+    sits a few points above the table's top ruling, so it reports `external=True` and returns
+    the header row from ``extract()`` anyway. The flag answers a question about geometry; this
+    one is answered directly, by asking whether row 0 renders to the header line.
+
+    Found by T-223, whose own split test asserted only `startswith` — true whether or not the
+    header is there twice — and which now counts. *An assertion that a block opens with its
+    header cannot see a block that opens with it twice.*
     """
     header = getattr(table, "header", None)
     names = [name or "" for name in (header.names if header is not None else [])]
     header_line = render_row(names) if any(name.strip() for name in names) else ""
 
-    rows = table.extract()
-    if header_line and header is not None and not header.external and rows:
-        rows = rows[1:]
+    rendered = [render_row(row) for row in table.extract()]
+    if header_line and rendered and rendered[0] == header_line:
+        rendered = rendered[1:]
 
-    body = [line for line in (render_row(row) for row in rows) if line.strip(" |")]
+    body = [line for line in rendered if line.strip(" |")]
     return header_line, body
 
 

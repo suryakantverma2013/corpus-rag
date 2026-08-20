@@ -533,11 +533,13 @@ SPEC_9_ROWS: dict[str, tuple[Evidence, ...]] = {
             "::test_the_page_ceiling_stops_recognition_without_failing_the_document"
         ),
     ),
-    # FR-ING-08. The absent flag is the claim worth pinning and it cannot be pinned as a
-    # Default - so the three floors stand for the policy, and the third PyTest carries the
-    # recorded limitation (an unruled table is not detected), which is the half of this row
-    # a reader is most likely to discover by surprise.
-    "Tabular structure (Rev 0.55, FR-ING-08, R-88(5)/(6))": (
+    # FR-ING-08, now over two mechanisms (R-89). The absent flag is the claim worth pinning and
+    # it cannot be pinned as a Default - so the three floors stand for the policy, and the third
+    # PyTest carries the recorded limitation (an unruled table is not detected), which is the
+    # half of this row a reader is most likely to discover by surprise. The last two pointers
+    # are the *declared* half: a DOCX and a Markdown table state their own header, so those are
+    # the assertions that fail if either producer stops declaring one.
+    "Tabular structure (Rev 0.56, FR-ING-08, R-88(5)/(6), R-89)": (
         Default("app.config:ParserSettings", "table_min_rows", 2),
         Default("app.config:ParserSettings", "table_min_columns", 2),
         Default("app.config:ParserSettings", "table_max_per_page", 10),
@@ -549,6 +551,8 @@ SPEC_9_ROWS: dict[str, tuple[Evidence, ...]] = {
         PyTest(
             "tests/test_tables.py::test_an_unruled_table_is_not_detected_and_is_the_recorded_limitation"
         ),
+        PyTest("tests/test_tables.py::test_a_docx_table_declares_its_first_row_as_its_header"),
+        PyTest("tests/test_tables.py::test_a_markdown_table_declares_its_thead_row_as_its_header"),
     ),
     # R-88(7), and the row T-220 asked for. Two of these three are second oracles (R-85(1)):
     # `Constant` and `Vocabulary` read the shipped value back, so they fail on a changed
@@ -556,8 +560,12 @@ SPEC_9_ROWS: dict[str, tuple[Evidence, ...]] = {
     # almost anywhere else - `PREPROCESSING_VERSION` is an `embedding_fingerprint` input, so
     # moving it re-embeds the corpus and leaving it stationary when the text changes is
     # worse: chunks keep vectors built from text that no longer exists.
-    "Preprocessing version (Rev 0.55, R-88(7))": (
-        Constant("app.ingestion.parsers.base:PREPROCESSING_VERSION", "2"),
+    # The `Vocabulary` pointer is deliberately unchanged by R-89: T-223 added two producers of
+    # `table`, and none of the three members moved. That is exactly R-88(7)'s distinction - the
+    # marker is not a fingerprint input, so gaining a producer re-embeds nothing, while the text
+    # those producers emit *did* change, which is why the `Constant` beside it had to move.
+    "Preprocessing version (Rev 0.56, R-88(7), R-89)": (
+        Constant("app.ingestion.parsers.base:PREPROCESSING_VERSION", "3"),
         Vocabulary("app.ingestion.parsers.base:Extraction", ("text", "ocr", "table")),
         PyTest(
             "tests/test_recognition.py::test_re_ingesting_a_recognised_document_reuses_every_vector"
@@ -688,7 +696,15 @@ NFR_DISPOSITIONS: dict[str, NfrRow] = {
     # 5.2 Security
     "NFR-SEC-01": _met("tests/security route matrix, gate asserted by two independent oracles"),
     "NFR-SEC-02": _met("tests/security foreign-owner cells are 404; scenarios row 8"),
-    "NFR-SEC-03": _open("(D) narrowed to encryption at rest; hashing, TLS and egress are settled"),
+    # R-90(1): accepted, not met. Access control at rest is provided and hashing left the
+    # application at R-28, but TLS and the *recommended* encryption at rest are both operator
+    # responsibilities the deployment documents rather than provides - no application code can
+    # honour either. Claiming `met` here would be the overclaim this register exists to prevent.
+    "NFR-SEC-03": _accepted(
+        "hashing by construction (R-28, no password column); TLS and at-rest encryption are "
+        "operator responsibilities documented in docs/DEPLOYMENT.md §7-§8 (R-90(1)); egress "
+        "prohibited by R-86(3)"
+    ),
     "NFR-SEC-04": _met(
         "realm policy length(12)+notUsername+history(3), no rotation; lockout 30/900s"
     ),
@@ -781,27 +797,16 @@ class ResidualGap:
 
 
 #: The T-606 findings. Order is by how much a reader should care, not by section.
-RESIDUAL_GAPS: tuple[ResidualGap, ...] = (
-    ResidualGap(
-        "NFR-SEC-03",
-        "narrowed to one clause. Password hashing left the application at R-28 (there is no "
-        "password_hash column) and TLS is an operator responsibility the deployment documents "
-        "rather than provides (docs/DEPLOYMENT.md section 7 - plain HTTP on :8080 behind an "
-        "edge). Data egress was closed by R-86(3): prompt, completion and retrieved text shall "
-        "not leave the deployment. What remains is **encryption at rest**, configured nowhere "
-        "and a deployment decision rather than application code",
-        "spec (D) - deployment decision",
-    ),
-    ResidualGap(
-        "audit_log retention",
-        "NFR-OBS-04 settled telemetry retention at 90 days and left the audit trail's own "
-        "period to NFR-SEC-08, which does not state one",
-        "§8.4 — compliance decision",
-    ),
-    ResidualGap(
-        "sidebar history pagination",
-        "§7 defers it with a (D) once chats exceed the visible list; the sidebar scrolls and "
-        "the conversations route pages, so this is a product call rather than a missing route",
-        "§8.4",
-    ),
-)
+#: **Empty, and it is meant to stay hard to empty.** T-606 filed eight; T-613 and T-614 built two
+#: of the missing instruments; R-90 took the last three as *decisions* rather than work, because
+#: that is what they had always been — NFR-SEC-03's final clause is an operator responsibility the
+#: deployment documents (R-90(1), and the row above is `accepted`, not `met`, for exactly that
+#: reason), the audit trail is kept indefinitely with no pruning mechanism (R-90(2)), and the
+#: sidebar list is unbounded by decision (R-90(3)).
+#:
+#: **Adding a row back is the honest move whenever something is filed but not fixed.** The rule
+#: this tuple exists to enforce is that a gap has an owner and a name; an empty list is a claim
+#: that nothing is outstanding, so it must never be emptied by re-describing a gap as a feature.
+#: R-90(3) is the cautionary case: the entry it replaced closed its own gap by citing behaviour
+#: the code does not have ("the conversations route pages" — it returns a bare, unpaged array).
+RESIDUAL_GAPS: tuple[ResidualGap, ...] = ()

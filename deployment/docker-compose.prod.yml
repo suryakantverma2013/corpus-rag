@@ -174,7 +174,7 @@ services:
   # Profile-gated, because R-88(12) ships the feature off: recognition costs a container, a
   # language pack on disk and a large per-page latency term, and an operator with no scanned
   # documents should pay none of it. The profile and PARSER_OCR_ENABLED are two switches
-  # that must agree — docs/DEPLOYMENT.md §9 says what each half-configured state looks like.
+  # that must agree — docs/DEPLOYMENT.md §10 says what each half-configured state looks like.
   #
   # Built rather than pulled: the image pins its base by digest and Tesseract by Debian
   # version, because R-88(1) makes byte-reproducible recognition a *correctness* property.
