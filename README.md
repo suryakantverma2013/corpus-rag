@@ -85,19 +85,25 @@ identity. The API and the worker are the same image with different commands.
 | [Security](docs/SECURITY.md) | threat model, auth and authorization, content controls, prompt injection, how it is verified, limitations |
 | [Evaluation](docs/EVALUATION.md) | the three instruments, gate vs judge, measured judge behaviour, reading the numbers, limitations |
 | [Deployment](docs/DEPLOYMENT.md) | the production stack, Keycloak URLs, TLS, operations, troubleshooting, and what this deployment is *not* |
+| [Testing](docs/TESTING.md) | how to test by hand, what is already automated, scripted cases, and what to do with a finding |
+| [Known limitations](docs/LIMITATIONS.md) | the behaviour that looks like a defect and is a decision — **read before testing** |
 
 ## Tests
 
 | Suite | Count | Run |
 |---|---|---|
-| Backend | **1,790** | `cd backend && uv run pytest` |
-| — of which route-level security | 282 | `uv run pytest tests/security` |
-| Frontend unit | **1,141** | `cd frontend && npm test` |
+| Backend | **2,046** | `cd backend && OCR_LIVE_TEST=1 uv run pytest` |
+| — of which route-level security | 297 | `uv run pytest tests/security` |
+| — of which production scenarios | 23 | `uv run pytest tests/scenarios` |
+| Frontend unit | **1,142** | `cd frontend && npm test` |
 | End-to-end (real browser, real stack) | 1 journey, ~20 s | `npm run e2e` |
 | Visual fidelity (headed, both themes) | — | `npm run fidelity` |
+| Accessibility (axe, 10 surfaces × 2 themes) | — | `npm run a11y` |
 
-There is no CI in this repository; the suites are run locally. The end-to-end and fidelity suites
-need a running stack and will fail — rather than skip — without one.
+There is no CI in this repository; the suites are run locally. The end-to-end, fidelity and
+accessibility suites need a running stack and will fail — rather than skip — without one. **A backend
+run is only meaningful at 0 skipped**: without `OCR_LIVE_TEST=1` and the OCR sidecar, eight live
+tests skip, and a skipped test is not a passing one.
 
 ## Stack
 
