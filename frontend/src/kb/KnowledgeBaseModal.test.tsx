@@ -300,7 +300,7 @@ describe('FR-KBM-05 — the drop zone and R-71(3)’s scope control', () => {
   it('renders §9’s prompt and caption verbatim', () => {
     setup();
     expect(screen.getByText('Drag & drop files here, or click to browse')).not.toBeNull();
-    expect(screen.getByText('PDF · DOCX · CSV · MD — max 50 MB')).not.toBeNull();
+    expect(screen.getByText('PDF · DOCX · CSV · MD — max 300 MB')).not.toBeNull();
   });
 
   it('uploads to the global scope by default', () => {

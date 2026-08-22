@@ -291,7 +291,7 @@ SPEC_9_ROWS: dict[str, tuple[Evidence, ...]] = {
         ),
     ),
     "Upload formats / max size / quota": (
-        Default("app.config:UploadSettings", "max_file_bytes", 50 * 1024 * 1024),
+        Default("app.config:UploadSettings", "max_file_bytes", 300 * 1024 * 1024),
         Default("app.config:UploadSettings", "user_quota_bytes", 10 * 1024 * 1024 * 1024),
         PyTest("tests/test_upload.py::test_all_four_formats_accepted"),
         PyTest("tests/test_upload.py::test_oversize_rejected_before_any_storage_write"),
@@ -309,7 +309,7 @@ SPEC_9_ROWS: dict[str, tuple[Evidence, ...]] = {
         PyTest("tests/test_cloud_import.py::test_the_link_hash_is_keycloaks_formula"),
     ),
     "Drop-zone caption": (
-        Source("frontend/src/kb/DropZone.tsx", "PDF · DOCX · CSV · MD — max 50 MB"),
+        Source("frontend/src/kb/DropZone.tsx", "PDF · DOCX · CSV · MD — max 300 MB"),
         Fidelity("§9 knowledge-base copy"),
     ),
     "Upload-scope control *(Rev 0.38, R-71(3))*": (
@@ -356,7 +356,13 @@ SPEC_9_ROWS: dict[str, tuple[Evidence, ...]] = {
         Fidelity("§9 chat copy"),
     ),
     "Composer footer": (
-        Source("frontend/src/composer/Composer.tsx", "Responses grounded in"),
+        # The needle carries the Shift+Enter clause deliberately (R-91(5)): a prefix match on
+        # "Responses grounded in" would survive the literal changing, and this row exists to
+        # notice exactly that.
+        Source(
+            "frontend/src/composer/Composer.tsx",
+            "Enter to send, Shift+Enter for a new line",
+        ),
         Fidelity("§9 chat copy"),
     ),
     "Mention-menu header": (

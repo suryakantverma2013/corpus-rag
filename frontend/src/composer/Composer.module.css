@@ -76,13 +76,39 @@
   outline: none;
   background: transparent;
   color: var(--text);
+  /* R-91(6) — LOAD-BEARING, and invisible in review. A <textarea> does not inherit
+     `font-family`: the UA stylesheet gives it `monospace`, so dropping this line renders the
+     composer in the wrong typeface at exactly the right size, and every fidelity check that
+     measures geometry rather than font still passes. */
   font-family: inherit;
   font-size: 13.5px;
   padding: 6px 4px;
-  /* `min-width: 0` is not in the prototype and is required here: a flex <input> carries an
+  /* `min-width: 0` is not in the prototype and is required here: a flex control carries an
      intrinsic default size (~20 characters) as its automatic minimum, so a narrow viewport
      would push the Send button out of the bar rather than shrink the field. */
   min-width: 0;
+
+  /* FR-CMP-01 (R-91(1)) — the multi-line half.
+
+     `line-height` is explicit because the five-line ceiling below is derived from it: a
+     <textarea> left at `normal` resolves to a font-dependent value that cannot be computed
+     here, and a ceiling that moves with the font is not a ceiling anyone can reason about.
+
+     18px is MEASURED, not chosen. It is what `normal` resolves to for Inter at 13.5px, so the
+     resting control is exactly the prototype input's 30px (18 + 6 + 6). The obvious guess —
+     `1.2`, the usual default ratio — renders 28px and silently shortens the composer by two
+     pixels against NFR-VIS-01, which no unit test can see. */
+  line-height: 18px;
+  /* R-91(3)'s ceiling: five lines of content plus the 6px padding on each side. The component
+     reads this back with `getComputedStyle` rather than duplicating the number in TypeScript —
+     one place to change it, and the stylesheet is where the rest of the geometry lives. */
+  max-height: calc(5 * 18px + 12px);
+  overflow-y: auto;
+  /* The drag handle would let a user resize the field out of the bar it is laid out in. */
+  resize: none;
+  /* A textarea is inline-block by default, which adds a descender gap under the text and would
+     shift the bar's contents down by a few pixels against the prototype. */
+  display: block;
 }
 
 .input::placeholder {

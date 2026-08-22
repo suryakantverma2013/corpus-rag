@@ -52,7 +52,8 @@ const options = () => screen.getAllByRole('option');
 
 /** One keystroke's worth of controlled-input update. */
 const type = (value: string) => fireEvent.change(input(), { target: { value } });
-const press = (key: string) => fireEvent.keyDown(input(), { key });
+const press = (key: string, modifiers: Record<string, boolean> = {}) =>
+  fireEvent.keyDown(input(), { key, ...modifiers });
 /** Rows select on mousedown, not click — see `MentionMenu`. */
 const chooseRow = (name: RegExp) => fireEvent.mouseDown(screen.getByRole('option', { name }));
 
@@ -223,6 +224,41 @@ describe('FR-CMP-03 — send', () => {
     expect(onSend).toHaveBeenCalledWith('hello');
   });
 
+  it('does not send on Shift+Enter, so the browser inserts a newline (R-91(2))', () => {
+    const { onSend } = setup();
+    type('first line');
+    press('Enter', { shiftKey: true });
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it('sends on Ctrl+Enter and on Cmd+Enter (R-91(2))', () => {
+    const { onSend } = setup();
+    type('hello');
+    press('Enter', { ctrlKey: true });
+    expect(onSend).toHaveBeenCalledWith('hello');
+
+    type('again');
+    press('Enter', { metaKey: true });
+    expect(onSend).toHaveBeenCalledWith('again');
+  });
+
+  it('carries a multi-line draft through to onSend with its newlines intact', () => {
+    // The whole point of R-91: the transcript has rendered `white-space: pre-wrap` since T-505,
+    // so the line structure has to survive the composer to be worth anything.
+    const { onSend } = setup();
+    type('one\ntwo\nthree');
+    press('Enter');
+    expect(onSend).toHaveBeenCalledWith('one\ntwo\nthree');
+  });
+
+  it('still ignores a draft that is only newlines and spaces', () => {
+    const { onSend } = setup();
+    type('\n  \n');
+    press('Enter');
+    expect(onSend).not.toHaveBeenCalled();
+    expect(sendButton().disabled).toBe(true);
+  });
+
   it('ignores an empty or whitespace-only send, by both triggers', () => {
     const { onSend } = setup();
     type('   ');
@@ -276,7 +312,11 @@ describe('FR-STA-04 — the pre-submission block', () => {
 describe('FR-CMP-06 — the footer line', () => {
   it('renders the count and the Enter hint', () => {
     setup({ documentCount: 5 });
-    expect(screen.getByText('Responses grounded in 5 documents · Enter to send')).not.toBeNull();
+    expect(
+      screen.getByText(
+        'Responses grounded in 5 documents · Enter to send, Shift+Enter for a new line',
+      ),
+    ).not.toBeNull();
   });
 });
 

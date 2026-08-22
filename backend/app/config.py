@@ -114,7 +114,7 @@ class UploadSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="UPLOAD_", env_file=".env", extra="ignore")
 
-    max_file_bytes: int = Field(default=50 * 1024 * 1024)  # FR-ERR-01 — 50 MB, normative
+    max_file_bytes: int = Field(default=300 * 1024 * 1024)  # FR-ERR-01 — 300 MB, normative
     user_quota_bytes: int = Field(default=10 * 1024 * 1024 * 1024)  # FR-ERR-02 — 10 GB, normative
     enforce_quota: bool = Field(default=True)
     read_chunk_bytes: int = Field(default=1024 * 1024)  # TBD(§8.4)
@@ -123,7 +123,10 @@ class UploadSettings(BaseSettings):
     # Ceiling on uploads buffered in this process at once. `ObjectStorage.put`
     # materialises the body, so this bounds peak RAM at roughly
     # max_file_bytes * max_concurrent.
-    max_concurrent: int = Field(default=8)  # TBD(§8.4)
+    # R-93 lowered this from 8 when max_file_bytes went 50 MB -> 300 MB, to hold peak RAM at
+    # roughly its previous envelope (50 x 8 = 400 MB; 300 x 2 = 600 MB). Raising it multiplies
+    # the memory a burst of uploads can pin, because `put` materialises each body.
+    max_concurrent: int = Field(default=2)  # TBD(§8.4)
 
 
 class ParserSettings(BaseSettings):
@@ -148,7 +151,10 @@ class ParserSettings(BaseSettings):
 
     # Whole-document ceilings, applied to every format.
     max_pages: int = Field(default=5_000)  # TBD(§8.4)
-    max_extracted_chars: int = Field(default=20_000_000)  # TBD(§8.4)
+    # Raised with FR-ERR-01's ceiling (R-93). Left at 20M it would accept a 300 MB document at
+    # upload and then fail it in the worker with CONTENT_LIMIT_EXCEEDED -- a limit that looks
+    # raised and is not.
+    max_extracted_chars: int = Field(default=120_000_000)  # TBD(§8.4)
     max_block_chars: int = Field(default=200_000)  # TBD(§8.4)
 
     # DOCX zip-container caps (R-31(3)), checked against the central directory before
@@ -492,7 +498,7 @@ class ClamAVSettings(BaseSettings):
     only the socket and the framing.
 
     ``max_stream_bytes`` is a **safety control, not a tuning knob** (R-38(6)). R-32 makes
-    `StreamMaxLength > 50 MB` normative because clamd's 25 MB default *fails open*: it
+    `StreamMaxLength > 300 MB` normative because clamd's 25 MB default *fails open*: it
     truncates the stream and reports the truncated prefix clean. No INSTREAM command
     reports the daemon's configured limit, so a misconfigured `clamd` is undetectable at
     runtime. The client therefore refuses to stream a payload above this value rather than
@@ -511,7 +517,7 @@ class ClamAVSettings(BaseSettings):
     # INSTREAM chunk size. clamd rejects any single chunk above its own limit; 64 KiB is
     # the size the reference client uses.
     chunk_bytes: int = Field(default=64 * 1024)
-    max_stream_bytes: int = Field(default=100 * 1024 * 1024)  # must exceed FR-ERR-01's 50 MB
+    max_stream_bytes: int = Field(default=320 * 1024 * 1024)  # must exceed FR-ERR-01's 300 MB
 
     @model_validator(mode="after")
     def _coherent(self) -> ClamAVSettings:

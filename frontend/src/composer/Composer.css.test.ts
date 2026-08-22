@@ -85,6 +85,26 @@ describe('Composer — FR-CMP-01 declarations', () => {
     );
   });
 
+  it('declares the multi-line properties a <textarea> does not get for free (R-91(6))', () => {
+    // `font-family: inherit` is the one that would fail silently: the UA stylesheet gives a
+    // textarea `monospace`, so without it the composer renders in the wrong typeface at exactly
+    // the right size, and every geometry-only fidelity check still passes.
+    const input = stripBlockComments(blockAfter(css, '\n.input {'));
+    expect(input).toMatch(/font-family:\s*inherit/);
+    expect(input).toMatch(/resize:\s*none/);
+    // The five-line ceiling (R-91(3)) and the explicit line-height it is derived from. The
+    // component reads `max-height` back at runtime, so a missing declaration here is not a style
+    // nit — it removes the cap and the field grows without bound.
+    //
+    // 18px is measured rather than chosen: it is what `normal` resolves to for Inter at 13.5px,
+    // which is what makes the resting control exactly the prototype input's 30px. The plausible
+    // guess, `1.2`, measures 28px in Chromium — a two-pixel NFR-VIS-01 regression invisible to
+    // every test in this file and to jsdom.
+    expect(input).toMatch(/line-height:\s*18px/);
+    expect(input).toMatch(/max-height:\s*calc\(5 \* 18px \+ 12px\)/);
+    expect(input).toMatch(/overflow-y:\s*auto/);
+  });
+
   it('keeps the input shrinkable so Send cannot be pushed out of the bar', () => {
     // Not the prototype's — a flex <input> carries an intrinsic ~20-character minimum size.
     const input = stripBlockComments(blockAfter(css, '\n.input {'));

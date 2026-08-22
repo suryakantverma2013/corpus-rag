@@ -91,7 +91,7 @@ export function Composer({
   const [value, setValue] = useState('');
   const [mentionOpen, setMentionOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const inputId = useId();
 
   // FR-STA-04, run on the draft as it is typed — the same rule as `check_submission`, which is
@@ -108,6 +108,25 @@ export function Composer({
     setMentionOpen(false);
     setActiveIndex(-1);
   }, []);
+
+  // FR-CMP-01 / R-91(1) — grow with the content to the five-line ceiling, then scroll.
+  //
+  // A textarea has no intrinsic content height, so this is measured rather than styled: reset to
+  // `auto` first, because `scrollHeight` is bounded below by the height already set and a growing
+  // box would otherwise never shrink again when the text is deleted. The ceiling itself lives in
+  // the stylesheet as `max-height`, so the number a designer changes is next to the other
+  // geometry — this only has to stop imposing an explicit height once the cap is reached, or the
+  // inline style would win over it and the box would grow without bound.
+  useEffect(() => {
+    const element = inputRef.current;
+    if (element === null) return;
+    element.style.height = 'auto';
+    const cap = Number.parseFloat(getComputedStyle(element).maxHeight);
+    // `maxHeight` is `none` in jsdom and in any build that drops the declaration; NaN then makes
+    // every comparison false, so the guard is explicit rather than relying on that.
+    element.style.height =
+      Number.isFinite(cap) && element.scrollHeight > cap ? `${cap}px` : `${element.scrollHeight}px`;
+  }, [value]);
 
   // FR-KBM-01: opening the modal from EITHER entry point closes the menu. The `+` button below
   // does it directly; this covers FR-SBR-05's sidebar button, which this component cannot see.
@@ -137,7 +156,7 @@ export function Composer({
     [closeMenu],
   );
 
-  const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     // NFR-USE-03's two bindings plus NFR-A11Y-03's listbox contract. Escape first: it closes
     // the menu whether or not a row is active, and must not also send.
     if (event.key === 'Escape') {
@@ -157,11 +176,20 @@ export function Composer({
     }
 
     if (event.key === 'Enter') {
+      // FR-CMP-03 / R-91(2): Shift+Enter is the newline, and it is checked BEFORE the listbox
+      // arbitration below because it is not a claim on the same key — a user holding Shift is
+      // asking for a line break, never to select a mention row. Returning here lets the browser
+      // insert the newline itself, which keeps the caret and the undo stack native.
+      if (event.shiftKey) return;
+
       // The one genuine conflict between two requirements: FR-CMP-03 says Enter sends, the
       // listbox contract says Enter selects the active option. Resolved by *which* is active —
       // the menu opens with `activeIndex === -1`, so Enter still sends unless the user has
       // deliberately arrowed into the list. Neither requirement loses its default case.
-      const active = mentionOpen ? documents[activeIndex] : undefined;
+      // Ctrl/Cmd+Enter skips the arbitration entirely: a user reaching for it means *send*, and
+      // R-91(2) accepts it as a second sending key rather than a third claimant on Enter.
+      const active =
+        mentionOpen && !event.ctrlKey && !event.metaKey ? documents[activeIndex] : undefined;
       if (active !== undefined) {
         event.preventDefault();
         choose(active);
@@ -221,11 +249,13 @@ export function Composer({
         <label className="visually-hidden" htmlFor={inputId}>
           {INPUT_LABEL}
         </label>
-        <input
+        <textarea
           id={inputId}
           ref={inputRef}
           className={styles.input}
-          type="text"
+          // FR-CMP-01 (R-91(1)): one row when empty, so the resting control is pixel-identical
+          // to the prototype's `<input>`; `autoGrow` takes it from there.
+          rows={1}
           placeholder={PLACEHOLDER}
           value={value}
           // NFR-A11Y-03's combobox half. `aria-autocomplete="list"` rather than `"both"`: the
@@ -265,7 +295,7 @@ export function Composer({
           are added or removed, which the user just did, and NFR-A11Y-05 covers state that
           changes *without* user action. */}
       <div className={`${styles.footer} mono`}>
-        {`Responses grounded in ${documentCount} documents · Enter to send`}
+        {`Responses grounded in ${documentCount} documents · Enter to send, Shift+Enter for a new line`}
       </div>
     </div>
   );

@@ -345,7 +345,7 @@ async def test_oversize_rejected_before_any_storage_write(
     storage: LocalFilesystemStorage,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """R-31(3): the 50 MB ceiling is enforced *pre-storage*, so nothing is written."""
+    """R-31(3): the FR-ERR-01 ceiling is enforced *pre-storage*, so nothing is written."""
     from app.config import get_settings
 
     settings = get_settings()
@@ -355,7 +355,11 @@ async def test_oversize_rejected_before_any_storage_write(
     resp = await client.post("/api/v1/documents", files=_files(_pdf(b"x" * 4096)), headers=headers)
 
     assert resp.status_code == 413
-    assert "50 MB" in resp.json()["detail"]
+    # Derived from the shipped copy rather than repeating the number: FR-ERR-01 names the
+    # limit, so the literal moves whenever the ceiling does (R-93 took it 50 MB -> 300 MB).
+    from app.api.documents import _TOO_LARGE
+
+    assert resp.json()["detail"] == _TOO_LARGE
     assert _stored_files(storage) == []
     assert await _documents_of(session, sub) == []
 

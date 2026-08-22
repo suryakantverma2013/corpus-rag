@@ -77,7 +77,11 @@ describe('StatsPanel — the shell owns the column, this sheet owns the cards', 
     // pin a second width against `--stats-w`. `AppShellProps.stats` says whose these are.
     expect(code).not.toContain('--stats-w');
     expect(code).not.toMatch(/border-left/);
-    expect(code).not.toMatch(/overflow-y/);
+    // `overflow-y` is permitted in exactly one place: the FR-ANL-05 sources list, which scrolls
+    // ITSELF past three rows (R-92). That is the opposite of restating the column's rule — it is
+    // the architecture AppShell describes, where each region owns its own overflow. The guard
+    // stays a guard by checking the file with that one block removed.
+    expect(code.replace(/\.list \{[^}]*\}/, '')).not.toMatch(/overflow-y/);
     expect(code).not.toMatch(/padding:\s*18px/);
     expect(code).not.toMatch(/gap:\s*14px/);
   });
@@ -254,5 +258,22 @@ describe('StatsPanel — component invariants', () => {
     // composer's FR-STA-04 projection the moment an operator changed the window.
     expect(stats).not.toMatch(/\b10400\b|\b10_400\b|\b1500\b|\b1_500\b/);
     expect(code).not.toMatch(/\b10400\b|\b10_400\b/);
+  });
+});
+
+describe('FR-ANL-05 — the sources list scrolls past three (R-92)', () => {
+  const css = readSource('src/stats/StatsPanel.module.css');
+
+  it('caps the list at three rows and scrolls, with the rows refusing to shrink', () => {
+    // 50px is measured, not derived: the row is a flex box of a badge against two lines of
+    // different sizes, so nothing written in this stylesheet adds up to it. The cap exists
+    // because a grounded answer can cite every document in scope, and an uncapped list pushes
+    // the FR-ANL-01/03/04 cards out of the column entirely.
+    const list = stripBlockComments(blockAfter(css, '\n.list {'));
+    expect(list).toMatch(/max-height:\s*calc\(3 \* 50px \+ 2 \* 8px\)/);
+    expect(list).toMatch(/overflow-y:\s*auto/);
+    // Without this the flex column solves the overflow by squashing the rows rather than
+    // scrolling them, and the cap silently does nothing.
+    expect(stripBlockComments(blockAfter(css, '\n.list > * {'))).toMatch(/flex-shrink:\s*0/);
   });
 });

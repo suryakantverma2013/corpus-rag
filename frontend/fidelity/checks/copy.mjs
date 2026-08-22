@@ -55,8 +55,11 @@ export async function checkChatCopy(page, r, theme) {
   r.truthy('composer footer is present', footer !== undefined, `got ${footer}`);
   if (footer !== undefined) {
     r.truthy(
-      'composer footer matches `Responses grounded in {N} documents · Enter to send`',
-      /^Responses grounded in \d+ documents? · Enter to send$/.test(footer),
+      'composer footer matches `Responses grounded in {N} documents · Enter to send, ' +
+        'Shift+Enter for a new line`',
+      /^Responses grounded in \d+ documents? · Enter to send, Shift\+Enter for a new line$/.test(
+        footer,
+      ),
       `got ${JSON.stringify(footer)}`,
     );
   }

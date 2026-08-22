@@ -23,6 +23,12 @@
   justify-content: center;
   padding: 24px;
   box-sizing: border-box;
+  /* R-92 — this surface owns its scroll, because the page no longer has one. `min-height`
+     above means the card can exceed the viewport (measured: 467px of content in a 409px
+     window, and the expired banner adds more), and with `overflow: hidden` now on `body` that
+     would put the Sign in button somewhere unreachable. This is the one surface where clipping
+     is not an acceptable degradation — you cannot get past it. */
+  overflow-y: auto;
 }
 
 /* FR-AUT-06's info banner, above the card. Only rendered after a session actually ended. */

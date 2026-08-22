@@ -10,7 +10,7 @@ demand and the per-conversation one is implicit, so a client has no id to put in
 `scope` maps directly onto the two sections the FR-KBM-03 modal already shows.
 
 All three FR-ERR rejection strings are provisional pending §8.4 — the limits themselves
-(50 MB, 10 GB) are normative via R-11.
+(300 MB, 10 GB) are normative via R-11.
 """
 
 from __future__ import annotations
@@ -101,7 +101,7 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 #: No longer a TBD: the requirement is the source, and this is derived from it rather than
 #: the other way round. It names the limit, because "too large" without a number leaves the
 #: user to guess how much to cut.
-_TOO_LARGE = "File is too large — the maximum upload size is 50 MB."
+_TOO_LARGE = "File is too large — the maximum upload size is 300 MB."
 #: FR-ERR-03's copy, author-confirmed 2026-08-18 (R-86(2)). It lists the accepted formats
 #: rather than naming the rejected one, which is also what the R-33(5) sniffing rule needs:
 #: a spoofed extension is rejected for what it *is*, and echoing that back would be a probe.

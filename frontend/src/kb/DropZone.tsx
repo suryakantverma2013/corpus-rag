@@ -20,7 +20,7 @@ import styles from './DropZone.module.css';
 
 /** §9's literals, verbatim. */
 const PROMPT = 'Drag & drop files here, or click to browse';
-const CAPTION = 'PDF · DOCX · CSV · MD — max 50 MB';
+const CAPTION = 'PDF · DOCX · CSV · MD — max 300 MB';
 /** TBD(§8.4) — R-71(3). The control is spec-authored, so §9 carries no string for it yet. */
 const SCOPE_LABEL = 'Add to';
 const SCOPE_SEGMENTS: readonly { value: UploadScope; label: string }[] = [

@@ -17,7 +17,7 @@ they are wrong, and the rules the whole surface obeys.
 |---|---|---|
 | `app/config.py` | **what exists** — 176 names, types, defaults, validators | 29 groups, each with an `env_prefix` |
 | `backend/.env.example` | **what you may set** — documentation only, no runtime role | guarded both ways |
-| `x-corpus-env` | **what a container actually receives** — 36 keys | `deployment/docker-compose.prod.yml` |
+| `x-corpus-env` | **what a container actually receives** — 39 keys | `deployment/docker-compose.prod.yml` |
 
 **Compose does not forward `--env-file` into containers.** That file populates *interpolation* only.
 A setting reaches the api and worker processes **only if its name appears as a key in

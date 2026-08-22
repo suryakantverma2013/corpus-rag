@@ -138,6 +138,18 @@ html,
 body {
   margin: 0;
   height: 100%;
+  /* R-92 — the page itself never scrolls; every region owns its own `overflow-y`.
+     `AppShell.module.css` has described that architecture since T-502 and this is what makes it
+     true. Without it, `.root`'s `min-height: var(--app-min-h)` grows the shell past a short
+     viewport and the DOCUMENT scrolls: `overflow: hidden` there clips the shell's children, not
+     the shell inside `body`. Measured at a 569px viewport — shell 640, document 640, 71px of
+     empty page below the app, with a scrollbar to reach it.
+
+     The cost is real and is the reason the login screen gained its own scroll in the same
+     change: below `--app-min-h` the shell is now clipped rather than scrollable, which is what
+     §3 and AppShell's own comment already claimed. Any surface that must stay reachable on a
+     short window scrolls itself. */
+  overflow: hidden;
   /* The prototype hard-codes #0D1017 here, described as a "fallback before variables
      resolve" — a case that cannot arise, since the variables are declared in this same
      file. Kept literal it is a live defect: `:root` (0,1,0) outranks `html` (0,0,1) so the

@@ -202,6 +202,21 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+  /* R-92 — three rows, then this list scrolls itself.
+     A grounded answer can cite every document in scope, and an uncapped list pushes the
+     FR-ANL-01/03/04 cards above it out of view — the sources are the least important thing in
+     the column and were taking all of it. Three is what the prototype draws.
+
+     50px is MEASURED, not derived: the row is a flex box of a badge against two lines of
+     different sizes, so its height is not the sum of anything written in this file. Measured
+     uniform across five rows in Chromium. `flex-shrink: 0` on the rows is what stops the flex
+     column solving the overflow by squashing them instead of scrolling. */
+  max-height: calc(3 * 50px + 2 * 8px);
+  overflow-y: auto;
+}
+
+.list > * {
+  flex-shrink: 0;
 }
 
 .sourceRow {

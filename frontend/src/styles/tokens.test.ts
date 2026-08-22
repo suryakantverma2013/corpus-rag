@@ -256,3 +256,15 @@ describe('scrollbar gate (NFR-USE-05, R-58(3), corrected by R-60)', () => {
     expect(outside).not.toContain('scrollbar-color');
   });
 });
+
+describe('the page never scrolls (R-92)', () => {
+  it('hides overflow on html and body, so a short viewport clips instead of scrolling', () => {
+    // `.root`'s `overflow: hidden` clips the shell's CHILDREN, not the shell inside `body`, so
+    // without this `min-height: var(--app-min-h)` grows the document past a short viewport and
+    // the page gets a scrollbar with empty space under the app. Measured at a 569px viewport:
+    // shell 640, document 640, 71px of blank.
+    const base = stripBlockComments(blockAfter(code, '\nhtml,\nbody {'));
+    expect(base).toMatch(/overflow:\s*hidden/);
+    expect(base).toMatch(/height:\s*100%/);
+  });
+});

@@ -540,7 +540,9 @@ describe('FR-KBM-01 — the two entry points', () => {
       .textContent?.replace('Knowledge base', '')
       .trim();
     expect(
-      screen.getByText(`Responses grounded in ${sidebarCount} documents · Enter to send`),
+      screen.getByText(
+        `Responses grounded in ${sidebarCount} documents · Enter to send, Shift+Enter for a new line`,
+      ),
     ).not.toBeNull();
   });
 });

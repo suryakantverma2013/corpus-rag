@@ -48,7 +48,13 @@ x-corpus-env: &corpus-env
   CLAMAV_PORT: "3310"
   # Must be >= UPLOAD_MAX_FILE_BYTES or the app refuses to boot, and must stay in step with
   # StreamMaxLength in deployment/clamav/clamd.conf, which nothing in the app can validate.
-  CLAMAV_MAX_STREAM_BYTES: "104857600"
+  CLAMAV_MAX_STREAM_BYTES: "335544320"
+  # FR-ERR-01's ceiling (R-93). It MUST be listed here: compose does not forward --env-file
+  # into containers, so setting it in .env.prod alone would leave the api and worker running
+  # the 300 MB default with nothing to say otherwise.
+  UPLOAD_MAX_FILE_BYTES: "314572800"
+  UPLOAD_MAX_CONCURRENT: "2"
+  PARSER_MAX_EXTRACTED_CHARS: "120000000"
 
   # FR-ING-07 recognition (R-88 §8.78). Off unless BOTH this flag and the `ocr` profile are
   # enabled — a bare `up` does not start the sidecar. OCR_HOST is the load-bearing line: the
