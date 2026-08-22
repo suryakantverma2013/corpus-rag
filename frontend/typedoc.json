@@ -1,0 +1,27 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+
+  // Every file under src, rather than a curated entry point: this is a reference for someone
+  // reading the GUI, and the interesting docstrings are on components, hooks and stores rather
+  // than on a barrel export. `expand` walks the directory instead of following imports.
+  "entryPoints": ["src"],
+  "entryPointStrategy": "expand",
+
+  // tsconfig.app.json is the SHIPPING project: it already excludes tests and src/test, and it is
+  // the only scope that matches what a reader of the running GUI cares about. Pointing TypeDoc at
+  // the root tsconfig would pull in the test project and its Node types.
+  "tsconfig": "tsconfig.app.json",
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/test/**"],
+
+  // Beside the backend reference, and gitignored for the same reason - regenerate, never edit.
+  "out": "../docs/reference/frontend",
+
+  "name": "Corpus GUI",
+  "readme": "none",
+  "hideGenerator": true,
+
+  // The generated API types are 2.5k lines of machine output; the HTTP contract is documented for
+  // humans in docs/HTTP_API.md instead.
+  "excludeExternals": true,
+  "githubPages": false
+}

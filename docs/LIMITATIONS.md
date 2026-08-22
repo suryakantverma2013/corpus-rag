@@ -244,7 +244,8 @@ the database vacuums.
 
 ★ **Nothing is encrypted at rest by the application** — a formally accepted exception, and an
 operator responsibility the deployment documents rather than provides. Backups are the part most
-often missed. → [DEPLOYMENT.md §8](DEPLOYMENT.md), [SECURITY.md §11.13](SECURITY.md)
+often missed — and DEPLOYMENT.md §9.2 now produces one to encrypt. → [DEPLOYMENT.md §8](DEPLOYMENT.md),
+[SECURITY.md §11.13](SECURITY.md)
 
 ★ **The rate limiter fails open.** If Redis blips, limits stop applying rather than locking
 everyone out.
@@ -271,8 +272,10 @@ controls, and a feedback loop would let users switch off grounding by disliking 
 **The database does not enforce lifecycle values** — a direct SQL write can insert an invalid state.
 An accepted cost of avoiding a migration per enum change.
 
-**The reference deployment is single-node**: no TLS, no backups, no orchestrator, no autoscaling,
-zero-downtime not supported. → [DEPLOYMENT.md §14](DEPLOYMENT.md)
+**The reference deployment is single-node**: no TLS, no orchestrator, no autoscaling,
+zero-downtime not supported. Backup and restore are a documented, verified procedure with a
+script, but nothing runs it on a schedule and nothing copies the result off the host.
+→ [DEPLOYMENT.md §14](DEPLOYMENT.md), [§9.2](DEPLOYMENT.md)
 
 **A new OCR language pack is ignored** unless its volume is removed first — it seeds only while
 empty.

@@ -37,9 +37,17 @@ established for ``Default.check``, and the same reason.
 decline to run.
 
 Today's figures, as narrative rather than as assertions — pinning them would make every new
-setting touch a number, which is the rot again: 159 settable names, 158 of them active in
-``backend/.env.example`` alongside 8 documented non-settings names, 1 deliberately commented
-out; 28 interpolations matching 28 documented stack variables; 32 container-environment keys.
+setting touch a number, which is the rot again: 176 settable names, 175 of them active in
+``backend/.env.example`` alongside 9 documented non-settings names, 1 deliberately commented
+out; 30 interpolations matching 30 documented stack variables; 36 container-environment keys.
+
+**These figures went stale exactly as predicted, and the prediction is the point.** They read
+159/28/32 until 2026-08-21 — one feature behind, because Rev 0.55's recognition and table work
+added 17 settings, 2 stack variables and 4 container keys and nobody re-counted prose that
+nothing asserts. Left unpinned deliberately: a number in a docstring that drifts is cheap, and
+a number the suite enforces would make every new setting edit a test. If you are reading these
+and they matter to you, count them rather than trusting them — T-701 did, and that is how the
+old ones were caught.
 """
 
 from __future__ import annotations
@@ -88,6 +96,7 @@ NOT_SETTINGS: Mapping[str, str] = types.MappingProxyType(
         "KEYCLOAK_ADMIN_USER": "master-realm console credential; no field reads it",
         "KEYCLOAK_ADMIN_PASSWORD": "master-realm console credential; read by tooling, not the app",
         "KEYCLOAK_LIVE_ADMIN_PASSWORD": "live-test gate, read from os.environ by tests/conftest.py",
+        "OCR_LIVE_TEST": "live-test gate for the recognition sidecar, read from os.environ",
     }
 )
 

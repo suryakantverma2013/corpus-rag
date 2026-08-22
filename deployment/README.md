@@ -1,5 +1,9 @@
 # Corpus dev infrastructure (T-005)
 
+> **Keycloak is deliberately not in this file.** It runs natively or as a standalone
+> container on `:8081`, so `docker compose up` here will never start it. See
+> [`docs/DEVELOPMENT.md`](../docs/DEVELOPMENT.md) §3 and [`keycloak/README.md`](keycloak/README.md).
+
 Local development services for the Corpus backend. By default compose starts
 **Redis** (arq broker) only. The developer **reuses existing local services** for
 the rest: a local pgvector-enabled Postgres (dedicated `corpus` database) and a

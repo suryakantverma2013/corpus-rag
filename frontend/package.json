@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "docs": "typedoc",
     "api:generate": "openapi-typescript ../backend/openapi.json -o src/api/schema.d.ts && prettier --write src/api/schema.d.ts",
     "build": "npm run api:generate && tsc -b && vite build",
     "lint": "oxlint",
@@ -35,6 +36,7 @@
     "openapi-typescript": "^7.13.0",
     "oxlint": "^1.71.0",
     "prettier": "^3.9.6",
+    "typedoc": "^0.28.20",
     "typescript": "~6.0.2",
     "vite": "^8.1.1",
     "vitest": "^4.1.10"

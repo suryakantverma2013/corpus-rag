@@ -81,10 +81,14 @@ identity. The API and the worker are the same image with different commands.
 | | |
 |---|---|
 | [Architecture](docs/ARCHITECTURE.md) | design principles, topology, the chat turn, latency budget, retrieval and grounding design, failure semantics, rejected alternatives, known limitations |
+| [Module map](docs/MODULE_MAP.md) | what each package owns, what it must **not** do, its seams, and the test that fails when the rule erodes |
+| [HTTP API](docs/HTTP_API.md) | every endpoint, parameter, status and schema — generated from `backend/openapi.json` and drift-tested |
 | [Data model](docs/DATA_MODEL.md) | schema and ownership, vectors and FTS, chunk identity across versions, retention, rejected alternatives, limitations |
 | [Security](docs/SECURITY.md) | threat model, auth and authorization, content controls, prompt injection, how it is verified, limitations |
 | [Evaluation](docs/EVALUATION.md) | the three instruments, gate vs judge, measured judge behaviour, reading the numbers, limitations |
 | [Deployment](docs/DEPLOYMENT.md) | the production stack, Keycloak URLs, TLS, operations, troubleshooting, and what this deployment is *not* |
+| [Development](docs/DEVELOPMENT.md) | prerequisites, the native setup, first run in order, the traps, resetting |
+| [Configuration](docs/CONFIGURATION.md) | what you actually set, the boot refusals, coupled knobs, and the three surfaces a value must cross |
 | [Testing](docs/TESTING.md) | how to test by hand, what is already automated, scripted cases, and what to do with a finding |
 | [Known limitations](docs/LIMITATIONS.md) | the behaviour that looks like a defect and is a decision — **read before testing** |
 
@@ -92,7 +96,7 @@ identity. The API and the worker are the same image with different commands.
 
 | Suite | Count | Run |
 |---|---|---|
-| Backend | **2,046** | `cd backend && OCR_LIVE_TEST=1 uv run pytest` |
+| Backend | **2,079** | `cd backend && OCR_LIVE_TEST=1 uv run pytest` |
 | — of which route-level security | 297 | `uv run pytest tests/security` |
 | — of which production scenarios | 23 | `uv run pytest tests/scenarios` |
 | Frontend unit | **1,142** | `cd frontend && npm test` |

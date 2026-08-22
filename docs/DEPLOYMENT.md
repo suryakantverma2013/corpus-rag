@@ -50,6 +50,32 @@ curl -s localhost:8088/health/ready           # database, broker, object storage
 curl -s localhost:8088/health/ready/worker    # + arq heartbeat + clamav
 ```
 
+### Your first run, end to end
+
+A healthy stack and a working product are different claims — every probe above can pass while the
+model key is wrong. Six steps, a few minutes, and each one fails in a different place:
+
+1. **Sign in** at <http://localhost:8088> as `admin@corpus.local` with the password you set.
+   *Proves* nginx, the SPA and Keycloak agree on the three URLs of §6. A failure here is almost
+   always §6 — see the issuer and connection rows in §12.
+2. Open **Knowledge base** from the sidebar, then **Add documents**, and upload a PDF or DOCX. The
+   row appears as `Uploading…`, then `Queued`. *Proves* the multipart path through the proxy, the
+   size limit and the object store.
+3. **Watch it reach `Ready` without reloading the page.** *Proves* the live document stream, and —
+   more importantly — that the **worker** is running and ClamAV answered. A row that sits at
+   `Queued` is one of those two; §12 has the row.
+4. **Ask a question the document answers.** The first token takes roughly 5–6 seconds: routing,
+   retrieval and reranking all happen before generation starts. *Proves* the model key, retrieval,
+   and the streaming configuration. If the answer arrives all at once rather than progressively,
+   proxy buffering is back on — §12.
+5. **Hover the citation chip** on the answer. *Proves* grounding end to end: the document was
+   parsed, chunked, embedded, retrieved, reranked and cited.
+6. **Ask something the document cannot answer.** You should get an abstention, not an invention.
+   *Proves* the groundedness gate is doing its job, and it is the single most informative check
+   here — a system that answers this one confidently is misconfigured in a way no probe reports.
+
+§11 runs the same journey automatically.
+
 Tear down with `down`, or `down -v` to discard the data volumes as well.
 
 ## 3. Configuration
@@ -237,27 +263,210 @@ watching.
 
 ## 9. Operations
 
+### 9.1 Logs, health probes and monitoring
+
 **Logs.** `docker compose … logs -f api worker`. Structured JSON, with `conversation_id` and
 `turn_index` bound to every event in a turn, plus an `X-Request-ID` echoed on every response.
 
-**Scaling.** `api` and `worker` are stateless — `--scale api=3`. Ingestion throughput scales with
-worker *processes*, not with `WORKER_MAX_JOBS`. **Do not scale `init`.**
+**Three endpoints, and they are not interchangeable.**
 
-**Backups.** `pgdata` (application *and* Keycloak databases) and `minio-data` (the original
-uploads). Both are needed: the database alone cannot reconstruct a document's bytes.
+| Endpoint | Answers | Use it for |
+|---|---|---|
+| `GET /health` | is the process alive | liveness — restart on failure |
+| `GET /health/ready` | can the **API** serve requests | load-balancer membership for `api` |
+| `GET /health/ready/worker` | can the **worker** ingest | load-balancer membership for `worker` |
 
-**Upgrades.** Rebuild and `up -d`; `init` re-runs migrations and the checkpointer bootstrap
-automatically. Roll back by redeploying the previous image — but note that a migration is not
-reversed by doing so.
+`200` when every arm passes, `503` when any fails. The body always reports per-arm detail, so a
+`503` names its cause. Six arms exist across the two readiness probes:
 
-**Scheduled work.** The worker runs three crons: an undispatched-job sweep, checkpoint pruning,
+| Arm | On which probe | Probed when | What its failure costs |
+|---|---|---|---|
+| `database` | both | always | everything — this arm also covers the vector store, which is pgvector *inside the same server* |
+| `broker` | both | always | ingestion stops being dispatched; rate limiting fails **open** rather than locking users out |
+| `object_storage` | both | always | uploads, replaces and rebuilds fail; chat over already-indexed documents continues |
+| `worker` | worker only | always | nothing ingests; chat keeps answering |
+| `clamav` | worker only | `SCANNER_BACKEND=clamav` | ingestion fails **closed** — an unreachable scanner rejects the job rather than admitting unscanned bytes |
+| `ocr` | worker only | `PARSER_OCR_ENABLED=true` | recognition fails **open** — scanned pages lose their text, the document still ingests (§10) |
+
+**Why two readiness probes rather than one.** ClamAV and the OCR sidecar are ingestion
+dependencies, and a dead one of either must pull the *worker* out of service without pulling the
+chat surface out with it — the API can still answer every question about everything already
+indexed. That is why `/health/ready` deliberately does not know ClamAV or OCR exist. Wiring one
+probe to both deployables throws that away.
+
+Measured, so you can trust the shape: with `clamav` stopped, `/health/ready` answers **200** while
+`/health/ready/worker` answers **503** with `"status": "degraded"` and `clamav.error` set.
+
+Three things that will otherwise surprise whoever wires up monitoring:
+
+- **A skipped arm reports `ok`.** With `PARSER_OCR_ENABLED=false` the `ocr` arm is
+  `"status": "ok"` with `"error": "not probed: PARSER_OCR_ENABLED=false"`. That is intended — a
+  feature you turned off is not an outage — but it means **the reason lives in `error`, not in
+  `status`**. Alert on the HTTP code, and read the body to find out what is actually being checked.
+- **Each arm is bounded at 2 seconds**, so a hung dependency degrades the probe instead of hanging
+  it. Measured: a *stopped* container reports `probe timed out after 2.0s` rather than a connection
+  refusal, so do not expect the error text to name a refused connection.
+- **The body's `status` is `ok` or `degraded`; there is no `error` value.** The HTTP status is the
+  binary signal.
+
+### 9.2 Backup and restore
+
+Two volumes hold state you cannot rebuild:
+
+| Volume | Holds | Back up |
+|---|---|---|
+| `pgdata` | the `corpus` **and** `keycloak` databases | **yes** |
+| `minio-data` | every uploaded original | **yes** |
+| `redis-data` | the arq queue and rate-limit counters | no — a lost queue costs in-flight ingestions, which are re-drivable |
+| `clamav-data` | virus signatures | no — `freshclam` re-downloads them |
+| `ocr-tessdata` | language packs | no — re-seeded from the image while the volume is empty |
+
+**`pgdata` holds two databases and both matter.** Keycloak shares the PostgreSQL server in its own
+database, so `pg_dump corpus` alone backs up every document and conversation and **not one user,
+role or realm setting**. Restoring only that leaves a corpus nobody can sign in to.
+
+**The database and the bucket must be a matched pair.** Restore them from different moments and you
+get documents whose bytes are missing, or bytes no row references.
+
+#### Taking a backup
+
+```bash
+./deployment/backup.sh                    # quiesced (default)
+./deployment/backup.sh --hot              # no downtime, see the caveat below
+./deployment/backup.sh --output /srv/bk   # somewhere other than ./backups
+```
+
+It writes a timestamped directory:
+
+```
+backup-20260821-223120/
+  corpus.dump      pg_dump -Fc  (includes the LangGraph checkpoint tables)
+  keycloak.dump    pg_dump -Fc  (users, realm, credentials)
+  objects/         a mirror of the bucket
+  MANIFEST         image tag · Alembic head · pipeline identity · row and object counts
+```
+
+**Why it quiesces by default.** Upload writes the object *before* committing the row; delete purges
+the object *before* committing the row. Those are opposite orders, so **no ordering of a hot backup
+is safe against both**: dump-then-mirror survives a concurrent upload but can capture a live row
+whose bytes a concurrent delete already removed, and mirror-then-dump does the reverse. Quiescing
+stops `api` and `worker` for the duration — seconds to minutes depending on corpus size — and
+removes the question. `--hot` exists for when downtime costs more than the risk; the manifest
+records `quiesced=0` so a later restore can warn.
+
+**The MANIFEST is the load-bearing part.** A dump restored into a stack at a different Alembic head
+fails *silently* — the restore succeeds and the mismatch surfaces later as a runtime error far from
+its cause. `restore.sh` refuses on that mismatch, which it can only do because the head was
+recorded when the dump was taken.
+
+**Treat the output as the most sensitive artefact this system produces.** It contains a full dump
+of both databases — every document, conversation and audit row, plus Keycloak's credential material
+— and a byte-for-byte copy of every uploaded original. Nothing in it is encrypted (§8). The default
+`./backups` is gitignored so it cannot be committed by accident, but that is a backstop, not a
+plan: keep backups off this host, and encrypt them at rest. Nothing here does either for you.
+
+#### Restoring
+
+```bash
+./deployment/restore.sh backups/backup-20260821-223120 --yes
+```
+
+It refuses without `--yes` (it overwrites both databases and the bucket) and refuses again if the
+backup's Alembic head does not match the running stack's — pass `--force` only when you are
+deliberately rolling the code back too (§9.3). It stops `api`, `worker` **and `keycloak`** for the
+duration: Keycloak pools connections to the database being replaced underneath it and caches the
+realm in memory, so leaving it up means it keeps serving the pre-restore state.
+
+Object restore uses `mc mirror --overwrite --remove`, which makes the bucket **match** the backup
+rather than merely contain it. Without `--remove` you keep every object uploaded after the backup
+was taken — and those are exactly the ones whose database rows no longer exist.
+
+**Onto a clean host**, bring the stack up *first*, then restore. The `initdb` scripts run only on
+the first initialisation of an empty volume (§4), and they are what create the `vector` extension
+and the `keycloak` role and database. Restore into a stack that has never booted and there is
+nothing to restore *into*. On a populated volume they do not run at all, so both must already exist
+— which they do, if the stack is the one you backed up.
+
+**After a restore, everyone signs in again.** Keycloak's session tables are part of the dump, so
+restoring rolls them back and existing sessions stop being recognised. Nothing else about the
+restore is visible to users.
+
+#### What a good backup looks like
+
+Verified against this stack, and worth reproducing after any change to the procedure:
+
+- `pg_restore -l corpus.dump` lists a table of contents rather than erroring.
+- Restored into a scratch database, **every table's row count matches the live one** — including
+  `document_chunks`, whose 3072-dimension pgvector embeddings survive `pg_dump -Fc` intact, and the
+  four LangGraph `checkpoint*` tables, which Alembic does not own but which live in the same
+  database and are therefore captured with no special handling.
+- `objects/` matches the bucket key-for-key and byte-for-byte.
+- The one expected difference on a re-check is Keycloak's `offline_user_session` /
+  `offline_client_session` tables, which are live session state and move on their own.
+
+### 9.3 Upgrade and rollback
+
+#### Forward
+
+1. **Back up first** (§9.2). Everything below is reversible only if you did.
+2. Rebuild and bring up: `up -d --wait --build`. `init` re-runs `alembic upgrade head`, the
+   checkpointer bootstrap and the bucket check; all three are idempotent.
+3. Check the probes (§9.1) — both readiness endpoints, not just the API's.
+4. **Check whether the release moved the ingestion pipeline.** This is the step that gets missed.
+
+A release that bumps `PREPROCESSING_VERSION`, retunes a `CHUNKER_*` knob or changes
+`OPENAI_EMBEDDING_MODEL` changes the fingerprint every chunk was built under. New ingests use the
+new pipeline; **every document already indexed keeps serving vectors from the old one, and nothing
+anywhere reports it**. The migration succeeding tells you nothing about this.
+
+```bash
+docker compose … exec api python -m tools.reembed          # read-only: what is stale, what it costs
+docker compose … exec api python -m tools.reembed run --limit 50
+```
+
+Then let the worker drain and repeat until the plan reports nothing. §9.8 documents that loop, the
+refusals to expect, and what users see while it runs. Comparing the manifest's
+`preprocessing_version` / `chunking_version` / `embedding_model` against the new deployment's tells
+you in advance whether this step applies at all.
+
+#### Rollback
+
+**If the release carried no migration**, roll back by redeploying the previous image tag. Nothing
+else is required.
+
+**If it carried a migration, roll back by restoring (§9.2), not by `alembic downgrade`.** Every
+migration in this project does implement `downgrade()`, and that is exactly what makes the trap
+worth stating: the command will succeed, and take data with it.
+
+| Migration | What its `downgrade()` does |
+|---|---|
+| `2ee964422ed2`, `73a7dfdf7582` | **drop `turn_telemetry`** — every retained turn metric, gone |
+| `a3f21c7be904` | **drops `model_overrides`** — every runtime model slot reverts to its environment default |
+| `b41c7e9d0a52` | re-widens a uniqueness rule; its own comment records that the reverse is **only valid while no two live-and-deleted rows share a checksum**, i.e. it fails on any corpus where something was deleted and re-uploaded |
+| `c1a7f0e4b2d9` | restores a dropped column with no data to put back into it |
+
+`alembic downgrade` is a development tool here. Production rollback across a data-shape change is a
+restore, which is what §14 item 6 means.
+
+### 9.4 Scaling
+
+`api` and `worker` are stateless — `--scale api=3`. Ingestion throughput scales with worker
+*processes*, not with `WORKER_MAX_JOBS`. **Do not scale `init`.**
+
+### 9.5 Scheduled work
+
+The worker runs three crons: an undispatched-job sweep, checkpoint pruning,
 and telemetry retention (90 days). Retention policies are in
 [DATA_MODEL.md](DATA_MODEL.md) §6, including the two `0` values that mean opposite things.
 
-**Cost.** Every chat turn makes router, rerank and generation calls, and every answered turn is
+### 9.6 Cost
+
+Every chat turn makes router, rerank and generation calls, and every answered turn is
 judged in the worker. `LLM_BACKEND=fake` and `EMBEDDING_BACKEND=fake` give a zero-spend smoke test.
 
-**Changing a model without a restart.** Each call site has its own model id, and each can be
+### 9.7 Changing a model without a restart
+
+Each call site has its own model id, and each can be
 repointed at runtime — the value is read per turn, so both the API and the worker pick it up with
 no redeploy:
 
@@ -283,7 +492,9 @@ model while new ingests write the new one — and both get compared in the same 
 with nothing failing anywhere. It stays a restart-and-re-embed operation, and the re-embed half is
 the next section.
 
-**Re-embedding after a pipeline change.** Three settings are folded into every chunk's fingerprint:
+### 9.8 Re-embedding after a pipeline change
+
+Three settings are folded into every chunk's fingerprint:
 `OPENAI_EMBEDDING_MODEL`, the four `CHUNKER_*` sizing knobs (as one composite version) and the
 parsers' preprocessing version. Change any of them and *new* ingests use the new pipeline while
 every document already indexed keeps serving vectors from the old one. Nothing detects that on its
@@ -504,6 +715,11 @@ the SSE streaming path, the multipart upload path and the session cookie togethe
 | The app refuses to boot naming `PARSER_OCR_BUDGET_SECONDS` | recognition budget + per-page timeout ≥ the job timeout | §10 — raise `WORKER_JOB_TIMEOUT_SECONDS` first |
 | A new language pack is ignored | the `ocr-tessdata` volume seeds only while empty | §10 — `docker volume rm` it; the sidecar's `/health` reports the digest it actually loaded |
 | Everything answers `502` after changing `PARSER_OCR_ENABLED` (or any `x-corpus-env` value) | `api` was recreated with a new IP; nginx resolved its upstream once at load | `restart web` — §10 |
+| `restore.sh` refuses, naming two different schema heads | the backup predates (or postdates) a migration this stack has run | roll the code back to the release the backup was taken from, or pass `--force` if that is deliberate — §9.3 |
+| Restoring onto a clean host fails with `role "keycloak" does not exist` or `type "vector" does not exist` | restored into a volume that has never booted, so the `initdb` scripts never ran | bring the stack up first, *then* restore — §9.2 |
+| Everybody is signed out after a restore | Keycloak's session tables are part of the dump and were rolled back with it | expected; sign in again — §9.2 |
+| Documents are listed but answering fails to find their bytes | a `--hot` backup was taken while a delete was in flight | restore from a quiesced backup; use the default mode — §9.2 |
+| An upgrade went fine but old documents never improve | the release moved the ingestion pipeline and nothing re-drives a healthy document | `tools.reembed` — §9.3 step 4, §9.8 |
 
 ## 13. Design decisions and rejected alternatives
 
@@ -537,12 +753,14 @@ bootstrap, a realm with its placeholders replaced, and an end-to-end journey pas
    certificate automation here.
 3. **Orchestrator-ready.** No Kubernetes manifests, no Helm chart. The images are ordinary and
    would port straightforwardly; nobody has done it.
-4. **Backed up.** `pgdata` and `minio-data` are named volumes with no backup job. §9 says what to
-   copy; nothing copies it for you.
+4. **Backed up for you.** `deployment/backup.sh` and `restore.sh` are a verified procedure
+   (§9.2), but nothing runs them on a schedule, nothing copies the result off this host, and
+   there is no point-in-time recovery. Taking and keeping backups is still yours.
 5. **Secret-managed.** Configuration is environment variables from a file on disk. Rotation is a
    redeploy, and there is no integration with a managed secret store.
 6. **Zero-downtime on upgrade.** `up -d` recreates containers; the bootstrap runs migrations
-   forward, and rolling back after a data-shape change is a restore, not a `downgrade`.
+   forward, and rolling back after a data-shape change is a restore, not a `downgrade` — §9.3
+   gives the procedure, and names the migrations whose `downgrade()` destroys data.
 7. **Autoscaling.** Replica counts are manual (`--scale`), and `init` must never be scaled.
 8. **Continuously integrated.** No pipeline builds these images or runs the suites on a change.
 9. **Cost-metered.** Every chat turn makes model calls and every answered turn is judged; nothing

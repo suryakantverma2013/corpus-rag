@@ -3,12 +3,15 @@
 `npm run e2e` drives a real browser through the whole product: **login → upload → ask → cite →
 feedback → regenerate → rename → delete.**
 
-This is the only thing in the repository that crosses every seam at once. `vitest` (1,141 tests)
-runs against jsdom with `fetch` mocked; the backend suite (1,728) drives ASGI inside a
+This is the only thing in the repository that crosses every seam at once. `vitest` runs against
+jsdom with `fetch` mocked; the backend suite drives ASGI inside a
 rolled-back transaction with fake embeddings and a stub queue. Both are right, and neither can
 tell you that an upload actually finishes ingesting or that an answer actually reaches a bubble.
 
 ## What has to be running
+
+**The full setup, from a clean machine, is [`docs/DEVELOPMENT.md`](../../docs/DEVELOPMENT.md).**
+What follows is the short form, plus what is specific to this suite.
 
 The split is deliberate: **the application runs natively on the laptop; only its infrastructure
 is containerised.**

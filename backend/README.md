@@ -15,7 +15,7 @@ app/
   rag/          graph, state, retrievers, reranker, generator, citations, evaluation
   security/     prompt_injection, authorization, content_validation
   services/     object_storage, telemetry, audit
-  config.py     pydantic-settings (minimal here; full module is T-005)
+  config.py     pydantic-settings — 29 groups, ~176 composed names (see docs/CONFIGURATION.md)
   main.py       FastAPI app factory + /health
 workers/        arq worker entrypoints + tasks
 tests/
@@ -76,14 +76,14 @@ lost. If the broker is down the upload still returns `202` and the job is marked
 docker compose -f ../deployment/docker-compose.yml up -d   # infra: redis (default)
                                           #   reuse local MinIO/Postgres; add
                                           #   `--profile minio` / `--profile postgres` if none
-cp .env.example .env                      # then fill in secrets (OPENAI_API_KEY, DB password)
+cp .env.example .env                      # then fill in secrets — docs/CONFIGURATION.md §2
 uv sync                                   # create venv + install deps
 uv run uvicorn app.main:app --reload      # API  -> http://127.0.0.1:8000  (/health, /docs)
 uv run pytest                             # tests
 uv run ruff check . && uv run ruff format .
 uv run alembic upgrade head               # apply DB migrations
 uv run python -m app.services.checkpointer  # provision LangGraph checkpointer tables (once)
-uv run arq workers.main.WorkerSettings    # background worker (after T-207)
+uv run arq workers.main.WorkerSettings    # background worker (ingestion, deletion, cron)
 ```
 
 > Windows dev: uvloop is Unix-only — uvicorn falls back to asyncio locally; it

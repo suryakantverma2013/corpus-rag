@@ -82,6 +82,20 @@ client_secret_*.json
 *client_secret*.json
 credentials.json
 
+# ---- Generated API reference (regenerate, never edit) ----
+# `backend: python -m tools.apidocs` (pdoc) and `frontend: npm run docs` (TypeDoc) render these
+# from docstrings already in the source. A generated file committed to the tree changes on every
+# docstring edit, nobody reviews the diff, and it silently stops matching. docs/HTTP_API.md is
+# the one deliberate exception -- it is committed WITH a drift test.
+docs/reference/
+
+# ---- Backup output (NEVER commit) ----
+# `deployment/backup.sh` writes here by default. A backup directory holds a full pg_dump of
+# BOTH databases -- every document, conversation and audit row, plus Keycloak's credential
+# material -- and a byte-for-byte copy of every uploaded original. It is the single most
+# sensitive artefact this repository can produce. Keep it off the host, not in the tree.
+backups/
+
 # ---- OS / editor ----
 .DS_Store
 Thumbs.db

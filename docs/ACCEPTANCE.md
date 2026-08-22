@@ -139,7 +139,7 @@ different thing and had started to read as a backlog. R-90 took them:
    direction that makes a gap look smaller. *A gap closed by citing what the code does is only as
    good as the citation.*
 
-Each of the three carries a revisit trigger in §8.80, and two of them are measurements rather than
+Each of the three carries a revisit trigger in spec §8.80, and two of them are measurements rather
 opinions: a stated retention obligation, and a real account whose conversation list is large enough
 to show up in first paint.
 

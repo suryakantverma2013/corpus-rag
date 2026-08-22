@@ -30,14 +30,17 @@ Four things about a fresh deployment, so none of them reads as a fault:
 ## 2. What is already automated — do not test this by hand
 
 The suites below are thorough, and re-testing them manually finds nothing. Counts are from a real
-run on 2026-08-20; verify by running rather than trusting this table.
+run on 2026-08-22; verify by running rather than trusting this table. They are the one set of
+numbers here that nothing asserts — computing them means collecting the suite inside the suite,
+and how many *run* depends on what is up — so treat them as a scale, not a checksum.
 
 | Suite | Size | Run |
 |---|---|---|
-| Backend | 2,046 collected | `cd backend && OCR_LIVE_TEST=1 uv run pytest` |
+| Backend | 2,079 collected | `cd backend && OCR_LIVE_TEST=1 uv run pytest` |
 | — production scenarios | 23 | `uv run pytest tests/scenarios` |
 | — route security | 297 | `uv run pytest tests/security` |
 | — acceptance guards | 13 | `uv run pytest tests/acceptance` |
+| — documentation guards | 29 | `uv run pytest tests/docs` |
 | Frontend unit | 1,142 across 57 files | `cd frontend && npm test` |
 | Browser journey | 1, ~20 s | `cd frontend && CORPUS_PASSWORD='…' npm run e2e` |
 | Visual fidelity (headed, both themes) | exit code = failures | `npm run fidelity` |
