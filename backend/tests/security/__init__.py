@@ -632,6 +632,12 @@ NFR_SEC_ROWS: Final[dict[str, str]] = {
         "image decoders and the OCR engine run outside the worker process, and no page "
         "raster, image or recognised text leaves the deployment."
     ),
+    "NFR-SEC-10": (
+        "Figure serving: a figure is a raster re-encoded from a page region, never the "
+        "uploaded file; served only over an authenticated route, only to a caller "
+        "authorized for the source document under FR-RET-04's predicate, inline, and never "
+        "for a document that is not ACTIVE."
+    ),
 }
 
 #: Requirements this package deliberately does not cover, and who owns them instead.
@@ -660,6 +666,15 @@ DEFERRED_NFRS: Final[dict[str, str]] = {
     "NFR-SEC-09": (
         "worker-side isolation with no request-path surface; guarded in tests/test_ocr.py "
         "and deployment/ocr/ rather than here."
+    ),
+    # NFR-SEC-10 *will* be this package's business — it is the only NFR-SEC row that is
+    # purely a route — but the route does not exist yet: T-713 shipped detection only, and
+    # T-715 builds `GET /documents/{id}/figures/{figure_id}`. Deferred here and recorded
+    # `OPEN` in the acceptance manifest, which is the pair of entries that keeps a specified
+    # but unbuilt requirement visible in both registers instead of silently absent from both.
+    "NFR-SEC-10": (
+        "the route does not exist yet — T-715 builds it, and the matrix gains its rows "
+        "there (R-94(6))."
     ),
 }
 

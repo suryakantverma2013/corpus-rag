@@ -226,6 +226,30 @@ describe('a send', () => {
     act(() => result.current.send('hello', []));
     expect(streamSend).not.toHaveBeenCalled();
   });
+
+  it('sends into an explicit chat while the hook still has none (B-001)', async () => {
+    // The composer creating a conversation and sending into it holds a `send` from the render
+    // *before* the id existed, so the id has to arrive as an argument. Without it the guard
+    // above fires and the turn disappears — which is the whole defect, and it is why this
+    // asserts the bubble as well as the request: both sit behind the same `return`.
+    const view = renderHook(
+      ({ id }: { id: string | null }) => useChat({ conversationId: id, enabled: true }),
+      {
+        initialProps: { id: null as string | null },
+      },
+    );
+    act(() => view.result.current.send('hello', [], 'fresh-chat'));
+
+    expect(streamSend).toHaveBeenCalledWith('fresh-chat', 'hello', [], expect.anything());
+    expect(view.result.current.turnInFlight).toBe(true);
+
+    // And the bubble went into the chat the send named, not into the null one the hook is
+    // still pointed at — which is what the user sees the moment `App`'s own `setActiveId`
+    // lands, one render later.
+    view.rerender({ id: 'fresh-chat' });
+    expect(view.result.current.entries).toHaveLength(1);
+    expect(view.result.current.typing).toBe(true);
+  });
 });
 
 // --- THE DEADLOCK MATRIX ------------------------------------------------------

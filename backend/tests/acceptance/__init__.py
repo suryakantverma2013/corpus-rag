@@ -726,6 +726,11 @@ NFR_DISPOSITIONS: dict[str, NfrRow] = {
         "app/services/ocr.py reaches deployment/ocr over a local socket; tests/test_ocr.py "
         "guards no in-process engine and no third-party destination"
     ),
+    # Specified by R-94 and **not yet built**: T-713 ships the detector, T-715 the route this
+    # requirement is about. Recorded `OPEN` rather than dispositioned, because the report's
+    # residual list is the one place a half-built requirement must be visible — the alternative
+    # is a green manifest for a route that does not exist.
+    "NFR-SEC-10": _open("R-94(6) specifies it; T-715 builds the route, T-713 detection only"),
     # 5.3 Capacity & performance
     "NFR-CAP-01": _met("§9 defaults pinned in tests/test_budget.py and tests/test_upload.py"),
     "NFR-PRF-01": _met("StatsPanel.test.tsx advances 999ms for no tick, then 1ms for one"),

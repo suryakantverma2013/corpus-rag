@@ -390,6 +390,42 @@ describe('a turn, end to end (FR-CMP-03 / FR-MSG-05 / R-54(2))', () => {
     await waitFor(() => expect(send().disabled).toBe(false));
   });
 
+  it('sends the first question from the empty state, into the chat it just created', async () => {
+    // B-001. The one path in the product that spans two stores: with no conversation active,
+    // `onSend` has to create one and then send *into it*. The id must travel as an argument,
+    // because the callback that runs after the create resolves was built in a render where
+    // `activeId` was still null — reading it back there means reading state set in the same
+    // tick, and `send`'s own null guard then drops the turn with no request, no bubble and
+    // nothing in the server log. It is reachable on a fresh account and after FR-SBR-07
+    // deletes the last chat, and it is the user's *first* impression of the product.
+    listConversations.mockResolvedValue({ kind: 'ok', data: [] });
+    createConversation.mockResolvedValue({
+      kind: 'ok',
+      data: { ...conversationRow('brand-new'), title: null, context: ROOMY_USAGE },
+    });
+
+    render(<App />);
+    await waitFor(() => expect(headerTitle().textContent).toBe('New chat'), SETTLE);
+
+    compose('What is the refund window?');
+    await act(async () => {
+      fireEvent.click(send());
+    });
+
+    expect(createConversation).toHaveBeenCalled();
+    // Asserted on the *server's* id, never on a placeholder: this is the request that has to
+    // address a chat that exists.
+    expect(streamSend).toHaveBeenCalledWith(
+      'brand-new',
+      'What is the refund window?',
+      [],
+      expect.anything(),
+    );
+    // And the question is on screen — the `asked` dispatch sits below the same guard, so a
+    // dropped turn takes the user's own bubble with it.
+    expect(screen.getByText('What is the refund window?')).not.toBeNull();
+  });
+
   it('pauses the KB modal’s verbs while the turn runs, and un-pauses after (OI-31)', async () => {
     // The OI-31 binding end to end: `turnInFlight` is named once in App and reaches FR-MSG-05's
     // dots, FR-CMP-03's Send guard and — here — FR-KBM-07's four verbs, which the modal renders

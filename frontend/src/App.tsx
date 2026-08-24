@@ -286,6 +286,11 @@ function Corpus({ brandName, showStats }: { brandName: string; showStats: boolea
    * Creating the conversation first is the one path that spans both stores, and it is
    * reachable rather than defensive: FR-SBR-07 leaves `activeId` null once the last chat is
    * deleted, and the empty state still has a composer.
+   *
+   * **The created id travels as an argument (B-001).** `onNewChat` calls `setActiveId`, but this
+   * callback was built in a render where `activeId` was `null` and it keeps that value for its
+   * whole life — so handing the send nothing means handing it `null`, which `chat.send` refuses.
+   * The turn then vanishes: no request, no bubble, and nothing in the server log to explain it.
    */
   const onSend = useCallback(
     (text: string) => {
@@ -295,7 +300,7 @@ function Corpus({ brandName, showStats }: { brandName: string; showStats: boolea
         return;
       }
       void onNewChat().then((id) => {
-        if (id !== null) chat.send(text, documentIds);
+        if (id !== null) chat.send(text, documentIds, id);
       });
     },
     [activeId, chat, mentionDocuments, onNewChat],

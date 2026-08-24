@@ -170,7 +170,7 @@ def qualifying_images(page: pymupdf.Page, *, limits: ParserSettings) -> list[pym
     return [rect for *_, rect in candidates]
 
 
-def effective_dpi(rect: pymupdf.Rect, *, limits: ParserSettings) -> int:
+def effective_dpi(rect: pymupdf.Rect, *, dpi: int, max_pixels: int) -> int:
     """The DPI to render ``rect`` at, scaled down when it would allocate too much.
 
     `get_pixmap` allocates raw samples **in the worker process**, before anything can weigh
@@ -182,13 +182,18 @@ def effective_dpi(rect: pymupdf.Rect, *, limits: ParserSettings) -> int:
     Scaling down rather than skipping keeps an oversized page searchable, and the rule is a
     pure function of the rect and the settings, so it cannot make one run disagree with
     another (R-88(1)).
+
+    **Parameterised rather than reading `ParserSettings` (T-713).** FR-ING-09 renders figure
+    regions at its own, lower DPI under its own ceiling, and the allocation hazard is
+    identical — so the guard takes the two numbers instead of being copied beside a second
+    set of field names. The OCR call site passes exactly what it passed before.
     """
     width_in = abs(rect.width) / _POINTS_PER_INCH
     height_in = abs(rect.height) / _POINTS_PER_INCH
-    projected = width_in * height_in * limits.ocr_dpi * limits.ocr_dpi
-    if projected <= 0 or projected <= limits.ocr_max_render_pixels:
-        return limits.ocr_dpi
-    scaled = int(limits.ocr_dpi * math.sqrt(limits.ocr_max_render_pixels / projected))
+    projected = width_in * height_in * dpi * dpi
+    if projected <= 0 or projected <= max_pixels:
+        return dpi
+    scaled = int(dpi * math.sqrt(max_pixels / projected))
     return max(1, scaled)
 
 
@@ -201,7 +206,7 @@ def render_png(page: pymupdf.Page, *, clip: pymupdf.Rect | None, limits: ParserS
     """
     target = clip if clip is not None else page.rect
     pixmap = page.get_pixmap(
-        dpi=effective_dpi(target, limits=limits),
+        dpi=effective_dpi(target, dpi=limits.ocr_dpi, max_pixels=limits.ocr_max_render_pixels),
         clip=clip,
         colorspace=_COLORSPACE,
         alpha=False,

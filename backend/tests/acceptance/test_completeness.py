@@ -91,18 +91,31 @@ def test_every_nfr_carries_a_disposition() -> None:
     assert not missing, "NFRs with an empty evidence line: " + ", ".join(missing)
 
 
+#: An `OPEN` row must name its owner. A ruling or a task id counts, which is what the
+#: guard's own docstring has always said; the predicate only admitted `(D)` and `§8.4`.
+_OWNER = re.compile("[RT]-[0-9]+")
+
+
 def test_an_open_disposition_names_what_is_open() -> None:
     """`OPEN` with no referent is how a question stops being findable.
 
     Every open row must name the marker or the ruling that owns it, which is what lets the
     residual-gap list in `docs/ACCEPTANCE.md` be generated rather than remembered.
+
+    **The predicate accepts a ruling or a task id as well, which is the docstring's own claim
+    rather than a relaxation of it (T-713).** It admitted `(D)` and `§8.4` only — so a
+    requirement that is *decided and unbuilt* could not be recorded honestly: its owner is a
+    task, and forcing it to cite a §8.4 marker it does not have would have made the evidence
+    line false to satisfy the guard. Naming R-94 or T-715 identifies the owner exactly as a
+    `(D)` does, and the residual list still generates from it.
     """
+    owners = ("(D)", "§8.4")
     unreferenced = [
         nfr
         for nfr, row in NFR_DISPOSITIONS.items()
         if row.disposition is Disposition.OPEN
-        and "(D)" not in row.evidence
-        and "§8.4" not in row.evidence
+        and not any(marker in row.evidence for marker in owners)
+        and _OWNER.search(row.evidence) is None
     ]
     assert not unreferenced, "open NFRs naming nothing: " + ", ".join(unreferenced)
 

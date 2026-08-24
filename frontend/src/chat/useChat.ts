@@ -56,7 +56,16 @@ export interface ChatStore {
   /** FR-STA-04 — derived from `usage`, never the other way round. */
   readonly frozen: boolean;
   readonly loaded: boolean;
-  send: (text: string, documentIds: readonly string[]) => void;
+  /**
+   * FR-CMP-03's send. `targetId` overrides the active chat, and exists for exactly one caller.
+   *
+   * B-001: a composer sending from the empty state has to create a conversation first, and the
+   * callback that resumes after that round trip was built in a render where `conversationId`
+   * was still `null` — so it cannot read the new id back out of state it set in the same tick.
+   * Passing the id makes that one path explicit instead of leaving it to a closure that is
+   * always one render behind, and the guard below still refuses a send with no chat at all.
+   */
+  send: (text: string, documentIds: readonly string[], targetId?: string) => void;
   regenerate: (messageId: string) => void;
   feedback: (messageId: string, value: Feedback | null) => void;
   /** FR-SBR-07 — `DELETE /conversations/{id}`. Resolves to the server's copy, or `null`. */
@@ -282,15 +291,19 @@ export function useChat({
   );
 
   const send = useCallback(
-    (text: string, documentIds: readonly string[]) => {
-      if (conversationId === null) return;
+    (text: string, documentIds: readonly string[], targetId?: string) => {
+      // One binding, read once: the dispatch, the turn and the stream must all name the same
+      // chat, and mixing `targetId` with `conversationId` between them would write the bubble
+      // into one transcript and the answer into another.
+      const id = targetId ?? conversationId;
+      if (id === null) return;
       cancelEvalRefresh();
       localSeq.current += 1;
-      dispatch({ type: 'asked', conversationId, localId: String(localSeq.current), text });
-      void runTurn(conversationId, (signal) =>
-        streamSend(conversationId, text, documentIds, {
+      dispatch({ type: 'asked', conversationId: id, localId: String(localSeq.current), text });
+      void runTurn(id, (signal) =>
+        streamSend(id, text, documentIds, {
           signal,
-          onFrame: (frame) => handleFrame(conversationId, frame),
+          onFrame: (frame) => handleFrame(id, frame),
         }),
       );
     },

@@ -267,6 +267,51 @@ class ParserSettings(BaseSettings):
     # formats have neither pages nor a search to bound.
     table_max_per_page: int = Field(default=10)  # TBD(§8.4)
 
+    # FR-ING-09 figure extraction (T-713, R-94 §8.84). Ships **off**, like recognition and
+    # unlike table detection: it adds render time and storage to every PDF ingestion for a
+    # benefit that depends entirely on the corpus — a contract archive gains nothing, a
+    # textbook a great deal (R-94(7)). The `EVAL_ENABLED` test again: the off state removes an
+    # enrichment, and FR-ING-01's contract is unchanged without it.
+    #
+    # **These are not the `ocr_*` knobs and must not be folded into them.** R-94(2): the two
+    # detectors want opposite things from one page — `qualifying_images` drops any region a
+    # word overlaps, so recognised text never competes with the text layer (R-88(3)/(4)), while
+    # a figure is *precisely* a picture with its labels drawn on top. Sharing a floor would
+    # make one feature's tuning silently move the other's output.
+    figures_enabled: bool = Field(default=False)  # TBD(§8.4)
+
+    # Display resolution, deliberately lower than `ocr_dpi`: nothing reads these pixels, a
+    # person looks at them, and the raster is stored rather than discarded after one round
+    # trip. R-94(4) is why this is free to change — a figure feeds no embedding, so moving it
+    # re-renders figures and invalidates no vector.
+    figure_dpi: int = Field(default=150)  # TBD(§8.4)
+    # The same OOM guard `ocr_max_render_pixels` provides, for the same reason and through the
+    # same function: `get_pixmap` allocates raw samples in the worker before anything can weigh
+    # the encoded result. Its own key because the two DPIs differ.
+    figure_max_render_pixels: int = Field(default=40_000_000)  # TBD(§8.4)
+
+    # The false-positive floor. A figure region is a *guess* about a cluster of drawing
+    # operations, and R-94(2) names what it will get wrong: an uncaptioned cluster of rules (a
+    # displayed equation, a boxed sidebar) looks like a small figure. Unlike the table floors
+    # these cost nothing when they reject — a figure is presentation data, so a rejected region
+    # simply produces no picture and the page's text is untouched either way (R-94(3)).
+    figure_min_width_points: float = Field(default=60.0)  # TBD(§8.4)
+    figure_min_height_points: float = Field(default=60.0)  # TBD(§8.4)
+    figure_min_area_fraction: float = Field(default=0.01)  # TBD(§8.4)
+    # Bounds one pathological page, on `table_max_per_page`'s precedent. Surplus regions are
+    # not hidden — there is nothing to hide, since figures never touch the text layer.
+    figure_max_per_page: int = Field(default=10)  # TBD(§8.4)
+
+    # How near two drawing rectangles must be to belong to one figure. A curve, its axes, its
+    # tick marks and its shading arrive as separate paths, so without a merge distance every
+    # figure is a scatter of slivers and every floor above rejects all of them. Too large and
+    # two adjacent figures become one.
+    figure_merge_padding_points: float = Field(default=12.0)  # TBD(§8.4)
+    # How far below (or above) a region a `FIGURE n` line may sit and still be read as its
+    # caption. The pattern itself is **in code, not here**: a regex knob is configuration
+    # nobody can falsify, and this one decides what a user is shown as the document's own words.
+    figure_caption_max_distance_points: float = Field(default=40.0)  # TBD(§8.4)
+
     @model_validator(mode="after")
     def _coherent(self) -> ParserSettings:
         if not 72 <= self.ocr_dpi <= 600:
@@ -291,6 +336,22 @@ class ParserSettings(BaseSettings):
             raise ValueError("PARSER_TABLE_MIN_COLUMNS must be >= 1")
         if self.table_max_per_page < 1:
             raise ValueError("PARSER_TABLE_MAX_PER_PAGE must be >= 1")
+        # R-94: every one of these is a floor or a bound, so zero or negative is not
+        # "unbounded" — it is a detector that accepts everything or nothing, silently.
+        if not 72 <= self.figure_dpi <= 600:
+            raise ValueError("PARSER_FIGURE_DPI must be between 72 and 600")
+        if self.figure_max_render_pixels < 1_000_000:
+            raise ValueError("PARSER_FIGURE_MAX_RENDER_PIXELS must be >= 1,000,000")
+        if self.figure_min_width_points <= 0 or self.figure_min_height_points <= 0:
+            raise ValueError("PARSER_FIGURE_MIN_WIDTH_POINTS and _MIN_HEIGHT_POINTS must be > 0")
+        if not 0.0 < self.figure_min_area_fraction <= 1.0:
+            raise ValueError("PARSER_FIGURE_MIN_AREA_FRACTION must be in (0, 1]")
+        if self.figure_max_per_page < 1:
+            raise ValueError("PARSER_FIGURE_MAX_PER_PAGE must be >= 1")
+        if self.figure_merge_padding_points < 0:
+            raise ValueError("PARSER_FIGURE_MERGE_PADDING_POINTS must be >= 0")
+        if self.figure_caption_max_distance_points < 0:
+            raise ValueError("PARSER_FIGURE_CAPTION_MAX_DISTANCE_POINTS must be >= 0")
         return self
 
 

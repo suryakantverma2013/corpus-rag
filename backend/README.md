@@ -15,7 +15,7 @@ app/
   rag/          graph, state, retrievers, reranker, generator, citations, evaluation
   security/     prompt_injection, authorization, content_validation
   services/     object_storage, telemetry, audit
-  config.py     pydantic-settings — 29 groups, ~176 composed names (see docs/CONFIGURATION.md)
+  config.py     pydantic-settings — 29 groups, ~185 composed names (see docs/CONFIGURATION.md)
   main.py       FastAPI app factory + /health
 workers/        arq worker entrypoints + tasks
 tests/

@@ -534,19 +534,31 @@ def test_an_oversized_page_is_scaled_down_rather_than_skipped() -> None:
     """
     limits = _limits(ocr_dpi=300, ocr_max_render_pixels=4_000_000)
     a0 = pymupdf.Rect(0, 0, 3370, 2384)
-    scaled = effective_dpi(a0, limits=limits)
+    scaled = effective_dpi(a0, dpi=limits.ocr_dpi, max_pixels=limits.ocr_max_render_pixels)
 
     assert scaled < 300
     projected = (a0.width / 72 * scaled) * (a0.height / 72 * scaled)
     assert projected <= limits.ocr_max_render_pixels
     # An ordinary page is untouched at the shipped ceiling — the clamp is for the outlier.
-    assert effective_dpi(pymupdf.Rect(0, 0, 595, 842), limits=_limits()) == 300
+    shipped = _limits()
+    assert (
+        effective_dpi(
+            pymupdf.Rect(0, 0, 595, 842),
+            dpi=shipped.ocr_dpi,
+            max_pixels=shipped.ocr_max_render_pixels,
+        )
+        == 300
+    )
 
 
 def test_the_scale_down_is_a_pure_function_of_the_page() -> None:
     limits = _limits(ocr_max_render_pixels=4_000_000)
     a0 = pymupdf.Rect(0, 0, 3370, 2384)
-    assert effective_dpi(a0, limits=limits) == effective_dpi(a0, limits=limits)
+    twice = [
+        effective_dpi(a0, dpi=limits.ocr_dpi, max_pixels=limits.ocr_max_render_pixels)
+        for _ in range(2)
+    ]
+    assert twice[0] == twice[1]
 
 
 def test_recognised_text_passes_through_the_normalisation_choke_point() -> None:
