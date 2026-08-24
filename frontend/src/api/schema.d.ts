@@ -427,6 +427,40 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/documents/{document_id}/figures/{content_sha256}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get one of a document's figures
+     * @description One figure this document declared, rendered inline (FR-CIT-07, NFR-SEC-10).
+     *
+     *     **Owner-only, with no administrator branch** — the one route under `/documents` that does
+     *     not widen under FR-USR-04, and deliberately so: its siblings disclose *management* (a
+     *     listing, a status, a job id) while this discloses **content**. `get_servable` carries the
+     *     argument and the whole predicate set; nothing is re-decided here.
+     *
+     *     **`inline`, with no filename.** NFR-SEC-10 forbids a download affordance, and a `filename=`
+     *     would both suggest one and hand out the uploaded file's name. `nosniff` is an assertion
+     *     rather than a hope: `render_figure` encodes PNG and nothing else, so the declared type is
+     *     a fact about our own renderer.
+     *
+     *     `content_sha256` is validated as 64 lower-case hex by the path itself, so a malformed id is
+     *     a `422` that never reaches a query. It discloses nothing — an id of the wrong shape cannot
+     *     name a figure that exists.
+     */
+    get: operations['get_document_figure'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/documents/{document_id}/replace': {
     parameters: {
       query?: never;
@@ -878,6 +912,38 @@ export interface components {
       error?: string | null;
     };
     /**
+     * CitationFigure
+     * @description One figure printed on the page a citation names (FR-CIT-07, R-94).
+     *
+     *     **Resolved at read time and never persisted** — see :attr:`CitationSegment.RESOLVED_AT_READ`
+     *     and `DocumentFigureRepository.list_for_citations`, which holds the reasoning. `_citation`
+     *     does not write this, so a stored `messages.citations` row never carries it.
+     *
+     *     Deliberately **not** carrying a `url`. The client must reach the T-715 route through the
+     *     generated `paths` to inherit the session middleware's token freshening and 401 handling,
+     *     and that needs path *parameters*; a URL assembled here would be a second copy of the route
+     *     template in a place `schema.d.ts` cannot check.
+     *
+     *     Nor a `doc` or a `page`: both are already on the enclosing segment, and the figure is
+     *     selected *by* that locator's page, so a second copy could only drift from the thing that
+     *     chose it.
+     *
+     *     `widthPx`/`heightPx` are what let the client reserve the box before the image arrives. They
+     *     are the figure's own recorded dimensions (T-714), not a layout hint.
+     */
+    CitationFigure: {
+      /** Documentid */
+      documentId: string;
+      /** Contentsha256 */
+      contentSha256: string;
+      /** Caption */
+      caption?: string | null;
+      /** Widthpx */
+      widthPx: number;
+      /** Heightpx */
+      heightPx: number;
+    };
+    /**
      * CitationLocator
      * @description R-34's structured address, beside the rendered label.
      *
@@ -909,7 +975,7 @@ export interface components {
     CitationLocatorKind: 'page' | 'section' | 'rows';
     /**
      * CitationSegment
-     * @description A citation run — the FR-CIT-01 chip and the FR-CIT-03 hover card.
+     * @description A citation run — the FR-CIT-01 chip, the FR-CIT-03 hover card and the FR-CIT-07 figure.
      *
      *     See :func:`_citation` for what each field carries and why `page` holds a label rather than a
      *     number.
@@ -935,6 +1001,11 @@ export interface components {
        * @description The FR-CIT-04 rerank score. **Absent** — not null — when the reranker failed open and published none (R-47(2)). Render the card with no number.
        */
       score?: number | null;
+      /**
+       * Figures
+       * @description The FR-CIT-07 figures printed on the page this citation's locator names, in the document's own order. **Absent** — not null, not `[]` — when there are none, which is the ordinary case: figure extraction ships off, only PDFs have pages, and a page need not carry a figure. Resolved when the citation is served and never persisted, so a stored row never carries this key. Selected by the locator and never by the model (R-94(3)): a figure points at the cited page, and is not a claim that it supports the sentence.
+       */
+      figures?: components['schemas']['CitationFigure'][];
     };
     /**
      * CloudLinkRequiredDetail
@@ -3668,6 +3739,74 @@ export interface operations {
       };
       /** @description Too many concurrent streams for this caller. */
       429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+    };
+  };
+  get_document_figure: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        document_id: string;
+        content_sha256: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The figure, inline. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'image/png': unknown;
+        };
+      };
+      /** @description Missing, malformed or expired bearer token, or no local user record. */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description The account is deactivated, or the operation is administrator-only (NFR-SEC-01). */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description No such figure for this caller. */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+      /** @description Object storage is unreachable. */
+      503: {
         headers: {
           [name: string]: unknown;
         };

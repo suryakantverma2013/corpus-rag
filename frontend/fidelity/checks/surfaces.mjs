@@ -205,3 +205,93 @@ export async function checkEvalHues(page, r, theme) {
   );
   r.truthy('at least one eval hue is actually painted', hues.length > 0, JSON.stringify(hues));
 }
+
+/**
+ * FR-CIT-07 — the document's figure, beneath the passage that cites its page (T-716, R-94).
+ *
+ * **This check FAILS when no figure is on screen, and that is deliberate.** The obvious
+ * alternative — record a pass with "no figure-bearing conversation available" — is exactly the
+ * defect §8.74(i) found in the FR-KBM-10 probe, where a fallback reported a pass and 39 checks
+ * silently measured the wrong page. Figure extraction ships off (`PARSER_FIGURES_ENABLED`), so
+ * a red here means the corpus was not prepared, not that the product is broken; `fidelity/README.md`
+ * says how to prepare it.
+ *
+ * Nothing is transcribed per property: R-94 is Rev 0.61 and the prototype has no markup for this
+ * at all, so what is asserted is the geometry the requirement fixes — the figure is *beneath the
+ * citing passage*, it is inside the answer body, it does not overflow the content column, and it
+ * carries the caption and text alternative FR-CIT-07 and NFR-A11Y-03 require.
+ */
+export async function checkCitationFigure(page, r, theme) {
+  r.context('FR-CIT-07 figure under the citation', theme);
+
+  // Polled, never slept on: the raster is fetched after the transcript renders, so its arrival
+  // is a network event and a fixed wait is an assumption about timing wearing an assertion's
+  // clothes (see `checkCitationCard`).
+  // `mutedColor` is resolved through a throwaway element so the comparison is rgb-to-rgb:
+  // the token is a hex literal while a computed `color` is always rgb().
+  let found = null;
+  for (let i = 0; i < 25 && found === null; i++) {
+    await sleep(120);
+    found = await page.evaluate(`
+      const fig = document.querySelector('main figure');
+      if (!fig) return null;
+      const img = fig.querySelector('img');
+      if (!img || !img.complete || img.naturalWidth === 0) return null;
+      const cap = fig.querySelector('figcaption');
+      const body = fig.closest('article')?.querySelector('p');
+      const source = [...(fig.closest('article')?.querySelectorAll('*') ?? [])]
+        .find((el) => (el.textContent || '').startsWith('grounded in '));
+      return {
+        alt: img.getAttribute('alt') || '',
+        src: (img.getAttribute('src') || '').slice(0, 5),
+        caption: (cap?.textContent || '').trim(),
+        imgWidth: img.getBoundingClientRect().width,
+        figWidth: fig.getBoundingClientRect().width,
+        bodyWidth: (fig.parentElement?.getBoundingClientRect().width) ?? 0,
+        afterParagraph: body ? (body.compareDocumentPosition(fig) & 4) === 4 : false,
+        beforeSourceLine: source ? (fig.compareDocumentPosition(source) & 4) === 4 : null,
+        captionColor: getComputedStyle(cap).color,
+        mutedColor: (() => {
+          const probe = document.createElement('span');
+          probe.style.color = 'var(--muted)';
+          document.body.appendChild(probe);
+          const value = getComputedStyle(probe).color;
+          probe.remove();
+          return value;
+        })(),
+      };`);
+  }
+
+  r.truthy(
+    'a figure is rendered beneath a citation',
+    found !== null,
+    'no <figure> with a loaded image in the transcript — enable PARSER_FIGURES_ENABLED and ' +
+      'ingest a figure-bearing PDF, then ask a question that cites one of its pages ' +
+      '(frontend/fidelity/README.md)',
+  );
+  if (found === null) return;
+
+  // The bytes come from the authenticated route, so the src is an object URL, never a path.
+  r.eq('the image is an object URL', found.src, 'blob:');
+  // NFR-A11Y-03 — the alt names the document and the page at minimum.
+  r.truthy('the alt text names the document', /\.(pdf|docx|csv|md)\b/i.test(found.alt), found.alt);
+  r.truthy('the alt text names the page', /p\.\s*\d+/.test(found.alt), found.alt);
+  r.truthy('the caption names the document', /\.(pdf|docx|csv|md)\b/i.test(found.caption), found.caption);
+  // FR-CIT-07 — "beneath the citing passage", inside the FR-MSG-04 body rather than after it.
+  r.truthy('the figure follows the citing paragraph', found.afterParagraph, 'it precedes it');
+  if (found.beforeSourceLine !== null) {
+    r.truthy(
+      'the figure sits inside the body, above the source line',
+      found.beforeSourceLine,
+      'it renders after the FR-MSG-04 source line',
+    );
+  }
+  // The document's picture never widens the 68% content column.
+  r.truthy(
+    'the image stays inside the content column',
+    found.imgWidth <= found.bodyWidth + 1,
+    `image ${found.imgWidth} > column ${found.bodyWidth}`,
+  );
+  // NFR-A11Y-06: `--muted`, not `--muted2`, which fails contrast as text on every surface.
+  r.eq('the caption is --muted, not --muted2', found.captionColor, found.mutedColor);
+}

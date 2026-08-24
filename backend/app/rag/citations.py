@@ -5,7 +5,7 @@ R-48(4) makes it **derived, never stored as such**: `messages.content` keeps the
 its ``[S<n>]`` markers intact, and this module resolves those markers into the payload the
 FR-CIT-01 chip and the FR-CIT-03 hover card render.
 
-Four things this module is careful about, each of them a ruling rather than a preference:
+Five things this module is careful about, each of them a ruling rather than a preference:
 
 1. **It does not parse the answer.** :func:`build_citations` takes segments the caller already
    produced with `split_answer_segments` — the *same* parser the T-308 gate ran (R-48(4)).
@@ -29,6 +29,15 @@ Four things this module is careful about, each of them a ruling rather than a pr
    and `workers/evaluate.py` needs it to replay the split. R-49(a) forbids a second parser as
    the workaround, so the list is persisted (R-50(5)).
 
+5. **The FR-CIT-07 figure is declared here and resolved elsewhere** (R-94).
+   :class:`CitationSegment` carries `figures`, but `_citation` never writes it: a figure is
+   chosen by the citation's locator when the citation is **served**, in `app/api/messages.py`,
+   because NFR-SEC-10's predicate can change after the turn and a stored reference would
+   assert a permission taken at write time. It is also what keeps this package clear of the
+   figure table, which R-94(4) requires and `tests/test_figure_repository.py` enforces as an
+   import rule. The field is named in :attr:`CitationSegment.RESOLVED_AT_READ` and dropped
+   from the payload when empty, so a persisted row never carries it.
+
 **langgraph-free**, like `errors.py` / `generation.py` / `groundedness.py` / `budget.py`:
 `app.rag.graph` calls ``apply_strict_msgpack()`` at import, and the API DTO, T-403 and T-404
 all read this shape without wanting that.
@@ -37,7 +46,7 @@ all read this shape without wanting that.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import (
     BaseModel,
@@ -55,6 +64,7 @@ __all__ = [
     "SEGMENTS_KEY",
     "SOURCE_IDS_KEY",
     "CitationEnvelope",
+    "CitationFigure",
     "CitationLocator",
     "CitationLocatorKind",
     "CitationSegment",
@@ -128,12 +138,51 @@ class CitationLocator(BaseModel):
     line_end: int | None = None
 
 
+class CitationFigure(BaseModel):
+    """One figure printed on the page a citation names (FR-CIT-07, R-94).
+
+    **Resolved at read time and never persisted** — see :attr:`CitationSegment.RESOLVED_AT_READ`
+    and `DocumentFigureRepository.list_for_citations`, which holds the reasoning. `_citation`
+    does not write this, so a stored `messages.citations` row never carries it.
+
+    Deliberately **not** carrying a `url`. The client must reach the T-715 route through the
+    generated `paths` to inherit the session middleware's token freshening and 401 handling,
+    and that needs path *parameters*; a URL assembled here would be a second copy of the route
+    template in a place `schema.d.ts` cannot check.
+
+    Nor a `doc` or a `page`: both are already on the enclosing segment, and the figure is
+    selected *by* that locator's page, so a second copy could only drift from the thing that
+    chose it.
+
+    `widthPx`/`heightPx` are what let the client reserve the box before the image arrives. They
+    are the figure's own recorded dimensions (T-714), not a layout hint.
+    """
+
+    documentId: str  # noqa: N815 — segment keys are camelCase; see the seam note above
+    contentSha256: str  # noqa: N815 — ditto
+    #: `None`, never `""`. The column is NOT NULL with a `''` default because "no caption" is
+    #: not a missing row, but on the wire FR-CIT-07's "its caption where it has one" wants one
+    #: check rather than two, on both sides of it.
+    caption: str | None = None
+    widthPx: int  # noqa: N815 — ditto
+    heightPx: int  # noqa: N815 — ditto
+
+
 class CitationSegment(BaseModel):
-    """A citation run — the FR-CIT-01 chip and the FR-CIT-03 hover card.
+    """A citation run — the FR-CIT-01 chip, the FR-CIT-03 hover card and the FR-CIT-07 figure.
 
     See :func:`_citation` for what each field carries and why `page` holds a label rather than a
     number.
     """
+
+    #: Fields resolved when the citation is **served** rather than when it is composed, so
+    #: `_citation` deliberately does not write them and they are never persisted.
+    #:
+    #: Declared as data rather than left as a convention because
+    #: `test_the_citation_model_covers_every_key_written` compares `_citation`'s keys against
+    #: this model's fields: subtracting a *named* set keeps that guard failing for a genuinely
+    #: forgotten field, where relaxing it to "some fields may be missing" would not.
+    RESOLVED_AT_READ: ClassVar[frozenset[str]] = frozenset({"figures"})
 
     isCite: Literal[True] = True  # noqa: N815 — FR-MSG-06 fixes the spelling
     doc: str
@@ -153,18 +202,41 @@ class CitationSegment(BaseModel):
             "and published none (R-47(2)). Render the card with no number."
         ),
     )
+    figures: list[CitationFigure] = Field(
+        default_factory=list,
+        description=(
+            "The FR-CIT-07 figures printed on the page this citation's locator names, in the "
+            "document's own order. **Absent** — not null, not `[]` — when there are none, "
+            "which is the ordinary case: figure extraction ships off, only PDFs have pages, "
+            "and a page need not carry a figure. Resolved when the citation is served and "
+            "never persisted, so a stored row never carries this key. Selected by the locator "
+            "and never by the model (R-94(3)): a figure points at the cited page, and is not a "
+            "claim that it supports the sentence."
+        ),
+    )
 
     @model_serializer(mode="wrap")
-    def _omit_absent_score(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        """Drop `score` entirely when there is none, which is point (3) of this module.
+    def _omit_absent(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Drop `score` and `figures` entirely when there is nothing to say, per point (3).
 
         Not `exclude_none`: `page` and `locator` are legitimately `null` and must keep their
         keys. A plain optional field would serialise `"score": null`, and "no score" and "a
         score of zero" are exactly what FR-CIT-04 needs a client to be able to tell apart.
+
+        `figures` is dropped for a different reason, and it is the stronger one. `_citation`
+        dumps this model straight into `messages.citations`, so a key that always serialised
+        would write `"figures": []` into **every** citation row, for ever, in immutable JSONB,
+        for a field the writer never populates — telling `workers/evaluate.py`, which reads the
+        same envelope, that a citation *has* no figures when the truth is that the question was
+        not asked at write time. Dropping it also makes FR-CIT-07's "a citation with no figure
+        renders exactly as it does today" true byte-for-byte on the wire rather than only to
+        the eye.
         """
         data = handler(self)
         if data.get("score") is None:
             data.pop("score", None)
+        if not data.get("figures"):
+            data.pop("figures", None)
         return data
 
 
@@ -281,6 +353,11 @@ def _citation(hit: RetrievedChunk, *, score: float | None) -> dict[str, Any]:
     still *absent* rather than null when the reranker published none — that rule now lives in
     the model's serializer, so it holds for every producer of this shape rather than for this
     function alone.
+
+    **`figures` is deliberately not written here** (R-94, point 5 above). It is resolved when
+    the citation is served, so what this function persists is the same payload it persisted
+    before FR-CIT-07 existed — which is why enabling figure extraction re-ingests documents
+    but rewrites no transcript.
     """
     locator = hit.meta.get("locator")
     segment = CitationSegment(

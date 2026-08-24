@@ -2,7 +2,7 @@
 
 **Generated from `backend/openapi.json` -- do not edit.** Regenerate with `cd backend && uv run python -m tools.httpdocs`; `tests/test_http_docs.py` fails if this file stops matching the specification, and that specification is itself checked against the running application.
 
-API version `0.1.0` -- **38 operations** across 29 paths and 84 schemas.
+API version `0.1.0` -- **39 operations** across 30 paths and 85 schemas.
 
 Authentication is a bearer token on every operation marked **yes**; see [SECURITY.md](SECURITY.md) for how one is obtained and what invalidates it. Error bodies carry a stable `error_code` -- match on that, never on the prose.
 
@@ -35,6 +35,7 @@ Authentication is a bearer token on every operation marked **yes**; see [SECURIT
 | `documents` | **DELETE** | [`/api/v1/documents/{document_id}`](#delete-document) | yes | Delete a document |
 | `documents` | **POST** | [`/api/v1/documents/{document_id}/retry`](#retry-document) | yes | Retry a failed ingestion |
 | `documents` | **GET** | [`/api/v1/documents/events`](#stream-documents) | yes | Live document-status stream (SSE) |
+| `documents` | **GET** | [`/api/v1/documents/{document_id}/figures/{content_sha256}`](#get-document-figure) | yes | Get one of a document's figures |
 | `documents` | **POST** | [`/api/v1/documents/{document_id}/replace`](#replace-document) | yes | Replace a document with a new version |
 | `jobs` | **GET** | [`/api/v1/jobs/{job_id}`](#get-job) | yes | Get ingestion/deletion job status |
 | `messages` | **GET** | [`/api/v1/conversations/{conversation_id}/messages`](#list-messages) | yes | List a chat's messages |
@@ -615,6 +616,31 @@ FR-KBM-09's live surface (R-41). Filters, scope resolution and authorization are
 | `422` | [`HTTPValidationError`](#httpvalidationerror) | Validation Error |
 | `429` | [`ErrorResponse`](#errorresponse) | Too many concurrent streams for this caller. |
 
+### GET /api/v1/documents/{document_id}/figures/{content_sha256}
+
+<a id="get-document-figure"></a>
+
+Get one of a document's figures
+
+One figure this document declared, rendered inline (FR-CIT-07, NFR-SEC-10). **Owner-only, with no administrator branch** — the one route under `/documents` that does not widen under FR-USR-04, and deliberately so: its siblings disclose *management* (a listing, a status, a job id) while this discloses **content**. `get_servable` carries the argument and the whole predicate set; nothing is re-decided here. **`inline`, with no filename.** NFR-SEC-10 forbids a download affordance, and a `filename=` would both suggest one and hand out the uploaded file's name. `nosniff` is an assertion rather than a hope: `render_figure` encodes PNG and nothing else, so the declared type is a fact about our own renderer. `content_sha256` is validated as 64 lower-case hex by the path itself, so a malformed id is a `422` that never reaches a query. It discloses nothing — an id of the wrong shape cannot name a figure that exists.
+
+- **Operation id:** `get_document_figure`
+- **Authentication:** bearer token
+
+| Parameter | In | Required | Type | Description |
+|---|---|---|---|---|
+| `document_id` | path | yes | string (uuid) |  |
+| `content_sha256` | path | yes | string |  |
+
+| Status | Body | Meaning |
+|---|---|---|
+| `200` | any | The figure, inline. |
+| `401` | [`ErrorResponse`](#errorresponse) | Missing, malformed or expired bearer token, or no local user record. |
+| `403` | [`ErrorResponse`](#errorresponse) | The account is deactivated, or the operation is administrator-only (NFR-SEC-01). |
+| `404` | [`ErrorResponse`](#errorresponse) | No such figure for this caller. |
+| `422` | [`HTTPValidationError`](#httpvalidationerror) | Validation Error |
+| `503` | [`ErrorResponse`](#errorresponse) | Object storage is unreachable. |
+
 ### POST /api/v1/documents/{document_id}/replace
 
 <a id="replace-document"></a>
@@ -1023,6 +1049,20 @@ Outcome of a single dependency probe.
 | `latency_ms` | number \| null | no |  |
 | `status` | `ok` \| `error` | yes |  |
 
+### `CitationFigure`
+
+<a id="citationfigure"></a>
+
+One figure printed on the page a citation names (FR-CIT-07, R-94). **Resolved at read time and never persisted** — see :attr:`CitationSegment.RESOLVED_AT_READ` and `DocumentFigureRepository.list_for_citations`, which holds the reasoning. `_citation` does not write this, so a stored `messages.citations` row never carries it. Deliberately **not** carrying a `url`. The client must reach the T-715 route through the generated `paths` to inherit the session middleware's token freshening and 401 handling, and that needs path *parameters*; a URL assembled here would be a second copy of the route template in a place `schema.d.ts` cannot check. Nor a `doc` or a `page`: both are already on the enclosing segment, and the figure is selected *by* that locator's page, so a second copy could only drift from the thing that chose it. `widthPx`/`heightPx` are what let the client reserve the box before the image arrives. They are the figure's own recorded dimensions (T-714), not a layout hint.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `caption` | string \| null | no |  |
+| `contentSha256` | string | yes |  |
+| `documentId` | string | yes |  |
+| `heightPx` | integer | yes |  |
+| `widthPx` | integer | yes |  |
+
 ### `CitationLocator`
 
 <a id="citationlocator"></a>
@@ -1051,12 +1091,13 @@ One of: `page`, `section`, `rows`
 
 <a id="citationsegment"></a>
 
-A citation run — the FR-CIT-01 chip and the FR-CIT-03 hover card. See :func:`_citation` for what each field carries and why `page` holds a label rather than a number.
+A citation run — the FR-CIT-01 chip, the FR-CIT-03 hover card and the FR-CIT-07 figure. See :func:`_citation` for what each field carries and why `page` holds a label rather than a number.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `chunkId` | string | yes |  |
 | `doc` | string | yes |  |
+| `figures` | [`CitationFigure`](#citationfigure)[] | no | The FR-CIT-07 figures printed on the page this citation's locator names, in the document's own order. **Absent** — not null, not `[]` — when there are none, which is the ordinary case: figure extraction ships off, only PDFs have pages, and a page need not carry a figure. Resolved when the citation is served and never persisted, so a stored row never carries this key. Selected by the locator and never by the model (R-94(3)): a figure points at the cited page, and is not a claim that it supports the sentence. |
 | `isCite` | `True` | no |  |
 | `locator` | [`CitationLocator`](#citationlocator) \| null | no |  |
 | `page` | string \| null | no |  |

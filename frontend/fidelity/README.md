@@ -62,6 +62,29 @@ FR-KBM-01's, which is exactly why both numbers are pinned rather than one derive
 A `border-box` reset would silently narrow every panel in the first three rows while a naive
 outer-width check kept passing.
 
+## The corpus this expects
+
+The harness signs in and drives a real deployment, so a handful of checks assert things that only
+exist once the corpus contains them. That is deliberate: `checkCitationCard` fails with *"no chip
+on this conversation"* rather than passing, because a check that quietly skips is a check that
+certifies. Prepare, once:
+
+- **at least one answered conversation with a citation** — `selectAnsweredChat()` finds it, and the
+  FR-CIT-03 card is opened from its chip.
+- **one figure-bearing PDF, with extraction on** — FR-CIT-07 (`checkCitationFigure`). Figure
+  extraction ships **off** (`PARSER_FIGURES_ENABLED`, R-94(7)), and only PDFs have pages, so a
+  fresh deployment has no figure anywhere and this check is red until one exists:
+
+  ```bash
+  # backend/.env, then restart BOTH the API and the arq worker
+  PARSER_FIGURES_ENABLED=true
+  ```
+
+  Then upload a PDF whose pages carry diagrams and ask a question that cites one of those pages.
+  A textbook page works; Markdown, DOCX and CSV never will, because they have no pages for a
+  locator to name. **Leave the flag off in `backend/.env` when you are done** — `tests/conftest.py`
+  loads that file, so several backend tests that assert the shipped default fail while it is on.
+
 ## Writing a new check
 
 - Assert the **measured** value beside the expected one — `r.eq` / `r.near` both report what they

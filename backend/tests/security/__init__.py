@@ -433,6 +433,22 @@ ROUTE_DECISIONS: Final[tuple[RouteDecision, ...]] = (
         admin_foreign=200,
     ),
     _r(
+        "GET",
+        f"{API}/documents/{{document_id}}/figures/{{content_sha256}}",
+        "get_document_figure",
+        Gate.USER,
+        "NFR-SEC-10 (R-94(6)) - owner-only, and the ONE route under /documents that does not "
+        "widen for an administrator. Its siblings disclose management (a listing, a status, a "
+        "job id) under FR-USR-04; this discloses content - a rendered region of a page - and "
+        "widening it would make it the first route by which an administrator reads another "
+        "user's document. NFR-SEC-10 says 'the same predicate as FR-RET-04', which has no "
+        "administrator branch. Do not harmonise this with the four rows around it.",
+        owns=Owns.DOCUMENT,
+        admin_widens=False,
+        foreign=404,
+        admin_foreign=404,
+    ),
+    _r(
         "DELETE",
         f"{API}/documents/{{document_id}}",
         "delete_document",
@@ -638,6 +654,12 @@ NFR_SEC_ROWS: Final[dict[str, str]] = {
         "authorized for the source document under FR-RET-04's predicate, inline, and never "
         "for a document that is not ACTIVE."
     ),
+    "NFR-SEC-11": (
+        "Browser content restrictions: the origin serving the GUI sends a deny-by-default "
+        "Content-Security-Policy with no 'unsafe-inline' and no 'unsafe-eval', admitting "
+        "blob: for images, beside nosniff, Referrer-Policy and Permissions-Policy; scoped "
+        "to the documents this origin serves and not to a proxied surface with its own."
+    ),
 }
 
 #: Requirements this package deliberately does not cover, and who owns them instead.
@@ -675,6 +697,12 @@ DEFERRED_NFRS: Final[dict[str, str]] = {
     "NFR-SEC-10": (
         "the route does not exist yet — T-715 builds it, and the matrix gains its rows "
         "there (R-94(6))."
+    ),
+    "NFR-SEC-11": (
+        "a response header set by the edge, not by the application — there is no request "
+        "this package can drive that would exercise it, because nginx is not in the ASGI "
+        "stack. Covered instead by tests/test_security_headers.py, which reads "
+        "deployment/nginx/ back (R-95)."
     ),
 }
 

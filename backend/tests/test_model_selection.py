@@ -523,12 +523,18 @@ async def test_an_empty_corpus_needs_no_yes(
 
     from app.db.models.document import Document
     from app.db.models.document_chunk import DocumentChunk
+    from app.db.models.document_figure import DocumentFigure
     from app.db.models.knowledge_job import KnowledgeJob
     from app.services.embeddings import FakeEmbeddingClient
 
-    # Children first: both reference `documents` with NO ACTION, which is R-39's deliberate
+    # Children first: all three reference `documents` with NO ACTION, which is R-39's deliberate
     # choice so a delete has to be explicit about what it is destroying.
+    #
+    # `document_figures` (T-714) is the newest of them, and it was missing here until T-716 put
+    # the first figure rows on a development database — this cleanup passes on an empty corpus
+    # whatever it forgets, so the omission is invisible until somebody has the row it misses.
     await session.execute(delete(DocumentChunk))
+    await session.execute(delete(DocumentFigure))
     await session.execute(delete(KnowledgeJob))
     await session.execute(delete(Document))
     await session.flush()

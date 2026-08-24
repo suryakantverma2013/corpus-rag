@@ -1,0 +1,41 @@
+# Line endings, pinned only where a byte matters (T-719).
+#
+# Deliberately NOT `* text=auto`. This repository has files with both endings today and a
+# blanket normalisation would rewrite hundreds of them in one commit, which is a change with
+# a large blast radius and no benefit to most of them. What follows is the set where a CR is
+# not cosmetic — either something parses the file at runtime, or something hashes it.
+#
+# The trigger was NFR-SEC-11: the Content-Security-Policy pins a sha256 of the pre-paint
+# theme script inside `frontend/index.html` (R-58(1)). That hash is over the exact bytes
+# between `<script>` and `</script>`, so a checkout that turned those newlines into CRLF
+# would change it, the browser would refuse to run the script, and a user with a stored
+# `light` preference would get a dark flash on every cold load — with nothing in any log.
+# `core.autocrlf=true` is set on at least one development machine, so this is reachable
+# rather than theoretical.
+#
+# The shell scripts and the clamd/nginx configuration are the same class of problem one
+# layer down, and were already known to bite: a CR reaches `clamd.conf` and clamd blames
+# line 1 for a stray carriage return anywhere in the file, and a CR in a `.sh` entrypoint
+# makes a Linux container fail with the uninformative `bad interpreter: no such file`.
+#
+# Blast radius, measured rather than assumed (`git ls-files --eol`): 14 tracked files match
+# these rules, the index already stores every one of them as LF, and `git add --renormalize`
+# stages no content change. Two working-tree copies had drifted to CRLF under autocrlf
+# (`deployment/docker-compose.yml`, `deployment/ocr/Dockerfile`) and normalise on the next
+# checkout. So this file changes nothing that is committed today; it stops a future clone
+# from differing.
+
+# Hashed by the CSP, and parsed by a browser.
+*.html      text eol=lf
+
+# Executed by a shell inside a Linux container.
+*.sh        text eol=lf
+
+# Parsed by servers that are unforgiving about a stray CR.
+*.conf      text eol=lf
+*.inc       text eol=lf
+
+# Read by Docker and by compose, in Linux containers.
+Dockerfile  text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf

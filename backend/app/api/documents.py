@@ -27,6 +27,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Path,
     Query,
     Request,
     Response,
@@ -92,6 +93,7 @@ from app.services.documents import (
     QuotaExceededError,
     UploadScope,
 )
+from app.services.figures import FIGURE_MEDIA_TYPE, FigureNotFoundError, load_figure
 from app.services.jobs import JobQueueDep
 from app.services.object_storage import ObjectStorageDep, ObjectStorageError, ObjectTooLargeError
 
@@ -114,6 +116,10 @@ _NO_CONVERSATION = "A conversation_id is required for chat-scope uploads."
 _CONVERSATION_NOT_FOUND = "Conversation not found."
 _STORAGE_DOWN = "Storage service unavailable — please try again."
 _DOCUMENT_NOT_FOUND = "Document not found."
+#: One string for every refusal the figure route can make (NFR-SEC-02): a wrong id, a foreign
+#: document, a deleted one, one mid-replace and a missing object are indistinguishable from
+#: outside, or the route becomes a probe for which documents exist and who owns them.
+_FIGURE_NOT_FOUND = "Figure not found."  # TBD(§8.4) copy
 _TOO_MANY_STREAMS = "Too many open document streams — close one and try again."  # TBD(§8.4) copy
 _NOT_RETRYABLE = "Only a failed document can be retried."  # TBD(§8.4) copy
 _NOT_REPLACEABLE = "Only an active or failed document can be replaced."  # TBD(§8.4) copy
@@ -900,6 +906,76 @@ async def get_document(
     if listing is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, _DOCUMENT_NOT_FOUND)
     return _to_response(listing)
+
+
+#: One year, and the URL is content-addressed so it is honest: a re-ingestion producing the same
+#: crop produces the same id (R-94(5)), and one producing a different crop produces a different
+#: URL. **`private` is not decoration** — the bytes are one user's document, and a shared proxy
+#: caching them under a URL that carries no principal is exactly the disclosure the route's
+#: authentication exists to prevent.
+_FIGURE_CACHE_CONTROL = "private, max-age=31536000, immutable"
+
+
+@router.get(
+    "/{document_id}/figures/{content_sha256}",
+    response_class=Response,
+    responses={
+        status.HTTP_200_OK: {
+            "content": {FIGURE_MEDIA_TYPE: {}},
+            "description": "The figure, inline.",
+        },
+        **error_responses((404, "No such figure for this caller.")),
+        **STORAGE_DOWN,
+    },
+    summary="Get one of a document's figures",
+)
+async def get_document_figure(
+    document_id: uuid.UUID,
+    content_sha256: Annotated[str, Path(pattern="^[0-9a-f]{64}$")],
+    user: CurrentUser,
+    session: DbSession,
+    storage: ObjectStorageDep,
+) -> Response:
+    """One figure this document declared, rendered inline (FR-CIT-07, NFR-SEC-10).
+
+    **Owner-only, with no administrator branch** — the one route under `/documents` that does
+    not widen under FR-USR-04, and deliberately so: its siblings disclose *management* (a
+    listing, a status, a job id) while this discloses **content**. `get_servable` carries the
+    argument and the whole predicate set; nothing is re-decided here.
+
+    **`inline`, with no filename.** NFR-SEC-10 forbids a download affordance, and a `filename=`
+    would both suggest one and hand out the uploaded file's name. `nosniff` is an assertion
+    rather than a hope: `render_figure` encodes PNG and nothing else, so the declared type is
+    a fact about our own renderer.
+
+    `content_sha256` is validated as 64 lower-case hex by the path itself, so a malformed id is
+    a `422` that never reaches a query. It discloses nothing — an id of the wrong shape cannot
+    name a figure that exists.
+    """
+    try:
+        figure = await load_figure(
+            session,
+            storage,
+            document_id=document_id,
+            content_sha256=content_sha256,
+            owner_id=user.id,
+        )
+    except FigureNotFoundError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, _FIGURE_NOT_FOUND) from None
+    except ObjectStorageError as exc:
+        # Storage being unreachable is not "no such figure": R-33's normative `503`, so a
+        # client learns to retry rather than to stop asking.
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+
+    return Response(
+        content=figure.png,
+        media_type=FIGURE_MEDIA_TYPE,
+        headers={
+            "Content-Disposition": "inline",
+            "Cache-Control": _FIGURE_CACHE_CONTROL,
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.post(

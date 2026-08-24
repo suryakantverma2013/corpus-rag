@@ -8,7 +8,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { CitationSegment, Segment } from '../api';
-import { flatten, parseMarkdown } from './markdown';
+import { citeIndices, flatten, parseMarkdown, renderMarkdown } from './markdown';
 import type { Block, Inline } from './markdown';
 
 function cite(doc = 'Q3.pdf'): CitationSegment {
@@ -262,5 +262,110 @@ describe('block constructs', () => {
   it('keeps a wrapped paragraph as one block', () => {
     const blocks = text([{ text: 'line one\nline two\n\nnext' }]);
     expect(blocks.map((b) => b.kind)).toEqual(['para', 'para']);
+  });
+});
+
+// ─── FR-CIT-07: which block a figure belongs beneath (T-716) ──────────────────
+
+describe('citeIndices', () => {
+  it('finds a chip in a paragraph, a heading and a list item', () => {
+    const blocks = parse([
+      { text: '### Title ' },
+      cite(),
+      { text: '\n\npara ' },
+      cite(),
+      { text: '\n\n- item ' },
+      cite(),
+    ]);
+
+    expect(blocks.map(citeIndices)).toEqual([[0], [1], [2]]);
+  });
+
+  it('finds a chip nested inside emphasis and a link', () => {
+    // The walk has to recurse: a chip inside `**bold**` is two levels down, and missing it
+    // would put its figure beneath the wrong block rather than failing loudly.
+    const blocks = parse([{ text: '**bold ' }, cite(), { text: '** tail' }]);
+
+    expect(blocks.map(citeIndices)).toEqual([[0]]);
+  });
+
+  it('finds the chips of a table and of a nested list', () => {
+    const table = parse([{ text: '| a |\n| - |\n| x ' }, cite(), { text: ' |' }]);
+    expect(table.flatMap(citeIndices)).toEqual([0]);
+
+    const nested = parse([{ text: '- outer\n  - inner ' }, cite()]);
+    expect(nested.flatMap(citeIndices)).toEqual([0]);
+  });
+
+  it('finds the chips of a synthesised `cites` block', () => {
+    // `placeOrphans` moves a chip a code block or table cannot hold into its own block; its
+    // figure belongs beneath that, which only works if the walk looks there too.
+    const blocks = parse([{ text: '```\ncode\n```\n\n' }, cite()]);
+    const cites = blocks.filter((b) => b.kind === 'cites');
+
+    expect(cites).toHaveLength(1);
+    expect(cites.flatMap(citeIndices)).toEqual([0]);
+  });
+
+  it('reports a code block as citing nothing', () => {
+    expect(parse([{ text: '```\ncode\n```' }]).map(citeIndices)).toEqual([[]]);
+  });
+});
+
+describe('renderBlockFigures', () => {
+  const classes = {
+    paragraph: 'p',
+    heading: 'h',
+    list: 'l',
+    listItem: 'li',
+    code: 'c',
+    pre: 'pre',
+    tableWrap: 'tw',
+    table: 't',
+    link: 'a',
+    alignLeft: 'al',
+    alignCenter: 'ac',
+    alignRight: 'ar',
+  };
+
+  it('is asked once per block, with that block’s own indices', () => {
+    const asked: number[][] = [];
+    renderMarkdown([{ text: 'one ' }, cite(), { text: '\n\ntwo ' }, cite()], {
+      classes,
+      renderCitation: () => null,
+      renderBlockFigures: (indices) => {
+        asked.push([...indices]);
+        return null;
+      },
+    });
+
+    // FR-CIT-07 is "beneath the citing passage", so each block is asked about its own chips —
+    // not about every chip in the answer.
+    expect(asked).toEqual([[0], [1]]);
+  });
+
+  it('inserts what it returns immediately after that block', () => {
+    const nodes = renderMarkdown([{ text: 'one ' }, cite(), { text: '\n\ntwo' }], {
+      classes,
+      renderCitation: () => null,
+      renderBlockFigures: (indices) => (indices.length > 0 ? 'FIG' : null),
+    });
+
+    // Three nodes: the citing paragraph, its figure, then the paragraph that cites nothing.
+    expect(nodes).toHaveLength(3);
+    expect(nodes[1]).toMatchObject({ props: { children: 'FIG' } });
+  });
+
+  it('changes nothing at all when it is absent or returns null', () => {
+    const segs: Segment[] = [{ text: 'one ' }, cite(), { text: '\n\ntwo' }];
+    const base = renderMarkdown(segs, { classes, renderCitation: () => null });
+    const withHook = renderMarkdown(segs, {
+      classes,
+      renderCitation: () => null,
+      renderBlockFigures: () => null,
+    });
+
+    // The FR-CIT-07 promise that an answer with no figures renders exactly as it did before.
+    expect(withHook).toHaveLength(base.length);
   });
 });

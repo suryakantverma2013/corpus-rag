@@ -312,6 +312,27 @@ class ParserSettings(BaseSettings):
     # nobody can falsify, and this one decides what a user is shown as the document's own words.
     figure_caption_max_distance_points: float = Field(default=40.0)  # TBD(§8.4)
 
+    # --- the whole-document bounds (T-714) ------------------------------------------------
+    # `figure_max_per_page` bounds one page; nothing bounded a *document*, and the corpus that
+    # prompted the requirement is 1,421 pages at 2.25 regions a page — 3,000 rasters, none of
+    # which any limit refused. Both of these are limit objects the extraction loop consults
+    # itself rather than clocks imposed from outside, for `RecognitionBudget`'s reason:
+    # `asyncio.to_thread` cannot be cancelled, so a timeout wrapped around the pass returns
+    # control to the caller while the thread runs on.
+    #
+    # The ceiling is the deterministic bound and the clock is the backstop, in that order
+    # (R-88(11)'s shape): a count is a function of the document, a wall clock is a function of
+    # the box it ran on. Neither may fail the document — over either bound the pass stops and
+    # keeps the figures found so far, because FR-ING-09 fails open.
+    figure_max_per_document: int = Field(default=200)  # TBD(§8.4)
+    figure_budget_seconds: float = Field(default=300.0)  # TBD(§8.4)
+    # One region can be legitimately huge, and `figure_max_render_pixels` bounds the raw
+    # *samples* while saying nothing about the PNG they encode to — which is the thing that is
+    # stored and served. A figure over this is dropped, never truncated: half a picture is not
+    # a smaller picture. It is presentation data, so dropping one costs the picture and nothing
+    # else (R-94(4)).
+    figure_max_bytes: int = Field(default=8 * 1024 * 1024)  # TBD(§8.4)
+
     @model_validator(mode="after")
     def _coherent(self) -> ParserSettings:
         if not 72 <= self.ocr_dpi <= 600:
@@ -352,6 +373,15 @@ class ParserSettings(BaseSettings):
             raise ValueError("PARSER_FIGURE_MERGE_PADDING_POINTS must be >= 0")
         if self.figure_caption_max_distance_points < 0:
             raise ValueError("PARSER_FIGURE_CAPTION_MAX_DISTANCE_POINTS must be >= 0")
+        # Zero is not "unbounded" for either of the first two — it is FR-ING-09 switched off by
+        # a limit rather than by its own flag, which is the state `figures_enabled` exists to be
+        # the only expression of.
+        if self.figure_max_per_document < 1:
+            raise ValueError("PARSER_FIGURE_MAX_PER_DOCUMENT must be >= 1")
+        if self.figure_budget_seconds <= 0:
+            raise ValueError("PARSER_FIGURE_BUDGET_SECONDS must be > 0")
+        if self.figure_max_bytes < 1:
+            raise ValueError("PARSER_FIGURE_MAX_BYTES must be >= 1")
         return self
 
 
@@ -1835,6 +1865,31 @@ class Settings(BaseSettings):
                     f"({self.worker.job_timeout_seconds:,.0f}) — recognition is bounded by a "
                     "budget plus one in-flight page, and a worst case past the job timeout "
                     "renders a healthy long ingestion as stalled (R-88(11), R-41(5))."
+                )
+        # The same argument for FR-ING-09 (T-714), and the sum is what matters rather than
+        # either term: extraction runs in the *same job* as recognition, after the swap, so a
+        # document that recognises for its whole OCR budget and then extracts for its whole
+        # figure budget spends both before arq's timer. Checking the figure budget alone would
+        # admit exactly the configuration this exists to refuse.
+        #
+        # No per-call timeout to add on this side — rendering is in-process PyMuPDF, bounded by
+        # `figure_max_render_pixels` rather than by a socket — so the term is the budget
+        # itself, checked between figures for the reason above.
+        if self.parser.figures_enabled:
+            ocr_share = (
+                self.parser.ocr_budget_seconds + self.ocr.timeout_seconds
+                if self.parser.ocr_enabled
+                else 0.0
+            )
+            worst_case = ocr_share + self.parser.figure_budget_seconds
+            if worst_case > self.worker.job_timeout_seconds:
+                raise ValueError(
+                    f"PARSER_FIGURE_BUDGET_SECONDS ({self.parser.figure_budget_seconds:,.0f})"
+                    f" + the recognition worst case ({ocr_share:,.0f}) = {worst_case:,.0f}s "
+                    "must be <= WORKER_JOB_TIMEOUT_SECONDS "
+                    f"({self.worker.job_timeout_seconds:,.0f}) — both run inside one ingestion "
+                    "job, and a worst case past the job timeout renders a healthy long "
+                    "ingestion as stalled (R-94(7), R-88(11), R-41(5))."
                 )
         return self
 

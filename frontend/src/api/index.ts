@@ -18,6 +18,7 @@ type Schemas = components['schemas'];
 export type Message = Schemas['MessageResponse'];
 export type Segment = Schemas['Segment'];
 export type CitationSegment = Schemas['CitationSegment'];
+export type CitationFigure = Schemas['CitationFigure'];
 export type TextSegment = Schemas['TextSegment'];
 export type CitationLocator = Schemas['CitationLocator'];
 export type Evaluation = Schemas['EvaluationResponse'];

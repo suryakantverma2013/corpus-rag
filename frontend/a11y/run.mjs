@@ -236,6 +236,25 @@ try {
       c.focus(); return true;`);
     if (chip === true && (await waitUntil(page, `document.querySelector('[role="tooltip"]')`))) {
       await probe(page, 'citation card (FR-CIT-03)', theme, '[role="tooltip"]');
+
+      // FR-CIT-07 (T-716). Scoped to the figure rather than the document, and probed only when
+      // one is present: figure extraction ships off, so a run against a corpus without figures
+      // has nothing to measure. `image-alt` is NOT in ACCEPTED_RULES, so a missing text
+      // alternative fails the run on its own — that is the guard, and it costs nothing.
+      const hasFigure = await page.evaluate(
+        `return document.querySelector('main figure img') !== null;`,
+      );
+      if (hasFigure) {
+        await probe(page, 'citation figure (FR-CIT-07)', theme, 'main figure');
+      } else {
+        r.context('citation figure (FR-CIT-07)', theme);
+        r.truthy(
+          'a figure is present to measure',
+          false,
+          'no <figure> in the transcript — enable PARSER_FIGURES_ENABLED and ingest a ' +
+            'figure-bearing PDF (frontend/fidelity/README.md)',
+        );
+      }
     } else {
       r.context('citation card (FR-CIT-03)', theme);
       r.truthy('a citation chip opens the card', false, 'no [role="tooltip"] appeared');

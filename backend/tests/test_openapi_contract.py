@@ -32,7 +32,7 @@ import pytest
 from app.api.errors import ContextWindowExceededDetail, NotLatestAnswerDetail
 from app.api.events import TurnOutcome, TurnStage
 from app.openapi import OPENAPI_PATH, render
-from app.rag.citations import CitationLocatorKind, CitationSegment, _citation
+from app.rag.citations import CitationFigure, CitationLocatorKind, CitationSegment, _citation
 from app.rag.errors import CONTEXT_WINDOW_EXCEEDED_CODE, NOT_LATEST_ANSWER_CODE
 from app.rag.retrieval import RetrievedChunk
 
@@ -295,9 +295,41 @@ def test_the_citation_model_covers_every_key_written() -> None:
 
     `_citation` builds the model, so this cannot actually drift — the test pins that fact, so a
     future refactor back to a dict literal fails here rather than in the browser.
+
+    `RESOLVED_AT_READ` is subtracted rather than the comparison being loosened: FR-CIT-07's
+    `figures` is resolved when the citation is *served* (`app/api/messages.py`) and deliberately
+    never persisted, so `_citation` does not write it. Subtracting a **named** set keeps this
+    failing for a field somebody genuinely forgot — which "allow missing keys" would not.
     """
     written = set(_citation(_hit(), score=0.5))
-    assert written == set(CitationSegment.model_fields)
+    assert written == set(CitationSegment.model_fields) - CitationSegment.RESOLVED_AT_READ
+
+
+def test_every_read_resolved_field_exists_and_is_unwritten() -> None:
+    """`RESOLVED_AT_READ` is a claim about `_citation`, so check it against `_citation`.
+
+    Without this the escape hatch above could be widened to cover a field the writer *does*
+    populate, or to name one that no longer exists, and the guard it weakens would still pass.
+    """
+    fields = set(CitationSegment.model_fields)
+    assert CitationSegment.RESOLVED_AT_READ <= fields
+    assert not CitationSegment.RESOLVED_AT_READ & set(_citation(_hit(), score=0.5))
+
+
+def test_the_figures_key_is_absent_rather_than_empty() -> None:
+    """FR-CIT-07: "a citation with no figure renders exactly as it does today".
+
+    Byte-for-byte on the wire, not merely to the eye — and it is what keeps `"figures": []` out
+    of every `messages.citations` row ever written, for a key the writer never populates.
+    """
+    segment = CitationSegment(doc="handbook.pdf", quote="the passage", chunkId="c")
+    assert "figures" not in segment.model_dump(mode="json")
+
+    figure = CitationFigure(
+        documentId=str(uuid.uuid4()), contentSha256="a" * 64, widthPx=320, heightPx=240
+    )
+    resolved = segment.model_copy(update={"figures": [figure]})
+    assert resolved.model_dump(mode="json")["figures"][0]["widthPx"] == 320
 
 
 def test_the_score_key_is_absent_rather_than_null() -> None:

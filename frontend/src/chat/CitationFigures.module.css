@@ -1,0 +1,49 @@
+/* FR-CIT-07 — spec-authored (T-716, R-94).
+
+   The prototype has no markup for this at all: R-94 is Rev 0.61 and the handoff predates it, so
+   there is nothing to transcribe per property. It is built from the surfaces around it instead —
+   the FR-CIT-03 card's panel/line/radius vocabulary and the FR-MSG-04 body's rhythm — so it
+   introduces no new visual language and no new colour pair (NFR-A11Y-06 forbids one below the
+   thresholds). Same reading as FR-KBM-10's picker, which was spec-authored for the same reason. */
+
+.strip {
+  /* The figures of one block. A column rather than a row: a page figure is wide, and two side by
+     side inside the 68% content column would each be too small to read. */
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.figure {
+  /* `<figure>` carries a UA margin; the strip owns the spacing. */
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pop);
+  background: var(--panel);
+  padding: 10px;
+  /* The image is the document's, so its own aspect ratio governs; the box never stretches it. */
+  align-self: flex-start;
+  max-width: 100%;
+}
+
+.image {
+  display: block;
+  /* Never wider than the content column, and never upscaled past its own resolution: a 320px
+     crop blown up to 640 is a blurred claim about what the page shows. */
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  /* `aspect-ratio` is supplied inline from the figure's recorded dimensions, so the box is
+     reserved before the blob arrives and the transcript does not shift under the reader. */
+}
+
+.caption {
+  margin-top: 8px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  /* `--muted`, not `--muted2`: NFR-A11Y-06 records `--muted2` as failing contrast as text on
+     every surface in both themes, and this caption is the non-colour carrier of *whose* figure
+     this is — the one thing FR-CIT-07 requires it to say. */
+  color: var(--muted);
+}

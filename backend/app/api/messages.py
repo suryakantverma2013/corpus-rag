@@ -26,7 +26,7 @@ citation and the user's.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated, Literal
@@ -47,10 +47,18 @@ from app.api.events import SseFrame, TurnOutcome, TurnStage
 from app.auth.dependencies import CurrentUser, DbSession, SettingsDep, StreamSessionmaker
 from app.db.enums import Feedback, MessageRole
 from app.db.models.conversation import Conversation
+from app.db.models.document_figure import DocumentFigure
 from app.db.models.message import Message
 from app.db.repositories.conversations import ConversationRepository
+from app.db.repositories.figures import DocumentFigureRepository
 from app.db.repositories.messages import MessageRepository
-from app.rag.citations import Segment, TextSegment, envelope_segments
+from app.rag.citations import (
+    CitationFigure,
+    CitationSegment,
+    Segment,
+    TextSegment,
+    envelope_segments,
+)
 from app.rag.errors import (
     CONTEXT_WINDOW_EXCEEDED,
     CONTEXT_WINDOW_EXCEEDED_CODE,
@@ -184,11 +192,117 @@ class MessageResponse(BaseModel):
     created_at: datetime
 
 
-def _to_response(message: Message) -> MessageResponse:
+#: Cited chunk -> the figures on the page it cites. Empty for every caller that has nothing to
+#: resolve, which is the ordinary case and costs no query.
+type FigureIndex = dict[uuid.UUID, list[DocumentFigure]]
+
+_NO_FIGURES: FigureIndex = {}
+
+
+def _cited_pages(segments: Sequence[Segment]) -> dict[uuid.UUID, int]:
+    """`{chunk_id: page}` for every citation whose locator names a page (FR-CIT-07).
+
+    Only `page` locators, and this is the whole of R-94(3)'s "selected by locator": a `section`
+    or `rows` locator carries no page, so a DOCX, Markdown or CSV citation resolves nothing.
+    Reading `section_index` as a page number is the failure this guard exists to prevent — it
+    is an ordinal in a different space that would join happily and render another document's
+    picture under someone's answer.
+
+    A `chunkId` this build cannot parse is skipped rather than raised on, matching
+    `envelope_segments`' rule that a legacy row degrades instead of costing the transcript.
+    """
+    pages: dict[uuid.UUID, int] = {}
+    for segment in segments:
+        if not isinstance(segment, CitationSegment):
+            continue
+        locator = segment.locator
+        if locator is None or locator.kind != "page" or locator.page is None:
+            continue
+        try:
+            pages[uuid.UUID(segment.chunkId)] = locator.page
+        except ValueError:
+            continue
+    return pages
+
+
+async def _resolve_figures(
+    session: AsyncSession, segment_lists: Iterable[Sequence[Segment]], *, owner_id: uuid.UUID
+) -> FigureIndex:
+    """The FR-CIT-07 lookup for a whole response, in one query (R-94(3)).
+
+    Takes every message's segments at once so a transcript costs **one** query rather than one
+    per message — asserted by `test_a_transcript_issues_one_figure_query`, because "batched" is
+    an intention until something counts the statements.
+
+    Returns an empty index without touching the database when no citation names a page, which
+    is free for a corpus of DOCX, Markdown or CSV, and for any deployment that never enabled
+    extraction.
+    """
+    pages: dict[uuid.UUID, int] = {}
+    for segments in segment_lists:
+        pages.update(_cited_pages(segments))
+    if not pages:
+        return _NO_FIGURES
+    return await DocumentFigureRepository(session).list_for_citations(pages, owner_id=owner_id)
+
+
+def _figures(segment: CitationSegment, figures: FigureIndex) -> list[CitationFigure]:
+    """The published shape of one citation's figures, or `[]`."""
+    try:
+        chunk_id = uuid.UUID(segment.chunkId)
+    except ValueError:
+        return []
+    return [
+        CitationFigure(
+            documentId=str(figure.document_id),
+            contentSha256=figure.content_sha256,
+            # `''` is the column's "no caption" (NOT NULL with a default); the wire says `None`
+            # so FR-CIT-07's "its caption where it has one" is one check on both sides.
+            caption=figure.caption or None,
+            widthPx=figure.width_px,
+            heightPx=figure.height_px,
+        )
+        for figure in figures.get(chunk_id, ())
+    ]
+
+
+def _with_figures(segments: Sequence[Segment], figures: FigureIndex) -> list[Segment]:
+    """Attach FR-CIT-07 figures to the citation segments that have any.
+
+    `model_copy` rather than mutation: the segments come out of `envelope_segments`, and a
+    citation with no figures must be returned **unchanged**, so that FR-CIT-07's "renders
+    exactly as it does today" is a property of the object and not of a serializer that happens
+    to drop an empty list.
+    """
+    if not figures:
+        return list(segments)
+    out: list[Segment] = []
+    for segment in segments:
+        if isinstance(segment, CitationSegment):
+            resolved = _figures(segment, figures)
+            if resolved:
+                out.append(segment.model_copy(update={"figures": resolved}))
+                continue
+        out.append(segment)
+    return out
+
+
+def _to_response(
+    message: Message, segs: Sequence[Segment], figures: FigureIndex
+) -> MessageResponse:
+    """One message, with its FR-CIT-07 figures already resolved.
+
+    Both trailing parameters are **required**, and that is the point. Four route surfaces reach
+    this shape through three call sites (the transcript, the SSE `message` frame on send *and*
+    regenerate, and the FR-MSG-08 feedback response), and a figure that appeared on one of them
+    and not another would be a defect nobody sees until a user rates an answer and watches its
+    pictures vanish. A required parameter makes a fifth surface say what it wants; an optional
+    one lets it forget.
+    """
     return MessageResponse(
         id=message.id,
         role=message.role,
-        segs=envelope_segments(message.citations, content=message.content),
+        segs=_with_figures(segs, figures),
         evaluation=_evaluation(message.evaluation),
         feedback=message.feedback,
         model_name=message.model_name,
@@ -197,6 +311,29 @@ def _to_response(message: Message) -> MessageResponse:
         latency_ms=message.latency_ms,
         created_at=message.created_at,
     )
+
+
+async def _responses(
+    session: AsyncSession, messages: Sequence[Message], *, owner_id: uuid.UUID
+) -> list[MessageResponse]:
+    """A transcript, with FR-CIT-07 resolved once for the whole of it.
+
+    Two phases on purpose: read every message's segments first, then resolve every citation's
+    figures in one query. Resolving inside the loop would be N queries for an N-message chat,
+    and it is the shape a later refactor drifts back into, so a statement counter pins it.
+    """
+    segs = [envelope_segments(m.citations, content=m.content) for m in messages]
+    figures = await _resolve_figures(session, segs, owner_id=owner_id)
+    return [
+        _to_response(message, seg, figures) for message, seg in zip(messages, segs, strict=True)
+    ]
+
+
+async def _response(
+    session: AsyncSession, message: Message, *, owner_id: uuid.UUID
+) -> MessageResponse:
+    """One message, through the same resolution as a transcript."""
+    return (await _responses(session, [message], owner_id=owner_id))[0]
 
 
 # --- the chat stream's frames (T-405, R-57) -------------------------------------------
@@ -464,7 +601,7 @@ async def list_messages(
     """
     await _owned_or_404(session, conversation_id, user.id)
     messages = await MessageRepository(session).list_by_conversation(conversation_id)
-    return [_to_response(message) for message in messages]
+    return await _responses(session, messages, owner_id=user.id)
 
 
 @router.post(
@@ -533,7 +670,9 @@ async def send_message(
                 yield ChatStageFrame(data=StageData(stage=stage)).to_event()
             case MessageEvent():
                 served = event.message
-                yield ChatMessageFrame(data=_message_data(event)).to_event()
+                yield ChatMessageFrame(
+                    data=await _message_data(event, sessionmaker=sessionmaker, owner_id=user.id)
+                ).to_event()
 
     if served is not None and result.outcome == "answered":
         # After the row committed (`finalize` did that) and after the user was served.
@@ -544,7 +683,13 @@ async def send_message(
     yield ChatDoneFrame(data=DoneData(outcome=result.outcome)).to_event()
 
 
-def _message_data(event: MessageEvent, *, fallback_id: uuid.UUID | None = None) -> MessageFrameData:
+async def _message_data(
+    event: MessageEvent,
+    *,
+    sessionmaker: StreamSessionmaker,
+    owner_id: uuid.UUID,
+    fallback_id: uuid.UUID | None = None,
+) -> MessageFrameData:
     """The `message` frame.
 
     An outcome that was served but not stored — an FR-ORC-05 failure, or an FR-ORC-02 denial —
@@ -557,10 +702,21 @@ def _message_data(event: MessageEvent, *, fallback_id: uuid.UUID | None = None) 
     leave it unable to say which answer the error belongs to; carrying the target's id lets it
     re-render the **surviving** answer non-destructively. The event *sequence* is identical,
     which is what "the same shape as a send" means.
+
+    **Async, and it opens its own session, because of FR-CIT-07.** Neither streaming handler
+    carries a `DbSession` — deliberately, T-210: a stream that held a request-scoped session
+    would pin a pool slot for the length of a turn. It takes the handler's sessionmaker and
+    opens a short one for the figure lookup, which is `_persist_turn`'s own pattern. The
+    alternative — leaving this frame without figures — is the split R-94 would be discovered
+    by: an answer with no pictures until the user reloads.
+
+    The degraded branch opens nothing. `DegradedMessage.segs` is `list[TextSegment]`, so there
+    is no citation to resolve and no query to make.
     """
     message: MessageResponse | DegradedMessage
     if event.message is not None:
-        message = _to_response(event.message)
+        async with sessionmaker() as session:
+            message = await _response(session, event.message, owner_id=owner_id)
     else:
         message = DegradedMessage(id=fallback_id, segs=[TextSegment(text=event.text)])
     return MessageFrameData(outcome=event.outcome, error_code=event.error_code, message=message)
@@ -654,7 +810,14 @@ async def regenerate_message(
                 yield ChatStageFrame(data=StageData(stage=stage)).to_event()
             case MessageEvent():
                 served = event.message
-                yield ChatMessageFrame(data=_message_data(event, fallback_id=answer.id)).to_event()
+                yield ChatMessageFrame(
+                    data=await _message_data(
+                        event,
+                        sessionmaker=sessionmaker,
+                        owner_id=user.id,
+                        fallback_id=answer.id,
+                    )
+                ).to_event()
 
     if served is not None:
         chat_service.record_regeneration(
@@ -730,4 +893,4 @@ async def set_feedback(
         owner_id=user.id,
         feedback=body.feedback,
     )
-    return _to_response(message)
+    return await _response(session, message, owner_id=user.id)

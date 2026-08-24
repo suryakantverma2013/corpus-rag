@@ -220,7 +220,21 @@ def queue() -> RecordingQueue:
 
 
 @pytest.fixture
-def app(app, tmp_path, queue: RecordingQueue):  # noqa: ANN001, ANN201
+def object_store(tmp_path):  # noqa: ANN001, ANN201
+    """The bucket both the app and the seeded rows use.
+
+    Its own fixture rather than a local in `app`, because `owned` has to write a figure's
+    raster into the very store the route reads: a positive control that 404s because the
+    object is missing would report an authorization failure that is nothing of the kind —
+    the same argument `app` already makes below about `503`.
+    """
+    from app.services.object_storage import LocalFilesystemStorage
+
+    return LocalFilesystemStorage(tmp_path / "objects")
+
+
+@pytest.fixture
+def app(app, object_store, queue: RecordingQueue):  # noqa: ANN001, ANN201
     """The shared app with deterministic storage and a recording queue.
 
     Without these, a `replace` driven as an administrator reaches the configured object store
@@ -229,10 +243,9 @@ def app(app, tmp_path, queue: RecordingQueue):  # noqa: ANN001, ANN201
     the kind.
     """
     from app.services.jobs import get_job_queue
-    from app.services.object_storage import LocalFilesystemStorage, get_object_storage
+    from app.services.object_storage import get_object_storage
 
-    storage = LocalFilesystemStorage(tmp_path / "objects")
-    app.dependency_overrides[get_object_storage] = lambda: storage
+    app.dependency_overrides[get_object_storage] = lambda: object_store
     app.dependency_overrides[get_job_queue] = lambda: queue
     return app
 

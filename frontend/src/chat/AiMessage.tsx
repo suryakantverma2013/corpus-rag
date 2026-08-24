@@ -20,6 +20,7 @@
 import { useMemo } from 'react';
 import styles from './AiMessage.module.css';
 import { CitationChip } from './CitationChip';
+import { CitationFigures } from './CitationFigures';
 import { EvalChips } from './EvalChips';
 import { MessageActions } from './MessageActions';
 import { renderMarkdown } from './markdown';
@@ -78,6 +79,17 @@ export function AiMessage({ message, busy, onFeedback, onRegenerate }: AiMessage
         // Injected rather than imported, so `markdown.ts` depends on no component. The index
         // addresses `flatten`'s citation list, which is `citationsOf` in the same order.
         renderCitation: (index) => <CitationChip segment={citations[index]} />,
+        // FR-CIT-07 — the figures of the pages this block cites, beneath this block.
+        //
+        // Safe inside the memo, and that is worth stating because the memo is load-bearing:
+        // this closure reads only `citations`, which is already a dependency, so nothing about
+        // loading a figure can invalidate it. All the fetch state lives inside
+        // `CitationFigures`, which is why a thumb can be clicked mid-load without remounting
+        // every chip and closing the hover card the user is reading.
+        renderBlockFigures: (indices) =>
+          indices.length === 0 ? null : (
+            <CitationFigures citations={indices.map((index) => citations[index])} />
+          ),
       }),
     [message.segs, citations],
   );

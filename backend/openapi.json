@@ -2142,6 +2142,101 @@
         }
       }
     },
+    "/api/v1/documents/{document_id}/figures/{content_sha256}": {
+      "get": {
+        "tags": [
+          "documents"
+        ],
+        "summary": "Get one of a document's figures",
+        "description": "One figure this document declared, rendered inline (FR-CIT-07, NFR-SEC-10).\n\n**Owner-only, with no administrator branch** — the one route under `/documents` that does\nnot widen under FR-USR-04, and deliberately so: its siblings disclose *management* (a\nlisting, a status, a job id) while this discloses **content**. `get_servable` carries the\nargument and the whole predicate set; nothing is re-decided here.\n\n**`inline`, with no filename.** NFR-SEC-10 forbids a download affordance, and a `filename=`\nwould both suggest one and hand out the uploaded file's name. `nosniff` is an assertion\nrather than a hope: `render_figure` encodes PNG and nothing else, so the declared type is\na fact about our own renderer.\n\n`content_sha256` is validated as 64 lower-case hex by the path itself, so a malformed id is\na `422` that never reaches a query. It discloses nothing — an id of the wrong shape cannot\nname a figure that exists.",
+        "operationId": "get_document_figure",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Document Id"
+            }
+          },
+          {
+            "name": "content_sha256",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Content Sha256"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The figure, inline.",
+            "content": {
+              "image/png": {}
+            }
+          },
+          "404": {
+            "description": "No such figure for this caller.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Object storage is unreachable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/documents/{document_id}/replace": {
       "post": {
         "tags": [
@@ -3801,6 +3896,46 @@
         "title": "CheckResult",
         "description": "Outcome of a single dependency probe."
       },
+      "CitationFigure": {
+        "properties": {
+          "documentId": {
+            "type": "string",
+            "title": "Documentid"
+          },
+          "contentSha256": {
+            "type": "string",
+            "title": "Contentsha256"
+          },
+          "caption": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Caption"
+          },
+          "widthPx": {
+            "type": "integer",
+            "title": "Widthpx"
+          },
+          "heightPx": {
+            "type": "integer",
+            "title": "Heightpx"
+          }
+        },
+        "type": "object",
+        "required": [
+          "documentId",
+          "contentSha256",
+          "widthPx",
+          "heightPx"
+        ],
+        "title": "CitationFigure",
+        "description": "One figure printed on the page a citation names (FR-CIT-07, R-94).\n\n**Resolved at read time and never persisted** — see :attr:`CitationSegment.RESOLVED_AT_READ`\nand `DocumentFigureRepository.list_for_citations`, which holds the reasoning. `_citation`\ndoes not write this, so a stored `messages.citations` row never carries it.\n\nDeliberately **not** carrying a `url`. The client must reach the T-715 route through the\ngenerated `paths` to inherit the session middleware's token freshening and 401 handling,\nand that needs path *parameters*; a URL assembled here would be a second copy of the route\ntemplate in a place `schema.d.ts` cannot check.\n\nNor a `doc` or a `page`: both are already on the enclosing segment, and the figure is\nselected *by* that locator's page, so a second copy could only drift from the thing that\nchose it.\n\n`widthPx`/`heightPx` are what let the client reserve the box before the image arrives. They\nare the figure's own recorded dimensions (T-714), not a layout hint."
+      },
       "CitationLocator": {
         "properties": {
           "kind": {
@@ -3969,6 +4104,14 @@
             ],
             "title": "Score",
             "description": "The FR-CIT-04 rerank score. **Absent** — not null — when the reranker failed open and published none (R-47(2)). Render the card with no number."
+          },
+          "figures": {
+            "items": {
+              "$ref": "#/components/schemas/CitationFigure"
+            },
+            "type": "array",
+            "title": "Figures",
+            "description": "The FR-CIT-07 figures printed on the page this citation's locator names, in the document's own order. **Absent** — not null, not `[]` — when there are none, which is the ordinary case: figure extraction ships off, only PDFs have pages, and a page need not carry a figure. Resolved when the citation is served and never persisted, so a stored row never carries this key. Selected by the locator and never by the model (R-94(3)): a figure points at the cited page, and is not a claim that it supports the sentence."
           }
         },
         "type": "object",
@@ -3978,7 +4121,7 @@
           "chunkId"
         ],
         "title": "CitationSegment",
-        "description": "A citation run — the FR-CIT-01 chip and the FR-CIT-03 hover card.\n\nSee :func:`_citation` for what each field carries and why `page` holds a label rather than a\nnumber."
+        "description": "A citation run — the FR-CIT-01 chip, the FR-CIT-03 hover card and the FR-CIT-07 figure.\n\nSee :func:`_citation` for what each field carries and why `page` holds a label rather than a\nnumber."
       },
       "CloudLinkRequiredDetail": {
         "properties": {

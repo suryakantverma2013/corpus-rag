@@ -231,6 +231,33 @@ If you must run a non-localhost origin over plain HTTP for a local trial, set
 `CHECKPOINTER_BACKEND=postgres` is set explicitly anyway — so you are consciously stepping around
 two guards, not silently weakening the rest. Do not do it in production.
 
+### Security headers, and the one you have to add yourself
+
+The edge sends a `Content-Security-Policy` and three supporting headers on the SPA's own responses
+(`deployment/nginx/security.inc`, NFR-SEC-11 — `docs/SECURITY.md` §6a explains each directive).
+Those need nothing from you.
+
+**`Strict-Transport-Security` is deliberately not among them.** It is the one browser security
+header that depends on TLS, TLS terminates outside this stack, and a plain-HTTP listener sending
+HSTS makes a promise it cannot keep — so **set it wherever you terminate TLS**, not here:
+
+```nginx
+add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+```
+
+Add it only once you are actually serving HTTPS on that hostname. A browser that receives it will
+refuse plain HTTP to the origin for the whole `max-age`, and there is no way to retract that from
+the server side — which is exactly why it is not sent from a container that listens on port 8080.
+
+Two edits to make if you change the front end of the deployment:
+
+- If you put your own reverse proxy in front of this one, make sure it does not **add a second**
+  `Content-Security-Policy`. A browser given two enforces both, and the intersection is rarely what
+  either author intended. The same reasoning is why this edge does not apply its policy to
+  `/auth/`, where Keycloak sends its own.
+- If you serve the GUI from somewhere other than this nginx, the policy does not travel with it.
+  It lives in the image, not in the application.
+
 ## 8. Encryption at rest
 
 **This deployment does not encrypt data at rest, and it cannot.** PostgreSQL has no in-core

@@ -7,6 +7,7 @@ from app.db.repositories.base import BaseRepository
 from app.db.repositories.chunks import DocumentChunkRepository
 from app.db.repositories.conversations import ConversationRepository
 from app.db.repositories.documents import DocumentListing, DocumentRepository
+from app.db.repositories.figures import DocumentFigureRepository
 from app.db.repositories.jobs import KnowledgeJobRepository
 from app.db.repositories.knowledge_bases import KnowledgeBaseRepository
 from app.db.repositories.messages import MessageRepository
@@ -19,6 +20,7 @@ __all__ = [
     "BaseRepository",
     "ConversationRepository",
     "DocumentChunkRepository",
+    "DocumentFigureRepository",
     "DocumentListing",
     "DocumentRepository",
     "KnowledgeBaseRepository",

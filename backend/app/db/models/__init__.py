@@ -12,6 +12,7 @@ from app.db.models.audit_log import AuditLog
 from app.db.models.conversation import Conversation
 from app.db.models.document import Document
 from app.db.models.document_chunk import DocumentChunk
+from app.db.models.document_figure import DocumentFigure
 from app.db.models.knowledge_base import KnowledgeBase
 from app.db.models.knowledge_job import KnowledgeJob
 from app.db.models.message import Message
@@ -26,6 +27,7 @@ __all__ = [
     "Conversation",
     "Document",
     "DocumentChunk",
+    "DocumentFigure",
     "KnowledgeBase",
     "KnowledgeJob",
     "Message",

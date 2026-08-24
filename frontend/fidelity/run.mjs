@@ -44,6 +44,7 @@ import {
 import {
   checkActionBar,
   checkCitationCard,
+  checkCitationFigure,
   checkEvalHues,
   checkMentionMenu,
   checkUserMenu,
@@ -97,6 +98,7 @@ try {
 
     await checkMentionMenu(page, r, theme);
     await checkCitationCard(page, r, theme);
+    await checkCitationFigure(page, r, theme);
     await checkActionBar(page, r, theme);
     await checkEvalHues(page, r, theme);
     await checkUserMenu(page, r, theme);

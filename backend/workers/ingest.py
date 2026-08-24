@@ -50,11 +50,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import Settings, get_settings
 from app.db.enums import DocumentStatus, JobStatus, JobType
 from app.db.models.document import Document
+from app.db.models.document_figure import DocumentFigure
 from app.db.models.knowledge_job import KnowledgeJob
 from app.db.repositories.documents import DocumentRepository
+from app.db.repositories.figures import DocumentFigureRepository
 from app.db.repositories.jobs import DOCUMENT_DELETED, KnowledgeJobRepository
 from app.db.session import get_sessionmaker
 from app.ingestion.chunker import chunk_document
+from app.ingestion.figures import ExtractedFigure, extract_figures
 from app.ingestion.incremental import persist_chunk_set, plan_chunk_set
 from app.ingestion.parsers import parse_document
 from app.ingestion.scanner import Scanner, ScanResult, build_scanner
@@ -65,6 +68,7 @@ from app.services.object_storage import (
     ObjectNotFoundError,
     ObjectStorage,
     ObjectStorageError,
+    artifact_key,
     document_version_prefix,
     get_object_storage,
 )
@@ -435,6 +439,24 @@ async def _run(
     # failing to commit would destroy the original of the version that is still answering
     # questions, from which nothing can rebuild.
     #
+    # FR-ING-09 (T-714). **After the swap, before the purge, and it can never fail the job.**
+    #
+    # After the swap for two reasons. A figure is presentation data (R-94(4)), so nothing about
+    # one may delay a document reaching `ACTIVE`; and the writes are storage `put`s, which
+    # cannot go inside the swap at all — R-36(4)'s justification for moving the collect step
+    # *into* that transaction rests on it holding no network I/O.
+    #
+    # Before the purge so the ordering matches the rest of this function: the old version's
+    # figure rows are replaced while its objects still exist, rather than after they are gone.
+    await _store_figures(
+        session,
+        deps=deps,
+        context=context,
+        payload=payload,
+        target_version=target_version,
+        logger=logger,
+    )
+
     # Outside the transaction by construction: R-36(4)'s justification for moving the
     # collect step *inside* the swap rests on that transaction holding no network I/O.
     await _purge_superseded_versions(
@@ -590,6 +612,105 @@ async def _fail(
         job, status, error_code=code, error_message=message
     )
     await session.commit()
+
+
+async def _store_figures(
+    session: AsyncSession,
+    *,
+    deps: _Deps,
+    context: _DocumentContext,
+    payload: bytes,
+    target_version: int,
+    logger: Any,
+) -> None:
+    """Extract, store and record this version's figures (FR-ING-09, R-94(5)). Never raises.
+
+    **The collect runs whether or not anything was extracted, and that is the load-bearing
+    part.** `replace_for_version` with an empty list is not a no-op: it says *this document has
+    no figures*, which is exactly true when the feature is off, when the format has no pages,
+    and when a detector found nothing. Skipping it in those cases would leave the previous
+    version's rows behind, pointing at objects `_purge_superseded_versions` is about to delete —
+    the dangling URL R-94(5) names, arrived at by turning a feature off.
+
+    **Failure is silent by requirement, not by neglect.** FR-ING-09 fails open: the document is
+    already `ACTIVE` and answering, and a storage blip or a MuPDF fault must not turn a
+    successful ingestion into `Failed`. That is the same asymmetry R-88(9) settled for
+    recognition, one stage further along — extraction produces the text a document *is*, this
+    produces a picture beside it. The cost when it fires is one warning and no pictures.
+    """
+    figures: tuple[ExtractedFigure, ...] = ()
+    try:
+        # `deps.settings.parser`, never `get_settings()`: this task takes its configuration
+        # from the arq context (`_Deps.from_ctx`), and a module that reached past it would be
+        # unconfigurable from the one place the worker is configured.
+        figures = await extract_figures(
+            payload, filename=context.filename, limits=deps.settings.parser
+        )
+        rows = [
+            await _store_one_figure(
+                deps=deps, context=context, figure=figure, target_version=target_version
+            )
+            for figure in figures
+        ]
+        stored = await DocumentFigureRepository(session).replace_for_version(
+            context.document_id, document_version=target_version, figures=rows
+        )
+        await session.commit()
+    except Exception:  # noqa: BLE001 — R-94: never fail an ACTIVE document for a picture
+        await session.rollback()
+        logger.warning(
+            "ingest.figures_degraded",
+            version=target_version,
+            detected=len(figures),
+            exc_info=True,
+        )
+        return
+
+    if stored:
+        logger.info("ingest.figures_stored", version=target_version, figures=stored)
+
+
+async def _store_one_figure(
+    *,
+    deps: _Deps,
+    context: _DocumentContext,
+    figure: ExtractedFigure,
+    target_version: int,
+) -> DocumentFigure:
+    """Put one raster under the version prefix and build its row.
+
+    The key is the figure's **content hash**, not its ordinal, so two identical crops in one
+    version share one object and a re-ingestion that produces the same crop overwrites it with
+    the same bytes — which is what makes T-715's long cache lifetime honest (R-94(5)).
+
+    Under `artifacts/` and inside `document_version_prefix`, which is the whole of the object
+    half of R-36/R-39 parity: `delete_prefix` on `v{n}/` and on the document prefix already
+    remove these, and always did. Nothing new purges them because nothing new has to.
+    """
+    key = artifact_key(
+        tenant_id=context.tenant_id,
+        knowledge_base_id=context.knowledge_base_id,
+        document_id=context.document_id,
+        version=target_version,
+        name=f"figures/{figure.content_sha256}.png",
+    )
+    await deps.storage.put(key, figure.png, content_type="image/png")
+    return DocumentFigure(
+        document_id=context.document_id,
+        document_version=target_version,
+        page_number=figure.page_number,
+        figure_index=figure.index,
+        content_sha256=figure.content_sha256,
+        storage_uri=deps.storage.uri_for(key),
+        caption=figure.caption,
+        bbox_x0=figure.x0,
+        bbox_y0=figure.y0,
+        bbox_x1=figure.x1,
+        bbox_y1=figure.y1,
+        width_px=figure.width_px,
+        height_px=figure.height_px,
+        byte_size=figure.byte_size,
+    )
 
 
 async def _purge_superseded_versions(

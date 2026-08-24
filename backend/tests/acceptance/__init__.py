@@ -731,6 +731,13 @@ NFR_DISPOSITIONS: dict[str, NfrRow] = {
     # residual list is the one place a half-built requirement must be visible — the alternative
     # is a green manifest for a route that does not exist.
     "NFR-SEC-10": _open("R-94(6) specifies it; T-715 builds the route, T-713 detection only"),
+    # The policy is configuration rather than code, so the evidence is the guard that reads
+    # `deployment/nginx/` back — a header nothing checks is a header that drifts.
+    "NFR-SEC-11": _met(
+        "tests/test_security_headers.py — the policy is read from deployment/nginx/security.inc, "
+        "its script hash recomputed from frontend/index.html, and its application scoped to the "
+        "three SPA locations and away from Keycloak's own"
+    ),
     # 5.3 Capacity & performance
     "NFR-CAP-01": _met("§9 defaults pinned in tests/test_budget.py and tests/test_upload.py"),
     "NFR-PRF-01": _met("StatsPanel.test.tsx advances 999ms for no tick, then 1ms for one"),

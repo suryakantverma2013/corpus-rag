@@ -17,6 +17,7 @@ const SHEETS = [
   ['MessageActions', 'src/chat/MessageActions.module.css', 'src/chat/MessageActions.tsx'],
   ['CitationChip', 'src/chat/CitationChip.module.css', 'src/chat/CitationChip.tsx'],
   ['CitationCard', 'src/chat/CitationCard.module.css', 'src/chat/CitationCard.tsx'],
+  ['CitationFigures', 'src/chat/CitationFigures.module.css', 'src/chat/CitationFigures.tsx'],
 ] as const;
 
 describe.each(SHEETS)('%s stylesheet', (_name, cssPath, tsxPath) => {

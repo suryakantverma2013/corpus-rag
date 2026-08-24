@@ -304,6 +304,9 @@ keeps following `build.target`; setting one without the other lets the CSS and J
   that never runs in the app, and `npm run build` proves its output compiles under TS 6.
   Remove the flag once upstream widens the range.
 - No image assets or icon/UI libraries — text glyphs + CSS shapes only (NFR-CMP-03).
+  The one raster the GUI can display is **not an asset**: FR-CIT-07 renders a document's own
+  figure beneath a citation, fetched at runtime from the authenticated `/documents/{id}/figures/`
+  route (NFR-SEC-10). Nothing is tracked under `frontend/`, and no icon or chrome uses an image.
 - Tests: **vitest** + **jsdom** + **@testing-library/react** (T-501). `globals: false`, so import
   `describe`/`it`/`expect` explicitly and note that RTL's auto-cleanup is registered by hand in
   `src/test/setup.ts`. The config lives in `vite.config.ts` via `vitest/config` — one config file,

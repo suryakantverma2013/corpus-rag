@@ -6,8 +6,11 @@
  * with a truthy hashed string, so `styles.typo` would pass. Structure, roles, text and
  * `data-band` are the seams.
  */
-import { describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
+
+const figureGet = vi.fn();
+vi.mock('../api/client', () => ({ api: { GET: (...args: unknown[]) => figureGet(...args) } }));
 import { AiMessage } from './AiMessage';
 import { EVAL_SCORE_TOOLTIP } from './messages';
 import { CitationHoverProvider } from './CitationHoverProvider';
@@ -272,5 +275,93 @@ describe('FR-MSG-08 — Regenerate asks first (R-56(5))', () => {
     fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
     expect(onRegenerate).not.toHaveBeenCalled();
     expect(screen.queryByRole('dialog')).toBeNull();
+  });
+});
+
+// ─── FR-CIT-07: the figure under the citation (T-716) ────────────────────────
+
+describe('FR-CIT-07 figures', () => {
+  const FIG = {
+    documentId: '11111111-1111-4111-8111-111111111111',
+    contentSha256: 'a'.repeat(64),
+    caption: 'FIGURE 3',
+    widthPx: 320,
+    heightPx: 240,
+  };
+
+  beforeEach(() => {
+    let n = 0;
+    vi.stubGlobal('URL', {
+      ...URL,
+      createObjectURL: () => `blob:test/${(n += 1)}`,
+      revokeObjectURL: () => {},
+    });
+    figureGet.mockResolvedValue({ data: new Blob(['png'], { type: 'image/png' }) });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    figureGet.mockReset();
+  });
+
+  it('renders the figure beneath the paragraph that cites it, not at the end', async () => {
+    const view = show(
+      answer([
+        { text: 'First claim ' },
+        cite('handbook.pdf', { page: 'p. 157', figures: [FIG] }),
+        { text: '.\n\nA second paragraph with no citation.' },
+      ]),
+    );
+
+    const image = await screen.findByRole('img');
+    const paragraphs = view.container.querySelectorAll('p');
+    // "Beneath the citing passage" — after its own paragraph and *before* the next one, which
+    // is the whole difference between this and a strip at the foot of the answer.
+    expect(precedes(paragraphs[0], image)).toBe(true);
+    expect(precedes(image, paragraphs[1])).toBe(true);
+  });
+
+  it('does not re-fetch the figure when a thumb is clicked', async () => {
+    // A rated answer re-renders, and the figure's bytes must not be requested again — every
+    // rating would otherwise cost a round trip and a flash of empty box.
+    //
+    // **Node identity is deliberately NOT what is asserted here, and that is worth recording.**
+    // The obvious test — "the `<img>` element is the same object afterwards" — was written
+    // first and is *vacuous*: mutation-testing it showed that adding `message.feedback` to the
+    // `body` memo's dependencies leaves the node identical, because React reconciles the
+    // re-rendered tree in place rather than remounting it. So the memo above is a performance
+    // optimisation for this component, not a correctness one, and the comment it carries
+    // overstates the consequence. What a memo re-run *could* genuinely cost is this fetch,
+    // which is why the call count is the assertion.
+    const message = answer([
+      { text: 'Claim ' },
+      cite('handbook.pdf', { page: 'p. 157', figures: [FIG] }),
+    ]);
+    const view = show(message);
+    await screen.findByRole('img');
+    expect(figureGet).toHaveBeenCalledTimes(1);
+
+    view.rerender(
+      <CitationHoverProvider>
+        <AiMessage
+          message={{ ...message, feedback: 'up' }}
+          busy={false}
+          onFeedback={() => {}}
+          onRegenerate={() => {}}
+        />
+      </CitationHoverProvider>,
+    );
+    await act(async () => {});
+
+    expect(figureGet).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('img')).toBeTruthy();
+  });
+
+  it('renders no image for a citation that has no figure', async () => {
+    const view = show(answer([{ text: 'Claim ' }, cite('handbook.pdf', { page: 'p. 157' })]));
+    await act(async () => {});
+
+    expect(view.container.querySelector('img')).toBeNull();
+    expect(figureGet).not.toHaveBeenCalled();
   });
 });

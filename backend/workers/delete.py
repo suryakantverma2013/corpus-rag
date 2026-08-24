@@ -44,6 +44,7 @@ from app.db.models.document import Document
 from app.db.models.knowledge_job import KnowledgeJob
 from app.db.repositories.chunks import DocumentChunkRepository
 from app.db.repositories.documents import DocumentRepository
+from app.db.repositories.figures import DocumentFigureRepository
 from app.db.repositories.jobs import DOCUMENT_DELETED, KnowledgeJobRepository
 from app.db.session import get_sessionmaker
 from app.services.object_storage import (
@@ -205,6 +206,11 @@ async def _run(
 
     # --- the terminal transaction --------------------------------------------------------
     chunks_removed = await DocumentChunkRepository(session).delete_by_document(document.id)
+    # FR-ING-09's half of the same sentence (R-94(5)): the rasters went with the prefix above,
+    # and these rows are the part `delete_prefix` cannot reach. In this transaction rather than
+    # beside it, because a figure row outliving the document it describes is a URL that resolves
+    # to nothing — and unlike the ingest path there is no later version to collect it.
+    figures_removed = await DocumentFigureRepository(session).delete_by_document(document.id)
     await DocumentRepository(session).mark_deleted(document)
     # Defence in depth for §11's "delete while ingestion is running": the request already
     # superseded any open ingest job, but one enqueued in the gap between that commit and
@@ -221,7 +227,12 @@ async def _run(
     await jobs.update_status(job, JobStatus.SUCCEEDED, progress=_PROGRESS_DONE, clear_error=True)
     await session.commit()
 
-    logger.info("delete.completed", chunks_removed=chunks_removed, objects_removed=removed)
+    logger.info(
+        "delete.completed",
+        chunks_removed=chunks_removed,
+        figures_removed=figures_removed,
+        objects_removed=removed,
+    )
 
 
 async def _handle_failure(

@@ -194,6 +194,48 @@ Three properties worth stating plainly:
 INSTREAM response reveals the daemon's limit. Keep it in step with `deployment/clamav/clamd.conf`,
 which nothing in the application can validate.
 
+## 6a. Browser content restrictions (NFR-SEC-11)
+
+The edge that serves the GUI sends a deny-by-default **Content-Security-Policy** and three
+supporting headers. Every source expression in it was measured against the built bundle in a real
+browser rather than composed from a template, which is why it needs **no `'unsafe-inline'` and no
+`'unsafe-eval'`** — a policy carrying `'unsafe-inline'` in `script-src` is a header, not a control.
+
+```
+default-src 'none'; script-src 'self' 'sha256-…'; style-src 'self' https://fonts.googleapis.com;
+font-src https://fonts.gstatic.com; img-src 'self' blob:; connect-src 'self';
+base-uri 'none'; form-action 'self'; frame-ancestors 'none'
+```
+
+Four things about it are not obvious and are easy to undo:
+
+- **The `sha256` is the pre-paint theme script** in `frontend/index.html` (R-58(1)), which exists so
+  a light-theme user does not see a dark frame before React mounts. The hash is over exact bytes, so
+  editing that script — even reindenting it — stops it running, silently. `backend/tests/test_security_headers.py`
+  recomputes the hash and fails if the policy disagrees, and `.gitattributes` pins `*.html` to LF so
+  a CRLF checkout cannot change it either.
+- **`img-src` must admit `blob:`.** The FR-CIT-07 figure route is authenticated, so the client
+  fetches the raster and renders an object URL; `img-src 'self'` is the natural thing to write and
+  would blank every figure with no error anyone could connect to this header.
+- **`style-src` needs no exemption for React.** Six components pass `style={{…}}` props, which looks
+  like it requires `'unsafe-inline'`. It does not: React writes them through the CSSOM, which CSP
+  does not gate, while a literal `style` attribute stays blocked.
+- **The policy is not applied to `/auth/`.** Keycloak sends its own CSP, and a browser given two
+  enforces both — ours would then apply to Keycloak's login page and break FR-AUT-11 account
+  linking. The headers are an nginx `include` added by the three SPA locations only. This also
+  works around a second trap: `add_header` is **not** inherited into a block that defines one of its
+  own, and `location = /index.html` sets `Cache-Control`, so a `server`-level policy would have been
+  silently absent from the one response that serves the document.
+
+Sent beside it: `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` (Corpus URLs carry
+conversation and document ids) and `Permissions-Policy: camera=(), microphone=(), geolocation=()`.
+
+**`Strict-Transport-Security` is deliberately not sent from this edge**, and neither is
+`X-Frame-Options`. TLS terminates outside the stack (§7), so HSTS belongs to whatever terminates it;
+sending it from a plain-HTTP listener would be a promise the deployment cannot keep, and an operator
+testing on a real hostname without TLS would pin their own browser away from their own deployment.
+`frame-ancestors 'none'` supersedes `X-Frame-Options` across the whole supported browser matrix.
+
 ## 7. Rate limiting
 
 Backed by Redis so limits are shared across replicas. Login and refresh are keyed **per IP**; the
@@ -241,6 +283,9 @@ containing a live secret, and it has no business in the tree at all.
 | Rate limiter fails open | fail closed | An availability control that causes outages is a self-own. |
 | No download/preview endpoint | serve files back | Corpus never re-serves an uploaded byte, which is what keeps signature scanning defence-in-depth rather than the last line. |
 | Two roles | four-tier role model | The one capability it added — delegated account creation — already exists in Keycloak, where user management lives; duplicating it in app code creates two things to keep in sync. |
+| CSP scoped to the SPA's own locations | one policy at the `server` level | Keycloak proxies at the same origin and sends its own CSP; a browser enforces both, so a server-level policy would break FR-AUT-11 linking. And `add_header` is not inherited into a block that sets one of its own, so it would have been absent from `= /index.html` anyway. |
+| Inline script admitted by hash | an external file, or `'unsafe-inline'` | An external file reintroduces the round trip before first paint that R-58(1) exists to avoid; `'unsafe-inline'` makes `script-src` decorative. The hash's byte-exactness is carried by a guard and by `.gitattributes`. |
+| No HSTS from the application edge | send it with the other headers | TLS terminates outside this stack, so the header belongs to the terminator. Sending it from a plain-HTTP listener can lock an operator out of their own deployment for a year. |
 | No CORS middleware | permissive CORS for a separate SPA origin | Single origin is what makes `SameSite=strict` viable; relaxing it changes the session model, not just a header. |
 
 ## 10. How this is verified
@@ -257,6 +302,7 @@ declaration.
 | `test_rate_limits.py` | bucket keys and scope |
 | `test_completeness.py` | **a new endpoint fails the suite until someone declares who may call it** |
 | `test_security_live.py` | the same claims against a real Keycloak realm |
+| `../test_security_headers.py` | the edge's CSP and its supporting headers (NFR-SEC-11) |
 
 Three properties built in deliberately, each because the obvious version of the test is vacuous:
 
@@ -279,6 +325,7 @@ Three properties built in deliberately, each because the obvious version of the 
    no multi-tenant administration surface and no row-level security backing it.
 2. **The role-revocation window** of §4 — ordinary OIDC behaviour, stated because it is easy to
    assume otherwise. Disable, don't demote, when it matters.
+3. **The GUI fetches its typefaces from Google** (`fonts.googleapis.com`, `fonts.gstatic.com`), which the CSP permits explicitly. Two consequences, both accepted (R-95(5)): a viewer's browser makes a third-party request on every cold load, and **an air-gapped installation renders in fallback typefaces**. This is long-standing behaviour rather than a regression — the policy only makes it visible. Self-hosting the two families would close both and tighten the policy to `'self'`.
 3. **Prompt-injection screening is evadable** by design (§5); bounded, not eliminated.
 4. **A prior assistant answer re-enters the next turn as trusted speech**, outside the fence. Known
    and accepted; bounded by that answer having itself passed the groundedness gate.

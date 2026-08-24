@@ -117,7 +117,7 @@ export async function checkKbCopy(page, r, theme) {
 
   for (const literal of [
     'Global documents are searched in every chat; attachments only in this one.',
-    'PDF · DOCX · CSV · MD — max 50 MB',
+    'PDF · DOCX · CSV · MD — max 300 MB',
     'Global',
     'This chat',
   ])

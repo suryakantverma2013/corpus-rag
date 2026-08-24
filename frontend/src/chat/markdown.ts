@@ -32,7 +32,10 @@
  * parsed — that is what makes the sanitization structural); HTML entities (decoding them
  * re-opens entity smuggling for no benefit — text in, text out); autolinks and bare-URL
  * linkification (where scheme mistakes happen); images (NFR-CMP-03 ships no image assets, and a
- * content-chosen remote `src` is an outbound request on every render); blockquotes and thematic
+ * content-chosen remote `src` is an outbound request on every render — unchanged by FR-CIT-07,
+ * whose figure is a **segment-level block the caller supplies** through `renderBlockFigures`,
+ * addressed by a citation's locator and fetched from the product's own authenticated route, so
+ * no `src` here is ever chosen by document content); blockquotes and thematic
  * breaks (not in FR-MSG-07's list, and `---` collides with the table delimiter row and with
  * accidental underlining in extracted text); footnotes, task lists, strikethrough and math.
  * Anything unsupported renders as its own literal source text, which is the honest failure.
@@ -594,6 +597,59 @@ export interface RenderOptions {
   classes: MarkdownClasses;
   /** Supplied by the caller so this module imports no component. */
   renderCitation: (index: number) => ReactNode;
+  /**
+   * FR-CIT-07's figures, rendered **after** the block whose chips they belong to.
+   *
+   * Injected exactly like `renderCitation`, and for the same reason: this module still imports
+   * no component and still creates no `<img>` — see the prohibition at the head of this file,
+   * which is unchanged. What it emits is a block's citation indices; the caller decides whether
+   * anything is drawn.
+   *
+   * Optional, so every existing caller renders byte-identically.
+   */
+  renderBlockFigures?: (indices: readonly number[]) => ReactNode;
+}
+
+/**
+ * The citation indices a block carries, in document order.
+ *
+ * Walks the block's own shape rather than re-reading offsets: by the time a `Block` exists the
+ * chips have already been placed, including the orphans `placeOrphans` moved into a `cites`
+ * sibling, so this sees exactly what `renderBlock` will draw.
+ */
+export function citeIndices(block: Block): number[] {
+  const found: number[] = [];
+
+  const walkInline = (nodes: readonly Inline[]): void => {
+    for (const node of nodes) {
+      if (node.kind === 'cite') found.push(node.index);
+      else if (node.kind === 'strong' || node.kind === 'em' || node.kind === 'link')
+        walkInline(node.children);
+    }
+  };
+
+  switch (block.kind) {
+    case 'para':
+    case 'heading':
+      walkInline(block.children);
+      break;
+    case 'list':
+      for (const item of block.items) {
+        walkInline(item.children);
+        if (item.nested) found.push(...citeIndices(item.nested));
+      }
+      break;
+    case 'table':
+      for (const cell of block.head) walkInline(cell);
+      for (const row of block.rows) for (const cell of row) walkInline(cell);
+      break;
+    case 'cites':
+      found.push(...block.indices);
+      break;
+    case 'code':
+      break;
+  }
+  return found;
 }
 
 function alignClass(align: Align, classes: MarkdownClasses): string | undefined {
@@ -732,5 +788,14 @@ function renderBlock(block: Block, options: RenderOptions, key: string): ReactNo
 /** The whole pipeline: segments in, React elements out, no markup string in between. */
 export function renderMarkdown(segments: readonly Segment[], options: RenderOptions): ReactNode[] {
   const { source, offsets } = flatten(segments);
-  return parseMarkdown(source, offsets).map((block, i) => renderBlock(block, options, `b${i}`));
+  const out: ReactNode[] = [];
+  parseMarkdown(source, offsets).forEach((block, i) => {
+    out.push(renderBlock(block, options, `b${i}`));
+    // FR-CIT-07: beneath the *citing passage*, so after this block rather than at the end.
+    // A block with no chips still asks, and the caller answers with null — which is what keeps
+    // an answer that cites nothing byte-identical to what it rendered before this existed.
+    const figures = options.renderBlockFigures?.(citeIndices(block));
+    if (figures != null) out.push(createElement(Fragment, { key: `f${i}` }, figures));
+  });
+  return out;
 }

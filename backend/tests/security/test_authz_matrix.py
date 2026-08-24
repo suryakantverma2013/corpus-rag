@@ -24,11 +24,14 @@ rather than discovered by mutation afterwards.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
+import pymupdf
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,9 +39,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.base import DEFAULT_TENANT_ID
 from app.db.models.conversation import Conversation
 from app.db.models.document import Document, DocumentStatus
+from app.db.models.document_figure import DocumentFigure
 from app.db.models.knowledge_job import JobStatus, JobType, KnowledgeJob
 from app.db.models.message import Message, MessageRole
 from app.db.repositories.knowledge_bases import KnowledgeBaseRepository
+from app.services.object_storage import artifact_key
 from tests.security import (
     ROUTE_DECISIONS,
     Gate,
@@ -200,6 +205,23 @@ async def test_a_non_administrator_is_refused_by_every_administrator_route(
 # --- Tier C: the ownership matrix -----------------------------------------------------
 
 
+def _png() -> bytes:
+    """A real 1x1 PNG, rendered rather than pasted as a hex blob.
+
+    It must genuinely be a PNG: the positive control asserts the media type the route
+    declares, and a placeholder would make that assertion vacuous. Built with the same
+    library `render_figure` uses, so "what this route serves" and "what the pipeline
+    produces" cannot drift into different formats.
+    """
+    pixmap = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 1, 1))
+    # **`clear_with` is not tidiness.** A bare `Pixmap` allocates its sample buffer without
+    # initialising it, so two calls encode different pixels and the "same bytes" assertion
+    # below fails against a route that is working perfectly. `render_figure` never hits this:
+    # `get_pixmap` fills every sample from the page.
+    pixmap.clear_with(255)
+    return pixmap.tobytes("png")
+
+
 @dataclass(frozen=True, slots=True)
 class Owned:
     """One seeded resource per kind, all owned by `owner`."""
@@ -209,10 +231,14 @@ class Owned:
     message_id: uuid.UUID
     document_id: uuid.UUID
     job_id: uuid.UUID
+    #: The content-derived id of a figure of `document_id`, with its raster really in the
+    #: bucket — so the figure route's owner cell is a `200` for the right reason and its
+    #: foreign cell is a `404` attributable to ownership rather than to an absent row.
+    figure_sha256: str
 
 
 @pytest.fixture
-async def owned(session: AsyncSession, make_token: Callable[..., str]) -> Owned:
+async def owned(session: AsyncSession, make_token: Callable[..., str], object_store: Any) -> Owned:
     """A conversation, an AI answer, an ACTIVE document and a job — all one owner's.
 
     Every Tier C cell drives one of these. They exist so a foreign caller's `404` is
@@ -255,6 +281,36 @@ async def owned(session: AsyncSession, make_token: Callable[..., str]) -> Owned:
     session.add(document)
     await session.flush()
 
+    figure_png = _png()
+    figure_sha256 = hashlib.sha256(figure_png).hexdigest()
+    figure_key = artifact_key(
+        tenant_id=DEFAULT_TENANT_ID,
+        knowledge_base_id=kb.id,
+        document_id=document.id,
+        version=1,
+        name=f"figures/{figure_sha256}.png",
+    )
+    await object_store.put(figure_key, figure_png, content_type="image/png")
+    session.add(
+        DocumentFigure(
+            document_id=document.id,
+            document_version=1,
+            page_number=1,
+            figure_index=0,
+            content_sha256=figure_sha256,
+            storage_uri=object_store.uri_for(figure_key),
+            caption="FIGURE 1",
+            bbox_x0=10.0,
+            bbox_y0=20.0,
+            bbox_x1=110.0,
+            bbox_y1=140.0,
+            width_px=100,
+            height_px=120,
+            byte_size=len(figure_png),
+        )
+    )
+    await session.flush()
+
     job = KnowledgeJob(
         document_id=document.id,
         job_type=JobType.INGEST,
@@ -273,6 +329,7 @@ async def owned(session: AsyncSession, make_token: Callable[..., str]) -> Owned:
         message_id=answer.id,
         document_id=document.id,
         job_id=job.id,
+        figure_sha256=figure_sha256,
     )
 
 
@@ -284,7 +341,16 @@ def _url(decision: RouteDecision, owned: Owned) -> tuple[str, dict[str, str] | N
         case Owns.MESSAGE:
             return fill_path(decision.path, message_id=owned.message_id), None
         case Owns.DOCUMENT:
-            return fill_path(decision.path, document_id=owned.document_id), None
+            # `content_sha256` is filled for every document route; `fill_path` substitutes only
+            # the templates a path actually carries, so it reaches the figure route alone.
+            return (
+                fill_path(
+                    decision.path,
+                    document_id=owned.document_id,
+                    content_sha256=owned.figure_sha256,
+                ),
+                None,
+            )
         case Owns.JOB:
             return fill_path(decision.path, job_id=owned.job_id), None
         case Owns.CHAT_SCOPE:

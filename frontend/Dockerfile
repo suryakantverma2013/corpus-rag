@@ -38,6 +38,7 @@ FROM nginxinc/nginx-unprivileged:1.29-alpine AS runtime
 # from the configuration it was tested with. Mount over the top while iterating locally.
 COPY deployment/nginx/proxy.inc     /etc/nginx/conf.d/proxy.inc
 COPY deployment/nginx/streaming.inc /etc/nginx/conf.d/streaming.inc
+COPY deployment/nginx/security.inc  /etc/nginx/conf.d/security.inc
 COPY deployment/nginx/default.conf  /etc/nginx/conf.d/default.conf
 
 COPY --from=build /build/dist /usr/share/nginx/html
