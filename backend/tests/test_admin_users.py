@@ -515,6 +515,51 @@ async def test_admin_api_status_codes_map_to_the_right_class(
     assert resp.status_code == expected, f"{upstream} upstream should map to {expected}"
 
 
+async def test_a_password_policy_rejection_is_a_400_naming_the_rule(
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    make_token: Callable[..., str],
+    respx_mock,
+) -> None:
+    """B-004: a 400 caused by the CALLER's password is not a 400 caused by our request.
+
+    Both arrive as Keycloak 400s, so the status alone cannot separate them and the body has to.
+    Before this split an administrator who typed a short password was told *"User administration
+    is not configured correctly on the server. Check the server logs for details."* — a 500
+    that sends them to debug the deployment for a typo, and that pollutes error-rate telemetry
+    with a routine mistake.
+
+    **It was unreachable until R-86(1) added a `passwordPolicy` to the realm artifact**, which is
+    why it shipped: with no policy, no caller input could provoke a 400 on this path. It is live
+    in every deployment created since.
+
+    The body is Keycloak's own, measured against a real realm rather than invented:
+    `{"error": "invalidPasswordMinLengthMessage", "error_description": "Invalid password: minimum
+    length 12."}`. The assertion is that the *rule* reaches the caller, because a 400 saying only
+    "bad request" would fix the status and keep the uselessness.
+    """
+    kc = get_settings().keycloak
+    _, headers = await _admin_headers(session, make_token)
+
+    respx_mock.post(kc.token_endpoint).respond(json=_SVC_TOKEN)
+    respx_mock.post(f"{kc.admin_url}/users").respond(
+        400,
+        json={
+            "error": "invalidPasswordMinLengthMessage",
+            "error_description": "Invalid password: minimum length 12.",
+        },
+    )
+
+    resp = await client.post(
+        "/api/v1/users",
+        headers=headers,
+        json={"email": "new@corpus.test", "password": "short1", "role": "user"},
+    )
+
+    assert resp.status_code == 400, "a caller-fixable password must not read as a server fault"
+    assert "minimum length 12" in resp.json()["detail"]
+
+
 async def test_a_forbidden_admin_call_is_logged_with_its_status_and_path(
     client: httpx.AsyncClient,
     session: AsyncSession,

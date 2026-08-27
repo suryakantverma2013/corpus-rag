@@ -19,6 +19,7 @@ from app.auth.keycloak_client import (
     KeycloakForbiddenError,
     KeycloakRejectedError,
     KeycloakUnavailableError,
+    PasswordPolicyError,
     TooManyAttemptsError,
     UserConflictError,
     UserNotFoundError,
@@ -77,6 +78,11 @@ async def create_user(
         raise HTTPException(status.HTTP_409_CONFLICT, _CONFLICT) from exc
     except TooManyAttemptsError as exc:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, _RATE_LIMITED) from exc
+    except PasswordPolicyError as exc:
+        # 400, not 500 (B-004): the caller typed a password the realm refuses, and Keycloak's own
+        # wording names the clause that failed. Must precede the pair below - both are Keycloak
+        # 400s and only the response body tells them apart.
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     except (KeycloakForbiddenError, KeycloakRejectedError) as exc:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, _MISCONFIGURED) from exc
     except KeycloakUnavailableError as exc:

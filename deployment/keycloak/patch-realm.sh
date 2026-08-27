@@ -55,10 +55,35 @@ echo "patch-realm: ${CORPUS_CLIENT_ID} secret set"
 # — so nothing can ever satisfy that action and the account is bricked PERMANENTLY, with
 # Keycloak reporting only "Account is not fully set up". The same reasoning forbids
 # enabling any required action as a realm default. See deployment/keycloak/README.md.
-"$KCADM" set-password -r "$CORPUS_REALM" \
-  --username "$CORPUS_ADMIN_EMAIL" \
-  --new-password "$CORPUS_ADMIN_PASSWORD"
-echo "patch-realm: password set for ${CORPUS_ADMIN_EMAIL} (non-temporary)"
+# Set it only when it is not already correct (B-005). `passwordHistory(N)` — which R-86(1) put
+# in the realm artifact to close OI-38 — refuses a password equal to a recent one, and that
+# includes *the one already in force*. So this idempotent step succeeded on a realm's first boot
+# and failed on every boot after it, with `Invalid password: must not be equal to any of last 3
+# passwords`, exiting 1. Compose then reports `service "keycloak-init" didn't complete
+# successfully` and **stops bringing the stack up** — observed 2026-08-27 leaving `api` and `web`
+# down after a routine `up -d --build web`. Two correct decisions that had never been composed:
+# a bootstrap re-asserts desired state, a history policy forbids re-asserting this one.
+#
+# The probe is a real ROPC login, because that is the property actually wanted here — *can the
+# administrator authenticate with the configured password* — rather than a proxy for it. If it
+# succeeds there is nothing to do; the set below then runs only when the password is genuinely
+# absent, wrong, or newly changed in the environment file.
+#
+# `kcadm.sh` rather than curl: the Keycloak image ships **neither curl nor python3** (checked,
+# rather than assumed — the first draft of this used curl and would have failed on every run).
+# `--config` is load-bearing: without it this overwrites the master-realm credentials the rest
+# of the script authenticates with, and every later step fails as the wrong principal.
+if "$KCADM" config credentials --config /tmp/patch-realm-probe.json \
+  --server "$KC_URL" --realm "$CORPUS_REALM" \
+  --user "$CORPUS_ADMIN_EMAIL" --password "$CORPUS_ADMIN_PASSWORD" \
+  --client "$CORPUS_CLIENT_ID" --secret "$CORPUS_CLIENT_SECRET" >/dev/null 2>&1; then
+  echo "patch-realm: password for ${CORPUS_ADMIN_EMAIL} already correct — not re-set (B-005)"
+else
+  "$KCADM" set-password -r "$CORPUS_REALM" \
+    --username "$CORPUS_ADMIN_EMAIL" \
+    --new-password "$CORPUS_ADMIN_PASSWORD"
+  echo "patch-realm: password set for ${CORPUS_ADMIN_EMAIL} (non-temporary)"
+fi
 
 # ---- 3. corpus-linking redirect URIs ----------------------------------------------
 # The artifact lists only the dev origins (localhost:5173, localhost:8000). The FR-AUT-11

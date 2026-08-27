@@ -19,6 +19,7 @@ from app.auth.keycloak_client import (
     KeycloakForbiddenError,
     KeycloakRejectedError,
     KeycloakUnavailableError,
+    PasswordPolicyError,
     TooManyAttemptsError,
 )
 from app.auth.schemas import (
@@ -280,6 +281,11 @@ async def change_password(
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, _RATE_LIMITED) from exc
     except InvalidCredentialsError as exc:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, _WRONG_CURRENT) from exc
+    except PasswordPolicyError as exc:
+        # 400 with Keycloak's own wording (B-004). Someone changing their own password needs to
+        # know WHICH rule the new one broke; the 500 this used to raise said only that the
+        # server was misconfigured, which is both wrong and unactionable.
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     except (KeycloakForbiddenError, KeycloakRejectedError) as exc:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, _MISCONFIGURED) from exc
     except KeycloakUnavailableError as exc:

@@ -71,6 +71,29 @@ class KeycloakRejectedError(KeycloakError):
     """
 
 
+class BrokerGrantExpiredError(KeycloakError):
+    """The link exists, but the provider's grant can no longer be refreshed (B-008).
+
+    Kept apart from :class:`AccountNotLinkedError` because the two are different facts and
+    R-63(6) gave them different codes on purpose: *no link was ever made* versus *the link is
+    there and the provider refused*. The status route answers `200 linked` in this case, so
+    reporting "not linked" would have the product contradict itself in two calls.
+    """
+
+
+class PasswordPolicyError(KeycloakError):
+    """The password the *caller* supplied violates the realm's policy (400) → 400.
+
+    Split out of :class:`KeycloakRejectedError` by B-004. Both are Keycloak 400s, but they are
+    opposite kinds of fault: `Rejected` means *we* built a bad request and the operator must
+    read our payload, while this means the **caller typed a password the policy refuses** and
+    the fix is to type a different one. Reporting the second as the first produced a `500`
+    telling an administrator to check the server logs for a short password.
+
+    Carries Keycloak's own `error_description`, which names the failing clause.
+    """
+
+
 class AccountNotLinkedError(KeycloakError):
     """The user has not linked this identity provider, so no brokered token exists.
 
@@ -189,6 +212,19 @@ class KeycloakClient:
         if resp.status_code == 401:
             # Our caller's token was rejected — the user's session, not the link.
             raise InvalidCredentialsError("user token rejected by the broker endpoint")
+        # A link whose provider grant can no longer be refreshed (B-008). Keycloak signals this
+        # with **502 `{"errorMessage":"Unable to refresh token"}`** — measured, not guessed —
+        # which fell through to `Unavailable` and told the user *"Authentication service
+        # unavailable."* while Keycloak was demonstrably up and `GET /cloud/links/google`
+        # answered `200 linked`. It is R-63(6)'s `CLOUD_ACCESS_REVOKED` case exactly: the link
+        # exists and the *provider* refused, so the user must re-link.
+        #
+        # Narrowed to that message rather than to the status, deliberately: a bare 502 from a
+        # proxy in front of Keycloak is a real outage, and mapping every 5xx to "re-link" would
+        # send users to redo their consent during an incident. If the message ever changes, the
+        # symptom returns as a 503 — the status quo, not a new failure.
+        if resp.status_code == 502 and "unable to refresh token" in resp.text.lower():
+            raise BrokerGrantExpiredError(alias)
         raise KeycloakUnavailableError(f"broker/{alias} returned {resp.status_code}")
 
     async def exchange_linking_code(
@@ -485,6 +521,22 @@ class KeycloakClient:
                     "were rejected (see deployment/keycloak/README.md)"
                 )
             if resp.status_code in (400, 422):
+                # A password-policy rejection is a 400 too, and it is NOT our malformed request
+                # — it is the caller's input (B-004). Before this split, an administrator who
+                # typed a short password was told "User administration is not configured
+                # correctly on the server. Check the server logs", which sends them to debug the
+                # deployment for a typo. It was unreachable until R-86(1) put a `passwordPolicy`
+                # in the realm artifact, so it ships live in every deployment created since.
+                #
+                # Detected from Keycloak's own body rather than from the status, measured:
+                # `{"error":"invalidPasswordMinLengthMessage",
+                #   "error_description":"Invalid password: minimum length 12."}`
+                # Every policy failure uses the `invalidPassword…` prefix, which is why the
+                # prefix is the test and not a list of message keys that would need extending
+                # each time a policy clause is added.
+                policy = _password_policy_detail(resp)
+                if policy is not None:
+                    raise PasswordPolicyError(policy)
                 raise KeycloakRejectedError(f"{method} {path} returned {resp.status_code}")
             # Anything left is either an upstream 5xx or a status we did not enumerate in
             # `expected` — both genuinely "unexpected", so both keep the retryable class.
@@ -533,3 +585,23 @@ def _conflict_detail(resp: httpx.Response) -> str:
         return str(resp.json().get("errorMessage", "conflict"))
     except ValueError:
         return "conflict"
+
+
+def _password_policy_detail(resp: httpx.Response) -> str | None:
+    """Keycloak's own words for a password-policy rejection, or `None` if it is not one.
+
+    Returning Keycloak's `error_description` verbatim is deliberate: it names the clause that
+    failed ("Invalid password: minimum length 12."), which is exactly what the administrator
+    needs and what a generic string would withhold. It is safe to echo here because the policy
+    is the operator's own configuration, not a secret, and every route reaching this is
+    admin-gated.
+    """
+    try:
+        body = resp.json()
+    except ValueError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    if not str(body.get("error", "")).startswith("invalidPassword"):
+        return None
+    return str(body.get("error_description") or "The password does not meet the realm policy.")

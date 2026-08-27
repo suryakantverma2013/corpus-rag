@@ -43,6 +43,7 @@ from app.api.errors import (
 from app.auth.dependencies import CurrentAccessToken, CurrentUser, Keycloak, SettingsDep
 from app.auth.keycloak_client import (
     AccountNotLinkedError,
+    BrokerGrantExpiredError,
     KeycloakForbiddenError,
     KeycloakRejectedError,
     KeycloakUnavailableError,
@@ -404,6 +405,10 @@ async def _brokered_token(
         data = await kc.broker_token(
             alias=settings.keycloak.google_idp_alias, user_token=access_token
         )
+    except BrokerGrantExpiredError as exc:
+        # B-008. The link is present and Google's grant is dead, so this is the *revoked* case,
+        # not the unlinked one - the status route would answer `200 linked` beside it.
+        raise _link_required(provider, "CLOUD_ACCESS_REVOKED", _DRIVE_FORBIDDEN) from exc
     except AccountNotLinkedError as exc:
         raise _link_required(provider, "ACCOUNT_NOT_LINKED", _NOT_LINKED) from exc
     except (KeycloakForbiddenError, KeycloakRejectedError) as exc:

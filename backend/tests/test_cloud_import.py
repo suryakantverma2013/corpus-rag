@@ -741,6 +741,59 @@ async def test_a_revoked_google_grant_is_not_reported_as_unlinked(
     assert resp.json()["detail"]["error_code"] == "CLOUD_ACCESS_REVOKED"
 
 
+async def test_a_grant_keycloak_can_no_longer_refresh_is_reported_as_revoked(
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    make_token,
+    respx_mock,  # noqa: ANN001
+) -> None:
+    """B-008: the link is dead, and Keycloak says so with a **502**, not a 400.
+
+    Found in the field. `GET /cloud/links/google` answered `200 linked` with the account
+    address, while the picker showed *"Authentication service unavailable."* — because the
+    broker endpoint returned `502 {"errorMessage": "Unable to refresh token"}` and 502 fell
+    through to the retryable class. Keycloak was demonstrably up; what had expired was Google's
+    grant, which is R-63(6)'s `CLOUD_ACCESS_REVOKED` case exactly. The user's fix is to re-link;
+    the message sent them to check their infrastructure.
+
+    Deliberately matched on the **message** rather than the status: a bare 502 from a proxy in
+    front of Keycloak is a real outage, and telling users to redo their OAuth consent during an
+    incident would be a worse defect than the one being fixed. The sibling test below pins that
+    half, so neither can be relaxed without the other failing.
+    """
+    _, headers = await _caller(session, make_token)
+    kc = get_settings().keycloak
+    respx_mock.get(kc.broker_token_endpoint(kc.google_idp_alias)).respond(
+        502, json={"errorMessage": "Unable to refresh token"}
+    )
+
+    resp = await client.get("/api/v1/cloud/google/files", headers=headers)
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["error_code"] == "CLOUD_ACCESS_REVOKED"
+
+
+async def test_a_bare_502_from_the_broker_is_still_an_outage(
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    make_token,
+    respx_mock,  # noqa: ANN001
+) -> None:
+    """The other half of B-008, and the reason its match is narrow.
+
+    A 502 with no refresh-token message is a proxy or a genuinely broken Keycloak. Mapping every
+    5xx to "re-link" would send every user through Google's consent screen during an outage that
+    fixes itself.
+    """
+    _, headers = await _caller(session, make_token)
+    kc = get_settings().keycloak
+    respx_mock.get(kc.broker_token_endpoint(kc.google_idp_alias)).respond(502)
+
+    resp = await client.get("/api/v1/cloud/google/files", headers=headers)
+
+    assert resp.status_code == 503
+
+
 async def test_the_file_list_carries_metadata_and_no_urls(
     client: httpx.AsyncClient,
     session: AsyncSession,
