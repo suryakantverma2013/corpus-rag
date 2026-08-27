@@ -11,8 +11,9 @@ A11Y_HEADLESS=0 CORPUS_PASSWORD='…' npm run a11y              # watch it drive
 ```
 
 It needs the app **and** the backend up, and signs in as `admin@corpus.local`. The cloud picker
-and its unlink confirmation need a **linked Drive account** in that environment; without one the
-run fails rather than skipping, for the reason in "Not reaching a surface is not a pass" below.
+and its unlink confirmation need a **linked Drive account** in that environment; without one those
+two surfaces fail rather than skipping, for the reason in "Not reaching a surface is not a pass"
+below — but **only those two**, in both themes. Everything else is still measured (T-724).
 
 ## Why this exists
 
@@ -64,10 +65,22 @@ one people learn to re-run until it is green (§8.64).
 
 T-606 found the fidelity harness recording _"no linked Drive account — not a fidelity failure"_
 as a **pass**, which left the browser sitting on Keycloak while 39 later checks measured
-PatternFly. Here, a surface that cannot be opened is a **failure to measure**, and leaving the
-app origin **throws**, because every check after it would silently be measuring another product.
-`probe()` also asserts that axe found a non-empty rule set, so a selector that stops matching
-fails instead of reporting a clean surface.
+PatternFly. Here, a surface that cannot be opened is a **failure to measure**, and nothing is ever
+measured off-origin. `probe()` also asserts that axe found a non-empty rule set, so a selector
+that stops matching fails instead of reporting a clean surface.
+
+**But refusing to measure must not become refusing to measure _anything_ (T-724).** The first
+version of that rule threw on leaving the origin — from the last step of the _dark_ iteration,
+which took all 27 light-theme checks with it. The run then reported `29/31`: not wrong, but
+quietly incomplete, which is the §8.64 failure one level up. So the cloud-drive surfaces now run
+**last and in a loop of their own**, and the browser is **returned to the app and verified** after
+a redirect. A missing Drive link costs exactly the two surfaces that depend on it — measured, not
+asserted: with the redirect simulated in both themes the run records 2 failures and still passes
+51 checks across both themes, against 29 before.
+
+Note what did _not_ change: it is still a failure, it still counts toward the exit code, and the
+recovery is a deliberate re-navigate whose success is asserted — never a `catch` that continues
+and hopes, which would reproduce T-606's defect one step later.
 
 ## What it found on its first run
 

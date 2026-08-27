@@ -275,75 +275,132 @@ try {
     }
     await dismissAll(page);
 
-    // Knowledge-base modal (§4.7), and the FR-KBM-10 picker nested over it.
+    // Knowledge-base modal (§4.7). The FR-KBM-10 picker it can open is deliberately NOT probed
+    // here — it runs in the cloud-drive phase after this loop (T-724).
     if (await clickByText(page, 'nav button', 'Knowledge base')) {
       await waitUntil(page, `document.querySelector('[role="dialog"]')`);
       await probe(page, 'knowledge base (§4.7)', theme, '[role="dialog"]');
-
-      await clickByText(page, '[role="dialog"] button', 'cloud drive');
-      const nested = await waitUntil(
-        page,
-        `document.querySelectorAll('[role="dialog"]').length > 1`,
-        8000,
-      );
-      r.context('cloud picker (FR-KBM-10)', theme);
-      if (nested) {
-        // Scoped to the picker itself. Unscoped here, axe measures the KB modal and the shell
-        // behind the scrim and reports 1.01:1 — §8.63(7), and the reason `runAxe` takes a root.
-        await probe(page, 'cloud picker (FR-KBM-10)', theme, '[role="dialog"]:last-of-type');
-
-        /*
-         * FR-AUT-11's unlink confirmation — a THIRD dialog, and the surface that makes the
-         * scoping rule observable: §8.63(7) measured the picker's rows and the sidebar at
-         * 1.01:1 with this open, because unscoped axe reads `--text` through the scrim. It is
-         * opened, measured and CANCELLED — never confirmed, since `Disconnect` would revoke the
-         * Drive link the picker above depends on. `ui/ConfirmDialog` is also the only place the
-         * FR-EVL-03 hues occur as text (`--eval-bad` at 3.06:1 light), which is the pair T-511
-         * reported as not occurring and T-514 corrected.
-         */
-        if (await clickByText(page, '[role="dialog"] button', 'Unlink')) {
-          const third = await waitUntil(
-            page,
-            `document.querySelectorAll('[role="dialog"]').length > 2`,
-          );
-          r.context('unlink confirmation (FR-AUT-11)', theme);
-          if (third) {
-            await probe(
-              page,
-              'unlink confirmation (FR-AUT-11)',
-              theme,
-              '[role="dialog"]:last-of-type',
-            );
-          } else {
-            r.truthy('the unlink confirmation opens', false, 'no third [role="dialog"] appeared');
-          }
-        }
-      } else {
-        // T-606's finding, encoded: with no linked account this button is a FULL PAGE REDIRECT
-        // (`useCloudLink` -> `window.location.assign`, R-74(5)), and the fidelity harness recorded
-        // that as a pass and then measured Keycloak for 39 checks. Not reaching a surface is a
-        // failure to measure, never a pass — and leaving the origin is worse, because every check
-        // after it silently measures another product.
-        const here = await page.evaluate(`return location.origin + location.pathname;`);
-        const stayed = typeof here === 'string' && here.startsWith(new URL(APP).origin);
-        r.truthy(
-          'the cloud picker was reached',
-          false,
-          stayed
-            ? 'no second dialog — is a Drive account linked in this environment?'
-            : `the browser LEFT the app origin (now ${here}) — nothing below was measured`,
-        );
-        if (!stayed) throw new Error(`navigated away from ${APP} to ${here}`);
-      }
     }
     await dismissAll(page);
+  }
+
+  /*
+   * FR-KBM-10 / FR-AUT-11 — the cloud-drive surfaces, LAST and in a loop of their own (T-724).
+   *
+   * These are the only surfaces here that can take the browser off the app origin: with no
+   * linked account the picker's button is a full-page redirect to Keycloak (`useCloudLink` ->
+   * `window.location.assign`, R-74(5)). That is not survivable in place — T-606 found the
+   * fidelity harness recording it as a pass and then measuring PatternFly for 39 checks — so
+   * the previous version threw. But it threw from the END of the dark iteration and took **all
+   * 27 light-theme checks with it**: the run reported `29/31`, which reads as nearly green while
+   * an entire theme went unmeasured. A harness that loses coverage silently is the §8.64 failure
+   * one level up: it is not wrong, it is quietly incomplete.
+   *
+   * Two changes, and the *ordering* is the substantive one — running these last means a redirect
+   * can only cost the surfaces that actually depend on the link. Recovering the origin then means
+   * it does not cost the other theme either. Neither weakens the contract: an unreachable surface
+   * is still a FAILURE and still counts toward the exit code, and nothing is ever measured
+   * off-origin.
+   */
+  for (const theme of THEMES) {
+    await setTheme(page, theme);
+    console.log(`  cloud-drive surfaces / ${theme}`);
+    await dismissAll(page);
+    if (!(await cloudSurfaces(page, theme))) {
+      // The browser is sitting on Keycloak. Recover *deliberately and verified*, never by
+      // catching and continuing — every probe after this would otherwise measure another product.
+      if (!(await returnToApp(page))) {
+        throw new Error(`could not return to ${APP} after the cloud-drive redirect`);
+      }
+    }
   }
 } catch (error) {
   r.context('harness', '-');
   r.truthy('the run completed without throwing', false, String(error?.message ?? error));
   console.error(error);
 } finally {
-  // The enumeration's own evidence: what was accepted, and the worst ratio seen for each.
+  await report();
+}
+
+/**
+ * The KB modal's cloud-drive picker, and the FR-AUT-11 unlink confirmation nested over it.
+ *
+ * Returns **false only when the browser left the app origin** — the caller's signal to recover.
+ * Every other outcome, including a picker that never opened while staying put, is an ordinary
+ * recorded failure.
+ */
+async function cloudSurfaces(page, theme) {
+  r.context('cloud picker (FR-KBM-10)', theme);
+  if (!(await clickByText(page, 'nav button', 'Knowledge base'))) {
+    r.truthy('the knowledge-base modal opens', false, 'no "Knowledge base" control found');
+    return true;
+  }
+  await waitUntil(page, `document.querySelector('[role="dialog"]')`);
+  await clickByText(page, '[role="dialog"] button', 'cloud drive');
+  const nested = await waitUntil(
+    page,
+    `document.querySelectorAll('[role="dialog"]').length > 1`,
+    8000,
+  );
+
+  if (!nested) {
+    const here = await page.evaluate(`return location.origin + location.pathname;`);
+    const stayed = typeof here === 'string' && here.startsWith(new URL(APP).origin);
+    r.truthy(
+      'the cloud picker was reached',
+      false,
+      stayed
+        ? 'no second dialog — is a Drive account linked in this environment?'
+        : `the browser LEFT the app origin (now ${here}) — this theme's cloud-drive surfaces ` +
+            'were not measured; everything else was',
+    );
+    return stayed;
+  }
+
+  // Scoped to the picker itself. Unscoped here, axe measures the KB modal and the shell behind
+  // the scrim and reports 1.01:1 — §8.63(7), and the reason `runAxe` takes a root.
+  await probe(page, 'cloud picker (FR-KBM-10)', theme, '[role="dialog"]:last-of-type');
+
+  /*
+   * FR-AUT-11's unlink confirmation — a THIRD dialog, and the surface that makes the scoping
+   * rule observable: §8.63(7) measured the picker's rows and the sidebar at 1.01:1 with this
+   * open, because unscoped axe reads `--text` through the scrim. It is opened, measured and
+   * CANCELLED — never confirmed, since `Disconnect` would revoke the Drive link the picker above
+   * depends on. `ui/ConfirmDialog` is also the only place the FR-EVL-03 hues occur as text
+   * (`--eval-bad` at 3.06:1 light), which is the pair T-511 reported as not occurring and T-514
+   * corrected.
+   */
+  if (await clickByText(page, '[role="dialog"] button', 'Unlink')) {
+    const third = await waitUntil(page, `document.querySelectorAll('[role="dialog"]').length > 2`);
+    r.context('unlink confirmation (FR-AUT-11)', theme);
+    if (third) {
+      await probe(page, 'unlink confirmation (FR-AUT-11)', theme, '[role="dialog"]:last-of-type');
+    } else {
+      r.truthy('the unlink confirmation opens', false, 'no third [role="dialog"] appeared');
+    }
+  }
+  await dismissAll(page);
+  return true;
+}
+
+/**
+ * Put the browser back on the app after a cloud-drive redirect, and PROVE it landed.
+ *
+ * The session survives the round trip in the FR-AUT-06 refresh cookie, so this is a reload
+ * rather than a fresh sign-in — but both halves are asserted rather than assumed, because
+ * measuring Keycloak's login screen as though it were the shell is T-606's defect displaced by
+ * one step, and it would read as a *pass*. Returning `false` here is what makes the caller throw.
+ */
+async function returnToApp(page) {
+  await page.navigate(APP);
+  const shell = await waitUntil(page, `document.querySelector('main') !== null`, 30000);
+  await sleep(1200);
+  const here = await page.evaluate(`return location.origin + location.pathname;`);
+  return shell === true && typeof here === 'string' && here.startsWith(new URL(APP).origin);
+}
+
+/** The enumeration's own evidence, then the summary, then the exit code. */
+async function report() {
   if (seen.size > 0) {
     console.log('\n  accepted color-contrast foregrounds (NFR-A11Y-06):');
     for (const [fg, { min, nodes }] of [...seen.entries()].sort())
