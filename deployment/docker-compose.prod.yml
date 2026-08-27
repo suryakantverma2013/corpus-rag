@@ -86,6 +86,12 @@ x-corpus-env: &corpus-env
   # FR-KBM-09 `stalled` flag, which derives from it (R-41(5)): stall_after = this + 60.
   WORKER_JOB_TIMEOUT_SECONDS: ${WORKER_JOB_TIMEOUT_SECONDS:-900}
 
+  # FR-MSG-09 (R-98). Decides only whether an abstention OFFERS the "Answer from general
+  # knowledge" control -- it can never produce an answer on its own, which is why there is
+  # still no configuration that turns grounding off. Present here because a name in
+  # .env.prod that compose does not forward is a setting nobody reads (R-93(5)).
+  UNGROUNDED_FALLBACK_ENABLED: ${UNGROUNDED_FALLBACK_ENABLED:-false}
+
   EMBEDDING_BACKEND: ${EMBEDDING_BACKEND:-openai}
   LLM_BACKEND: ${LLM_BACKEND:-openai}
   OPENAI_API_KEY: ${OPENAI_API_KEY}

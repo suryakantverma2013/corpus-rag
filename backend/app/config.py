@@ -1173,6 +1173,32 @@ class GateSettings(BaseSettings):
         return self
 
 
+class UngroundedSettings(BaseSettings):
+    """FR-MSG-09's opt-in fallback answer (R-98).
+
+    **This switch cannot produce an answer.** It decides only whether the GUI *offers* the
+    control on an abstention; the answer itself is always a deliberate act by a person, one
+    question at a time. That distinction is the whole of R-98(2)'s safety argument, and it is
+    what lets `docs/LIMITATIONS.md` still say there is no setting that turns grounding off -
+    because there is not. A global "answer anyway" mode would break that promise silently for
+    every user of a deployment; this breaks it only for whoever pressed the button, in the
+    moment they pressed it.
+
+    Contrast :class:`GateSettings`, which deliberately has no `GATE_ENABLED`: turning the gate
+    off would *remove* a requirement, whereas turning this off returns the product to its
+    pre-R-98 behaviour, which is a supported state and the default.
+
+    Off by default, and the default is the argument: on 2026-08-27 three abstentions against a
+    calculus textbook were how B-007's corrupt text layer was found. A deployment that has not
+    thought about this should behave as it always did.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="UNGROUNDED_", env_file=".env", extra="ignore")
+
+    #: Whether the FR-MSG-09 control is offered at all. Default **false** (R-98(2)).
+    fallback_enabled: bool = Field(default=False)
+
+
 class EvalSettings(BaseSettings):
     """FR-EVL-01 post-hoc DeepEval scoring — the worker job (T-309, R-50).
 
@@ -1769,6 +1795,7 @@ class Settings(BaseSettings):
     rerank: RerankSettings = Field(default_factory=RerankSettings)
     gate: GateSettings = Field(default_factory=GateSettings)
     eval: EvalSettings = Field(default_factory=EvalSettings)
+    ungrounded: UngroundedSettings = Field(default_factory=UngroundedSettings)
     context: ContextSettings = Field(default_factory=ContextSettings)
     checkpointer: CheckpointerSettings = Field(default_factory=CheckpointerSettings)
     telemetry: TelemetrySettings = Field(default_factory=TelemetrySettings)
