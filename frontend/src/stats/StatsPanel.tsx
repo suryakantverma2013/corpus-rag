@@ -108,6 +108,17 @@ export function StatsPanel({ sessionStartedAt, entries, usage, modelName }: Stat
 
   return (
     <>
+      {/* The panel has exactly TWO sections, and the prototype says so twice over (T-723).
+          `SESSION` and `SOURCES REFERENCED` are the only labels carrying `letter-spacing: .12em`
+          — the card labels have none, which `StatsPanel.css.test.ts` already pins — and the
+          three cards below sit *inside* SESSION's run in the prototype's own nesting, between
+          its label and the sources container. So SESSION heads all five cards and every
+          `cardLabel` is an `<h3>` beneath it. It previously mixed both levels on one class:
+          `<h3>` here for DURATION/MESSAGES, `<h2>` for MODEL/CONTEXT/DEEPEVAL, which made three
+          cards siblings of the section they belong to. Nothing reported it — document order ran
+          h2, h3, h3, h2, h2, h2, which skips no level, so `heading-order` is silent and the
+          T-614 axe pass stays green either way. It is a semantics defect, not a conformance
+          one, and it is only visible to someone navigating by heading. */}
       <h2 className={styles.sectionLabel}>{SESSION_LABEL}</h2>
 
       <div className={styles.sessionGrid}>
@@ -116,7 +127,7 @@ export function StatsPanel({ sessionStartedAt, entries, usage, modelName }: Stat
       </div>
 
       <div className={`${styles.card} ${styles.panelCard}`}>
-        <h2 className={styles.cardLabel}>{MODEL_LABEL}</h2>
+        <h3 className={styles.cardLabel}>{MODEL_LABEL}</h3>
         <div className={`${styles.modelId} mono`}>{modelName}</div>
         <div className={styles.modelCaption}>{MODEL_CAPTION}</div>
       </div>
@@ -168,7 +179,7 @@ function ContextMeter({ usage }: { usage: ContextUsage | null }) {
   return (
     <div className={`${styles.card} ${styles.panelCard}`}>
       <div className={styles.cardHeader}>
-        <h2 className={styles.cardLabel}>{CONTEXT_LABEL}</h2>
+        <h3 className={styles.cardLabel}>{CONTEXT_LABEL}</h3>
         {/* The dash is aria-hidden because the caption below says the same thing in words,
             under exactly the same condition — the treatment `EvalAverages` gives its own. */}
         <span className={`${styles.tokens} mono`} aria-hidden={usage === null ? 'true' : undefined}>
@@ -204,7 +215,7 @@ function EvalAverages({ entries }: { entries: readonly TranscriptEntry[] }) {
   return (
     <div className={`${styles.card} ${styles.panelCard}`} title={EVAL_SCORE_TOOLTIP}>
       <div className={styles.cardHeader}>
-        <h2 className={styles.cardLabel}>{EVAL_LABEL}</h2>
+        <h3 className={styles.cardLabel}>{EVAL_LABEL}</h3>
         {/* The dash is aria-hidden because the sentence below says the same thing in words, and
             the two are rendered under exactly the same condition. */}
         <span className={`${styles.overall} mono`} aria-hidden={scored ? undefined : 'true'}>

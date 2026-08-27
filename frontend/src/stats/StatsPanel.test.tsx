@@ -52,7 +52,8 @@ function panel(props: Partial<StatsPanelProps> = {}): HTMLElement {
 }
 
 /**
- * The panel item holding the `<h2>` that reads `label`.
+ * The panel item holding the heading that reads `label` (an `<h3>` since T-723 for all five
+ * cards; the two `<h2>`s are the section labels, SESSION and SOURCES REFERENCED).
  *
  * Resolved as **the container child that contains the heading**, not by walking up a fixed number
  * of parents and not by matching a hashed class substring. Two cards put their heading inside a
@@ -81,8 +82,9 @@ afterEach(() => {
 
 describe('FR-ANL-01 — the SESSION cards', () => {
   it('labels the group and each card at the right heading level', () => {
-    // T-502 owns the document's only <h1>; SESSION is a group over the two stat cards, and the
-    // cards sit under it.
+    // T-502 owns the document's only <h1>. SESSION heads all FIVE cards, not just these two
+    // (T-723) — the full outline is asserted in the NFR-A11Y-03 block below; this one is about
+    // the FR-ANL-01 grid.
     panel();
     expect(screen.getByRole('heading', { name: 'SESSION' }).tagName).toBe('H2');
     expect(screen.getByRole('heading', { name: 'DURATION' }).tagName).toBe('H3');
@@ -325,15 +327,25 @@ describe('FR-ANL-05 — SOURCES REFERENCED', () => {
 });
 
 describe('NFR-A11Y-03 — the panel’s outline and its tab order', () => {
-  it('owns no <h1> and puts its five sections at h2', () => {
+  it('owns no <h1> and puts its two sections at h2 with every card at h3', () => {
+    // T-723. The panel has two sections, not five: the prototype gives `letter-spacing: .12em`
+    // to SESSION and SOURCES REFERENCED alone, and nests MODEL, CONTEXT WINDOW and DEEPEVAL
+    // inside SESSION's own run. This test previously asserted "five sections at h2", which
+    // encoded the defect as intent — three cards were siblings of the section containing them.
+    //
+    // Asserted as the full ordered outline rather than as two lists, because the levels are
+    // only meaningful in document order: a card promoted back to h2 keeps every heading present
+    // and every level occupied, so a membership check would still pass.
     panel({ entries: [scored({ relevancy: 0.9, faithfulness: 0.9 })] });
     expect(screen.queryByRole('heading', { level: 1 })).toBeNull();
-    expect(screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual([
-      'SESSION',
-      'MODEL',
-      'CONTEXT WINDOW',
-      'DEEPEVAL · SESSION AVG',
-      'SOURCES REFERENCED',
+    expect(screen.getAllByRole('heading').map((h) => `${h.tagName} ${h.textContent}`)).toEqual([
+      'H2 SESSION',
+      'H3 DURATION',
+      'H3 MESSAGES',
+      'H3 MODEL',
+      'H3 CONTEXT WINDOW',
+      'H3 DEEPEVAL · SESSION AVG',
+      'H2 SOURCES REFERENCED',
     ]);
   });
 
