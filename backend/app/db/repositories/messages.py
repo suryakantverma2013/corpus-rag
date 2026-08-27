@@ -66,6 +66,12 @@ class MessageRepository(BaseRepository[Message]):
         subquery returns NULL and `seq < NULL` is false for every row. That is the safe
         direction — an absent history costs quality, a mis-scoped one leaks another
         conversation's turns into this prompt.
+        **FR-MSG-09 answers are excluded (R-98(5)).** They are persisted so a reload does
+        not lose them, but they cite nothing and are invented by construction, so letting one
+        back into the prompt would let an ungrounded claim ground a later answer - OI-32's
+        hazard with 'possibly poisoned' upgraded to 'fabricated'. The filter lives here, in
+        the query, rather than in the caller: `history.py` has two readers, and a
+        caller-side filter is one somebody can forget to copy.
         """
         cutoff = (
             select(Message.seq)
@@ -74,7 +80,11 @@ class MessageRepository(BaseRepository[Message]):
         )
         stmt = (
             select(Message)
-            .where(Message.conversation_id == conversation_id, Message.seq < cutoff)
+            .where(
+                Message.conversation_id == conversation_id,
+                Message.seq < cutoff,
+                Message.ungrounded.is_(False),
+            )
             .order_by(Message.seq)
         )
         return list((await self.session.scalars(stmt)).all())
@@ -91,7 +101,13 @@ class MessageRepository(BaseRepository[Message]):
             return []
         stmt = (
             select(Message)
-            .where(Message.conversation_id == conversation_id)
+            .where(
+                Message.conversation_id == conversation_id,
+                # Excluded here too (R-98(5)): the router *inspects* the
+                # conversation, and an invented turn would steer classification
+                # as readily as it would steer generation.
+                Message.ungrounded.is_(False),
+            )
             .order_by(Message.seq.desc())
             .limit(limit)
         )

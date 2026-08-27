@@ -17,7 +17,17 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import BigInteger, ForeignKey, Identity, Index, Integer, String, Text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    ForeignKey,
+    Identity,
+    Index,
+    Integer,
+    String,
+    Text,
+    false,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -53,6 +63,11 @@ class Message(CreatedAtMixin, Base):
     citations: Mapped[dict | None] = mapped_column(JSONB)
     evaluation: Mapped[dict | None] = mapped_column(JSONB)
     feedback: Mapped[Feedback | None] = mapped_column(str_enum(Feedback))
+    #: FR-MSG-09 (R-98): answered from the model's own training rather than from retrieved
+    #: passages. Load-bearing in exactly one place — `load_history` filters it out, because an
+    #: invented claim re-entering as trusted `assistant` speech could ground a later answer.
+    #: Never true for a user message, and never true beside a non-empty `citations`.
+    ungrounded: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
     model_name: Mapped[str | None] = mapped_column(String(100))
     prompt_tokens: Mapped[int | None] = mapped_column(Integer)
     completion_tokens: Mapped[int | None] = mapped_column(Integer)
