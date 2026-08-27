@@ -353,3 +353,13 @@ Three properties built in deliberately, each because the obvious version of the 
     rather than provides: encrypted volumes, or managed services that encrypt by default
     (DEPLOYMENT.md §8). Backups are the part most often missed — an encrypted volume protects the
     running disk and nothing else.
+14. **Figure serving is the one route that does not widen for administrators** (NFR-SEC-10). Every
+    other `/documents` route lets an administrator act on another user's document under FR-USR-04;
+    this one answers `404`, because the four siblings disclose *management* — a listing, a status, a
+    job id — while this discloses *content*: a rendered region of a page. Widening it would make it
+    the first route by which an administrator reads another user's document, which no requirement
+    asks for. It is served inline only, never as a download, and never for a document that is
+    deleted or not `ACTIVE`. What is served is a raster **re-encoded from a page region**, so no
+    active content of the original can survive into it — which is what admits it under R-31 while
+    the uploaded file itself stays unservable by any route (§9). Detection is heuristic and off by
+    default (DEPLOYMENT.md §15).

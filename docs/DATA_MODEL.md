@@ -97,6 +97,22 @@ One row per user. Advisory: `expires_at` is the only crash release and there is 
 **`audit_log`** — `actor_id, event_type, target_type, target_id, details (JSONB), created_at`,
 indexed on the actor and on `(event_type, created_at)`.
 
+**`document_figures`** — one row per figure extracted from a page (FR-ING-09), keyed by
+`(document_id, document_version)` exactly as chunks are: `page_number`, `figure_index`,
+`content_sha256`, `storage_uri`, `caption`, the four `bbox_*` floats, `width_px`/`height_px`,
+`byte_size`. **Derived presentation data, not corpus data** — it carries no text into retrieval,
+takes no embedding, and is no part of `embedding_fingerprint`, which is why enabling extraction
+forces no re-embed. The object key is the figure's **content hash rather than its ordinal**, so two
+identical crops in one version share one object and a re-ingestion producing the same crop
+overwrites it with the same bytes. The rasters live under the version prefix in object storage, so
+R-36's version swap and R-39's deletion purge them with everything else — nothing new collects them
+because nothing new has to.
+
+**`model_overrides`** — `slot` (primary key), `model_id`, `updated_by`, timestamps. One row per
+runtime model slot that an operator has overridden; environment configuration is the default and a
+row is the override (R-83). Deliberately excludes embeddings, whose model is an
+`embedding_fingerprint` input — changing that one is T-608's controlled rebuild, not a slot flip.
+
 **`turn_telemetry`** — one row per turn that *ran*: ids, outcome, error code, model, token counts,
 latency, groundedness. Indexed three ways — by `created_at` for retention, by
 `(conversation_id, created_at)` for a single conversation's history, and by
@@ -243,7 +259,7 @@ table.
 
 ## 10. Migrations
 
-Nine revisions, oldest first. `alembic upgrade head` runs them all on an empty database in a few
+11 revisions, oldest first. `alembic upgrade head` runs them all on an empty database in a few
 seconds.
 
 | Revision | Change |
@@ -257,6 +273,8 @@ seconds.
 | `c1a7f0e4b2d9` | drop the writerless `document_chunks.is_active` |
 | `2ee964422ed2` | `turn_telemetry` |
 | `73a7dfdf7582` | `turn_telemetry.groundedness` |
+| `a3f21c7be904` | `model_overrides` |
+| `402f3492aed5` | `document_figures` |
 
 `c1a7f0e4b2d9` is worth keeping as precedent. `is_active` had no production writer, so
 `is_active IS TRUE` was a tautology on every retrieval query and the access index carried a column

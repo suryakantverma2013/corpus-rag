@@ -251,3 +251,55 @@ def test_the_manifest_still_matches_the_specification() -> None:
         f"§5.2 declares {sorted(set(found))} but the manifest carries "
         f"{sorted(NFR_SEC_ROWS)}. Update `NFR_SEC_ROWS` in the same commit as the spec."
     )
+
+
+@nfr("NFR-SEC-10")
+def test_the_figure_route_is_the_only_documents_route_that_does_not_widen_for_an_administrator(
+) -> None:
+    """NFR-SEC-10's distinctive claim is about the shape of the route table, not one route.
+
+    The requirement says figures are served "under the same predicate as FR-RET-04", and
+    FR-RET-04 has **no administrator branch**. Every other route under `/documents` does widen,
+    under FR-USR-04 — so what this requirement actually asks for is an *asymmetry*, and an
+    asymmetry can only be checked against the whole table. That is this package's business; the
+    live behaviour is driven by the generated ownership cells and by
+    `tests/test_figure_route.py::test_an_administrator_gets_404_on_another_users_figure`.
+
+    Written as "exactly one" rather than "this one is False" deliberately. The failure worth
+    catching is a later reader harmonising the odd row with its four neighbours, and a test that
+    only inspects the figure row would also pass if somebody flipped the neighbours to match it.
+    """
+    # Scoped to routes that address **one document by id**, which took two corrections to get
+    # right and both are worth recording, because each made the test fail for a reason unrelated
+    # to this requirement:
+    #
+    #  - `not row.admin_widens` also matches `admin_widens is None`, the four collection routes
+    #    (upload, import, list, stream) where widening does not apply at all; and
+    #  - `list_documents` and `stream_documents` declare it **False** on their own merits -- they
+    #    are caller-scoped by design (R-41(1): there is no GUI for watching another user's KB),
+    #    which is a different decision from this one.
+    #
+    # What FR-USR-04 widens, and what NFR-SEC-10 refuses to, is *acting on a named document*.
+    addressed = [
+        row
+        for row in ROUTE_DECISIONS
+        if row.path.startswith(f"{API}/documents/{{document_id}}") and row.admin_widens is not None
+    ]
+    assert len(addressed) >= 4, (
+        "fewer document-addressing routes than the asymmetry needs to be meaningful; this guard "
+        "is measuring the wrong table"
+    )
+
+    owner_only = {row.name for row in addressed if row.admin_widens is False}
+    assert owner_only == {"get_document_figure"}, (
+        "NFR-SEC-10 requires exactly one /documents route to stay owner-only for an "
+        f"administrator, and the table now says {sorted(owner_only)}. If a route was added, "
+        "decide deliberately; if get_document_figure was widened, that makes it the first route "
+        "by which an administrator reads another user's document content."
+    )
+
+    figure = next(row for row in addressed if row.name == "get_document_figure")
+    assert figure.gate is Gate.USER, "owner-only means any authenticated user, not admin-gated"
+    assert figure.foreign == 404 and figure.admin_foreign == 404, (
+        "a foreign caller and a foreign administrator must be indistinguishable here"
+    )

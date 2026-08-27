@@ -36,12 +36,12 @@ and how many *run* depends on what is up — so treat them as a scale, not a che
 
 | Suite | Size | Run |
 |---|---|---|
-| Backend | 2,079 collected | `cd backend && OCR_LIVE_TEST=1 uv run pytest` |
+| Backend | 2,225 collected | `cd backend && OCR_LIVE_TEST=1 uv run pytest` |
 | — production scenarios | 23 | `uv run pytest tests/scenarios` |
 | — route security | 297 | `uv run pytest tests/security` |
 | — acceptance guards | 13 | `uv run pytest tests/acceptance` |
 | — documentation guards | 29 | `uv run pytest tests/docs` |
-| Frontend unit | 1,142 across 57 files | `cd frontend && npm test` |
+| Frontend unit | 1,190 across 58 files | `cd frontend && npm test` |
 | Browser journey | 1, ~20 s | `cd frontend && CORPUS_PASSWORD='…' npm run e2e` |
 | Visual fidelity (headed, both themes) | exit code = failures | `npm run fidelity` |
 | Accessibility (axe, 10 surfaces × 2 themes) | exit code = failures | `npm run a11y` |

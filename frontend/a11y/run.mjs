@@ -257,7 +257,21 @@ try {
       }
     } else {
       r.context('citation card (FR-CIT-03)', theme);
-      r.truthy('a citation chip opens the card', false, 'no [role="tooltip"] appeared');
+      // Split at the point of failure, because the two causes belong to different people and
+      // the old message could not tell them apart. T-718 reported this red in dark and green in
+      // light; T-722 re-ran it nine times without reproducing, and the triage cost was spent
+      // entirely on establishing which of these two it had been. `chip === false` means the
+      // transcript rendered no citation at all — a property of the corpus (an abstained answer
+      // has messages and no citation, R-23) rather than of the card, and `selectAnsweredChat`
+      // cannot see the difference because it selects on message count.
+      r.truthy(
+        'a citation chip opens the card',
+        false,
+        chip === true
+          ? 'a chip was focused and no [role="tooltip"] appeared — an FR-CIT-03 regression'
+          : 'no citation chip in this transcript: the selected conversation has messages but no ' +
+              'grounded answer, so there was nothing to hover — a corpus gap, not the card',
+      );
     }
     await dismissAll(page);
 

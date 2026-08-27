@@ -43,7 +43,7 @@ function setup(props: Partial<React.ComponentProps<typeof Composer>> = {}) {
   return { onSend, onOpenKnowledgeBase };
 }
 
-const input = () => screen.getByRole('combobox') as HTMLInputElement;
+const input = () => screen.getByRole('textbox') as HTMLTextAreaElement;
 const menu = () => screen.queryByRole('listbox');
 const atButton = () => screen.getByRole('button', { name: 'Reference a document' });
 const addButton = () => screen.getByRole('button', { name: 'Add documents' });
@@ -320,15 +320,56 @@ describe('FR-CMP-06 — the footer line', () => {
   });
 });
 
-describe('NFR-A11Y-03/04 — the combobox contract', () => {
-  it('reports its expanded state and the listbox it controls', () => {
+describe('NFR-A11Y-03/04 — the listbox contract', () => {
+  it('is a plain textbox: ARIA has no combobox role for a <textarea> (R-96)', () => {
     setup();
-    expect(input().getAttribute('aria-expanded')).toBe('false');
+    // Both absences together, because dropping only the role is not a fix -- `aria-expanded`
+    // is not permitted on a textbox either, and axe reports that instead. Asserted as the
+    // *absence* rather than by querying the role, because `getByRole('textbox')` above would
+    // keep passing if someone re-added `role="combobox"` to a control that also has a label.
+    expect(input().getAttribute('role')).toBeNull();
+    expect(input().getAttribute('aria-expanded')).toBeNull();
+  });
+
+  it('identifies the listbox it controls', () => {
+    setup();
+    expect(input().getAttribute('aria-controls')).toBeNull();
 
     type('@');
 
-    expect(input().getAttribute('aria-expanded')).toBe('true');
     expect(input().getAttribute('aria-controls')).toBe(menu()?.id);
+  });
+
+  it('announces the open menu, since the field can no longer report expanded (R-96)', () => {
+    setup();
+    const region = () => document.querySelector('[aria-live="polite"]');
+    // Present and empty while shut: a live region that only enters the DOM once it has text is
+    // frequently never announced, because the AT did not observe it change.
+    expect(region()).not.toBeNull();
+    expect(region()?.textContent).toBe('');
+
+    type('@');
+
+    // Count taken from the fixture, so adding a row to DOCUMENTS cannot silently make this
+    // assert the wrong number while still passing on the wording.
+    expect(region()?.textContent).toBe(
+      `${DOCUMENTS.length} documents available. Use the arrow keys to reference one.`,
+    );
+  });
+
+  it('says "1 document" rather than "1 documents"', () => {
+    setup({ documents: [DOCUMENTS[0]] });
+    type('@');
+    expect(document.querySelector('[aria-live="polite"]')?.textContent).toBe(
+      '1 document available. Use the arrow keys to reference one.',
+    );
+  });
+
+  it('keeps the @ button as the second carrier of the expanded state', () => {
+    setup();
+    expect(atButton().getAttribute('aria-expanded')).toBe('false');
+    type('@');
+    expect(atButton().getAttribute('aria-expanded')).toBe('true');
   });
 
   it('opens with no active option, so Enter still sends', () => {

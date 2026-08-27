@@ -343,7 +343,7 @@ Two volumes hold state you cannot rebuild:
 | Volume | Holds | Back up |
 |---|---|---|
 | `pgdata` | the `corpus` **and** `keycloak` databases | **yes** |
-| `minio-data` | every uploaded original | **yes** |
+| `minio-data` | every uploaded original, **and every rendered figure** if §15 is on | **yes** |
 | `redis-data` | the arq queue and rate-limit counters | no — a lost queue costs in-flight ingestions, which are re-drivable |
 | `clamav-data` | virus signatures | no — `freshclam` re-downloads them |
 | `ocr-tessdata` | language packs | no — re-seeded from the image while the volume is empty |
@@ -469,6 +469,7 @@ worth stating: the command will succeed, and take data with it.
 |---|---|
 | `2ee964422ed2`, `73a7dfdf7582` | **drop `turn_telemetry`** — every retained turn metric, gone |
 | `a3f21c7be904` | **drops `model_overrides`** — every runtime model slot reverts to its environment default |
+| `402f3492aed5` | **drops `document_figures`** — the rows only. The rasters stay in object storage, unreferenced, until the document is replaced or deleted and its version prefix is purged |
 | `b41c7e9d0a52` | re-widens a uniqueness rule; its own comment records that the reverse is **only valid while no two live-and-deleted rows share a checksum**, i.e. it fails on any corpus where something was deleted and re-uploaded |
 | `c1a7f0e4b2d9` | restores a dropped column with no data to put back into it |
 
@@ -574,6 +575,9 @@ Prefer off-peak. Each rebuild ends with a version swap, and a swap landing in th
 turn can cost that one turn its citations — the same window a document replacement already opens.
 
 ## 10. Optical character recognition (optional)
+
+> One of two optional ingestion features. The other is figure extraction (§15), and **if you turn
+> both on you must also raise `WORKER_JOB_TIMEOUT_SECONDS`** — see §15.
 
 A scanned PDF carries no character data, so without recognition it fails ingestion outright with
 `NO_EXTRACTABLE_TEXT` — an honest answer, and a poor one for a corpus of scans. FR-ING-07 makes
@@ -735,11 +739,14 @@ the SSE streaming path, the multipart upload path and the session cookie togethe
 | Login → 400 "Account is not fully set up" | a Keycloak required action is set | clear it; never set a temporary password (§5) |
 | Session lost on every page reload | `Secure` cookie dropped at a non-localhost plain-HTTP origin | terminate TLS (§7) |
 | Answers arrive all at once instead of streaming; document list stops updating | proxy buffering re-enabled | `deployment/nginx/streaming.inc` must stay included by the `/api/` location |
-| `413` on a large upload | `client_max_body_size` below the 50 MB limit | it is 64m in the shipped config |
+| `413` on a large upload | `client_max_body_size` below `UPLOAD_MAX_FILE_BYTES` | it is `320m` in the shipped config against a 300 MB limit (R-93(4)); nginx refuses at the edge with its own page and **nothing in the application log** |
 | Everything times out on first `--wait` | Docker memory | give Docker ~6 GB (§1) |
 | A scanned PDF fails with `NO_EXTRACTABLE_TEXT` | recognition off, or the sidecar unreachable | §10 — **both** `--profile ocr` and `PARSER_OCR_ENABLED=true`; then Retry the document |
 | A figure inside an otherwise *textual* PDF is not searchable | that page's recognition was skipped — usually an unreachable sidecar | the document still ingests (recognition fails open); `/health/ready/worker` answers 503 with `ocr: error` and the worker logs `pdf.recognition_degraded` |
 | The app refuses to boot naming `PARSER_OCR_BUDGET_SECONDS` | recognition budget + per-page timeout ≥ the job timeout | §10 — raise `WORKER_JOB_TIMEOUT_SECONDS` first |
+| The app refuses to boot naming `PARSER_FIGURE_BUDGET_SECONDS` | recognition and extraction are both on, and their budgets add inside one job — 600 + 60 + 300 against a 900 default | §15 — raise `WORKER_JOB_TIMEOUT_SECONDS` to at least 960 |
+| Figures are enabled but none ever appear under a citation | extraction runs at **ingestion**, and fails open | §15 — a document ingested before the flag was set has none until it is re-ingested; check the worker for `ingest.figures_stored` versus `ingest.figures_degraded` |
+| A citation shows no figure although its page clearly has one | detection is heuristic, or the page is a scan | §15 — a vector figure below the size floors is not detected, and a *scanned* page has no drawing operations to cluster |
 | A new language pack is ignored | the `ocr-tessdata` volume seeds only while empty | §10 — `docker volume rm` it; the sidecar's `/health` reports the digest it actually loaded |
 | Everything answers `502` after changing `PARSER_OCR_ENABLED` (or any `x-corpus-env` value) | `api` was recreated with a new IP; nginx resolved its upstream once at load | `restart web` — §10 |
 | `restore.sh` refuses, naming two different schema heads | the backup predates (or postdates) a migration this stack has run | roll the code back to the release the backup was taken from, or pass `--force` if that is deliberate — §9.3 |
@@ -795,8 +802,122 @@ bootstrap, a realm with its placeholders replaced, and an end-to-end journey pas
 10. **Tuned for recognition throughput.** OCR (§10) is optional, CPU-only, single-threaded by
     design and ships one language pack. The single thread is a determinism control and not a
     performance oversight, so "make it faster" means more worker processes, never more threads.
+    Figure extraction (§15) is CPU-bound render work in the same worker; the same answer applies.
 
 For a production rollout the shortest sensible path is: put the images behind your own
 orchestrator, replace PostgreSQL/Redis/object storage with managed equivalents, point
 `KEYCLOAK_SERVER_URL` and `KEYCLOAK_INTERNAL_URL` at your identity provider, terminate TLS at the
 edge, and keep the `init` step as a pre-deploy job.
+
+## 15. Figure extraction (optional)
+
+Where a PDF page carries a figure — a plot, a schematic, a photographic plate — extraction renders
+that region to a PNG at ingestion and stores it against the document version. When an answer cites
+that page, the figure is shown beneath the citation.
+
+The thing to understand before turning it on is what chooses the figure: **the citation's page
+locator, and never the model**. No marker, instruction or model output names, selects or describes
+it. So a rendered figure is a navigational aid pointing at the cited page — *not* a claim that the
+figure supports the sentence, and **not** a diagram the system drew. It ships **off**.
+
+### One switch, and there is no profile
+
+| Switch | Effect |
+|---|---|
+| `PARSER_FIGURES_ENABLED=true` | tells the worker to extract during ingestion. |
+
+That is the whole of it. Extraction is in-process PyMuPDF, so unlike recognition (§10) there is no
+sidecar, no `--profile`, no host to point at and no second half to forget. If you went looking for
+one, this paragraph is why you did not find it.
+
+```bash
+docker compose -f deployment/docker-compose.prod.yml --env-file deployment/.env.prod \
+    up -d --wait
+```
+
+### What extraction costs
+
+| | |
+|---|---|
+| Disk | the only real cost. Bounded per document *version* by `PARSER_FIGURE_MAX_PER_DOCUMENT` × `PARSER_FIGURE_MAX_BYTES` — 200 × 8 MB, a ceiling no real document approaches. |
+| CPU | one region at a time in the ingestion worker, bounded by `PARSER_FIGURE_MAX_RENDER_PIXELS` rather than by a clock. |
+| Latency | tens of milliseconds per figure — small beside parsing, and *far* smaller than a recognised page. |
+| Memory | one rendered region at a time; nothing is held between figures. |
+
+**Measured on synthetic A4 pages at the shipped 150 DPI** (this dev box; treat as a range, not a
+guarantee):
+
+| Figure | PNG | Render |
+|---|---|---|
+| small line plot, 146×137pt | ~6.7 KB | ~2 ms |
+| dense multi-series plot, half page | ~130 KB | ~20 ms |
+| photographic plate, half page | ~1.8 MB | ~45 ms |
+
+The photographic row is a deliberate worst case — incompressible noise. A real photograph
+compresses considerably better. A 200-figure technical document of vector plots lands nearer
+**25 MB** than the 1.6 GB ceiling.
+
+`PARSER_FIGURE_DPI` is the storage lever. Doubling it roughly doubles-to-quadruples a vector
+figure; for a figure that is *already* a raster the relationship is not a simple multiplier,
+because past the source image's own resolution you are storing interpolation.
+
+Two behaviours worth knowing, both deliberate:
+
+- A figure larger than `PARSER_FIGURE_MAX_BYTES` is **dropped, not truncated** — half a picture is
+  not a smaller picture.
+- Hitting `PARSER_FIGURE_MAX_PER_DOCUMENT` or `PARSER_FIGURE_BUDGET_SECONDS` **keeps what was found
+  and does not fail the document.** FR-ING-09 fails open: a figure is presentation data, and no
+  failure to draw one may cost a user a searchable document.
+
+### Running it beside recognition
+
+**They do not both fit at their shipped defaults, and the app will tell you so by refusing to
+start.** Both run inside one ingestion job, so their budgets add:
+
+```
+PARSER_OCR_BUDGET_SECONDS (600) + OCR_TIMEOUT_SECONDS (60) + PARSER_FIGURE_BUDGET_SECONDS (300)
+  = 960s  >  WORKER_JOB_TIMEOUT_SECONDS (900)
+```
+
+Raise the job timeout to at least **960** in `deployment/.env.prod` and both features come up. The
+refusal exists because the alternative is worse than an outage: arq would kill the job mid-pipeline,
+and R-41(5) derives the FR-KBM-09 *stalled* flag from this same timeout, so a healthy long ingestion
+would be reported to users as stuck.
+
+Raising it has one cost, and it is the flag's sensitivity: `stalled` fires at
+`WORKER_JOB_TIMEOUT_SECONDS + 60`, so at 1000 an ingestion is only called stalled after 1060s.
+
+### Turning it on over documents you already have
+
+**Nothing is re-embedded, and nothing needs to be.** This is the sharpest difference from §10, and
+the assumption most worth correcting: a figure is presentation data. It carries no text into
+retrieval, takes no embedding, and is **not** an `embedding_fingerprint` input — so unlike
+recognition, enabling extraction does **not** bump `PREPROCESSING_VERSION` and does **not** trigger
+a fleet-wide re-embed.
+
+The consequence is simply that existing documents have no figures until they are next ingested:
+
+1. Set `PARSER_FIGURES_ENABLED=true` and recreate the worker.
+2. New uploads get figures immediately.
+3. For documents already in the corpus, re-drive the ones you care about with **Replace** (upload
+   the same file again), or `tools.reembed run` if you were going to re-embed for another reason
+   anyway — extraction rides along with any re-ingestion.
+
+There is deliberately no backfill job. Extraction is optional, per-corpus in value, and re-rendering
+every page of every document is a cost decision an operator should make deliberately (R-84(5)'s
+argument, one feature over).
+
+### What extraction does not do
+
+- **It does not generate diagrams.** Ask the model to draw one and it still abstains, exactly as it
+  did before this feature existed — a drawing's lines are claims no retrieved passage supports.
+  Generated diagrams are declined for now and would need their own ruling.
+- **It does not find every figure.** Detection is heuristic: a figure below the size floors, one
+  drawn as a single flat fill, or one on a *scanned* page (no drawing operations to cluster) is not
+  detected. A missed figure costs nothing else — figures never touch the page's text.
+- **It does not always find only figures.** A boxed sidebar, a large displayed equation or heavy
+  page furniture can be extracted as a "figure". Also harmless, for the same reason.
+- **It does not make the original downloadable.** What is served is a raster re-encoded from a page
+  region, over the application's own authenticated route, inline only. The uploaded file itself
+  remains unservable by any route, and an administrator cannot fetch another user's figure — see
+  [SECURITY.md](SECURITY.md) §11.

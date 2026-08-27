@@ -45,6 +45,24 @@ const SEND_LABEL = 'Send';
  */
 const INPUT_LABEL = 'Ask a question'; // TBD(§8.4)
 
+/**
+ * FR-CMP-04 (R-96) — what replaces `aria-expanded` on the field.
+ *
+ * The field is a plain textbox, so it cannot carry the expanded state (see the `<textarea>`
+ * below). The `@` button still carries `aria-expanded`, but that only speaks when focus is on
+ * the button, and the case that actually happens is a user typing `@` into the field. Without
+ * this line they would be told nothing at all: §8.56(2) opens the menu with **no active
+ * option**, so `aria-activedescendant` is empty and nothing else speaks until they deliberately
+ * arrow into the list — which they have no way to know is there.
+ *
+ * It names the arrow keys for the same reason. Under R-96 the field no longer reports itself as
+ * a combobox, so the interaction cannot be inferred from the role either.
+ */
+const mentionAnnouncement = (count: number): string =>
+  count === 1
+    ? '1 document available. Use the arrow keys to reference one.'
+    : `${count} documents available. Use the arrow keys to reference one.`;
+
 export interface ComposerProps {
   /** FR-CMP-04's rows — the FR-ORC-06 scope: global documents plus this chat's attachments. */
   documents: readonly MentionDocument[];
@@ -258,10 +276,19 @@ export function Composer({
           rows={1}
           placeholder={PLACEHOLDER}
           value={value}
-          // NFR-A11Y-03's combobox half. `aria-autocomplete="list"` rather than `"both"`: the
+          // NFR-A11Y-03's listbox half, in the shape ARIA permits on a `<textarea>` (R-96).
+          //
+          // **There is deliberately no `role="combobox"` and no `aria-expanded` here, and the
+          // two go together.** ARIA 1.2 allows `combobox` on `<input type="text">` but not on a
+          // `<textarea>`, which R-91 made this control; and dropping only the role is not a fix
+          // — `aria-expanded` is not permitted on a plain `textbox` either, so that trades an
+          // `aria-allowed-role` violation for an `aria-allowed-attr` one. Both measured against
+          // axe-core before choosing. The expanded state moves to the live region below.
+          //
+          // What stays is everything ARIA does permit on a textbox, and it is the whole
+          // keyboard contract NFR-A11Y-03 actually asks for: the list is identified, virtual
+          // focus is carried, and `aria-autocomplete="list"` rather than `"both"` because the
           // menu never writes into the field as you type — an insert happens only on selection.
-          role="combobox"
-          aria-expanded={mentionOpen}
           aria-controls={mentionOpen ? MENTION_LIST_ID : undefined}
           aria-autocomplete="list"
           aria-activedescendant={
@@ -289,6 +316,17 @@ export function Composer({
         >
           {SEND_LABEL}
         </button>
+      </div>
+
+      {/* FR-CMP-04 (R-96) — the expanded state, relocated off the field.
+          `polite`, so it never interrupts; empty while the menu is shut, which is also what
+          stops it re-announcing on an unrelated re-render (NFR-A11Y-05's no-repeat rule applied
+          to a region that requirement does not itself own — this change is user-caused, not
+          asynchronous). Rendered unconditionally: a live region added to the DOM at the moment
+          it gains text is frequently not announced at all, because the AT never observed it
+          becoming non-empty. */}
+      <div className="visually-hidden" aria-live="polite" role="status">
+        {mentionOpen ? mentionAnnouncement(documents.length) : ''}
       </div>
 
       {/* FR-CMP-06. `aria-live` is deliberately absent: the count changes only when documents

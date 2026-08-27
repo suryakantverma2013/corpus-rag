@@ -17,7 +17,7 @@ they are wrong, and the rules the whole surface obeys.
 |---|---|---|
 | `app/config.py` | **what exists** — 188 names, types, defaults, validators | 29 groups, each with an `env_prefix` |
 | `backend/.env.example` | **what you may set** — documentation only, no runtime role | guarded both ways |
-| `x-corpus-env` | **what a container actually receives** — 39 keys | `deployment/docker-compose.prod.yml` |
+| `x-corpus-env` | **what a container actually receives** — 45 keys | `deployment/docker-compose.prod.yml` |
 
 **Compose does not forward `--env-file` into containers.** That file populates *interpolation* only.
 A setting reaches the api and worker processes **only if its name appears as a key in
@@ -69,9 +69,9 @@ there is no "off"), `QUEUE_BACKEND` (`arq` | `none` — with `none` the job row 
 `KEYCLOAK_LIVE_ADMIN_PASSWORD` and `OCR_LIVE_TEST` are read from the environment by the tests, not by
 `Settings`. Without them the corresponding tests **skip**, and a skipped test is not a passing one.
 
-## 3. The seven boot refusals
+## 3. The eight boot refusals
 
-The app declines to start rather than run a configuration that would be wrong. **Four of the seven
+The app declines to start rather than run a configuration that would be wrong. **Four of the eight
 exist because the bad setting would otherwise be a silent no-op, not a crash** — which is the whole
 argument for having them.
 
@@ -84,6 +84,7 @@ argument for having them.
 | `CONTEXT_ANSWER_RESERVE_TOKENS` < `LLM_MAX_OUTPUT_TOKENS` | An answer may run to that ceiling, so a smaller reserve cannot keep the conversation inside its budget |
 | `GRAPH_MAX_RETRIES` > 1 | The retry composes the rejected answer as a single-shot probe; a second cycle repeats the first's inputs at full latency for nothing |
 | OCR budget + timeout > `WORKER_JOB_TIMEOUT_SECONDS` | A healthy long ingestion would render as *stalled* |
+| OCR budget + timeout + figure budget > `WORKER_JOB_TIMEOUT_SECONDS` | The same, for the pair: recognition and figure extraction run in **one** ingestion job, so their budgets add. At the shipped defaults that is 600 + 60 + 300 = **960s against 900** — **enabling both features without raising the job timeout is a stack that does not start** |
 
 Roughly forty more refusals live inside individual groups — ranges, floors, closed vocabularies, and
 two that exist because a wrong value would **hang a process rather than degrade it**
@@ -115,8 +116,14 @@ Changing one of these alone produces something that looks fine and is not:
   change means **a full re-embed** of every document.
 - **`PARSER_OCR_ENABLED` / the `ocr` compose profile** — two switches that must agree, and neither
   complains alone.
-- **`WORKER_JOB_TIMEOUT_SECONDS`** has three consumers: the job budget, the denominator of the
-  *stalled* flag in the knowledge-base list, and the OCR worst-case ceiling.
+- **`PARSER_FIGURES_ENABLED` is the opposite case, and it is worth stating for that reason** — it is
+  **one** switch with **no** compose profile, because extraction is in-process and has no sidecar.
+  If you go looking for its second half you will not find one.
+- **`PARSER_OCR_ENABLED` + `PARSER_FIGURES_ENABLED`** — turning both on needs
+  `WORKER_JOB_TIMEOUT_SECONDS` raised with them; a refusal enforces it (§3).
+- **`WORKER_JOB_TIMEOUT_SECONDS`** has four consumers: the job budget, the denominator of the
+  *stalled* flag in the knowledge-base list, the OCR worst-case ceiling, and the figure budget
+  that adds to it.
 
 ## 6. Settings that deliberately do not exist
 
@@ -137,8 +144,8 @@ Three settings were **removed** for the opposite reason — documented but wired
 
 About 62% of settable fields carry a `# TBD(§8.4)` marker: a value chosen on reasoning and not yet
 settled by measurement. They cluster in latency, quality and cost tuning — chunking, retrieval,
-rerank, the router, the worker, OCR — and are **entirely absent from connection identity, auth and
-session security**. Nothing marked provisional is a correctness boundary.
+rerank, the router, the worker, OCR, figure extraction — and are **entirely absent from connection
+identity, auth and session security**. Nothing marked provisional is a correctness boundary.
 
 Some have since been closed by measurement and say so at the field, which is the model for how one
 should die: `RERANK_SCORE_SCALE` (measured across 90 passages and two models — the models return

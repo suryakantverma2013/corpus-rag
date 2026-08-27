@@ -351,6 +351,53 @@ async def test_the_matching_user_is_sent_on_to_the_provider(settings) -> None:  
     assert "hash=" in onward
 
 
+async def test_leg_two_redirect_uri_carries_no_reserved_oidc_parameter(settings) -> None:  # noqa: ANN001
+    """Keycloak refuses a `redirect_uri` whose query holds a reserved OIDC parameter.
+
+    **This is a regression guard for a defect that shipped and then broke without a code
+    change.** T-214 carried the signed state onward as `?state=`, which Keycloak accepted
+    through 26.4 and **rejects from 26.7.1** — `RedirectUtils` logs
+    `contains forbidden OIDC parameter 'state' in query string`, the event is
+    `CLIENT_INITIATED_ACCOUNT_LINKING_ERROR`/`invalid_redirect_uri`, and the user is shown a
+    bare "Invalid Request" page that names neither the parameter nor the cause. The dev
+    container tracks `:latest` while production pins a version, so it failed in one environment
+    and not the other.
+
+    The whole set is asserted rather than just `state`: `code` would fail identically, and the
+    next reader reaching for a name to carry something else deserves the rule, not the instance.
+    """
+    sub = uuid.uuid4()
+    raw = cloud_links.encode_state(
+        cloud_links._LinkState(
+            sub=sub, provider=CloudProvider.GOOGLE, nonce="n", expires_at=int(time.time()) + 60
+        ),
+        settings,
+    )
+    onward = await cloud_links.complete_authentication(
+        code="c", raw_state=raw, kc=_FakeKeycloak(id_token_sub=sub), settings=settings
+    )
+
+    redirect_uri = parse_qs(urlparse(onward).query)["redirect_uri"][0]
+    carried = set(parse_qs(urlparse(redirect_uri).query))
+    reserved = {
+        "state",
+        "code",
+        "session_state",
+        "iss",
+        "error",
+        "error_description",
+        "error_uri",
+        "id_token",
+        "access_token",
+        "token_type",
+        "expires_in",
+    }
+    assert carried & reserved == set(), f"reserved OIDC parameter in redirect_uri: {carried}"
+    # And it still carries the state, under a name Keycloak permits — without this the guard
+    # passes for a flow that forgot to carry it at all, which fails at the completion endpoint.
+    assert "link_state" in carried
+
+
 async def test_grant_read_token_targets_the_broker_client(settings) -> None:  # noqa: ANN001
     """The step whose absence made every successful link unusable (T-214, live 2026-08-11).
 
@@ -608,7 +655,7 @@ async def test_completion_grants_read_token_before_reporting_success(
     )
 
     resp = await client.get(
-        "/api/v1/cloud/links/google/complete", params={"state": state}, follow_redirects=False
+        "/api/v1/cloud/links/google/complete", params={"link_state": state}, follow_redirects=False
     )
 
     assert resp.status_code == 303
@@ -653,7 +700,7 @@ async def test_a_link_that_did_not_land_is_not_reported_as_success(
         get_settings(),
     )
     resp = await client.get(
-        "/api/v1/cloud/links/google/complete", params={"state": state}, follow_redirects=False
+        "/api/v1/cloud/links/google/complete", params={"link_state": state}, follow_redirects=False
     )
     assert "link=failed" in resp.headers["location"]
 

@@ -117,8 +117,9 @@ describe('FR-MSG-07 — rendered Markdown', () => {
       answer([
         {
           text:
-            // `#` maps to <h3>, not <h1>: T-502 owns the document's only <h1> and T-504's chat
-            // title is the <h2> inside <main>, so a document-supplied heading starts below both.
+            // A message's first heading is always <h3>, whatever its `#` count (R-97): T-502
+            // owns the document's only <h1> and T-504's chat title is the <h2> inside <main>,
+            // so a content-supplied heading starts below both. Levels in markdown.test.ts.
             '# Heading\n\nA **bold** word and `code`.\n\n' +
             '- one\n- two\n\n' +
             '| a | b |\n| :-- | --: |\n| 1 | 2 |\n\n' +

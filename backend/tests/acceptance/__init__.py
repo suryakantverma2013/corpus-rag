@@ -577,6 +577,51 @@ SPEC_9_ROWS: dict[str, tuple[Evidence, ...]] = {
             "tests/test_recognition.py::test_re_ingesting_a_recognised_document_reuses_every_vector"
         ),
     ),
+    # FR-ING-09. The `Default`s are the policy R-94(7) bounds the feature with; the PyTests are
+    # the three properties those numbers exist to buy, and each is a different failure direction.
+    # `test_extraction_is_off_by_default_and_the_detector_does_not_read_the_flag` is the row's
+    # most load-bearing pointer: it pins BOTH halves of R-94(7), that the feature ships off and
+    # that the flag gates the extraction *pass* rather than the detector, which is what lets the
+    # detector be tested without arming a container. The byte cap's test carries the drop-never-
+    # truncate rule, and the clock's carries fail-open - a stopped pass keeps what it found.
+    "Figure extraction (Rev 0.61, FR-ING-09, R-94)": (
+        Default("app.config:ParserSettings", "figures_enabled", False),
+        Default("app.config:ParserSettings", "figure_dpi", 150),
+        Default("app.config:ParserSettings", "figure_min_width_points", 60.0),
+        Default("app.config:ParserSettings", "figure_min_height_points", 60.0),
+        Default("app.config:ParserSettings", "figure_min_area_fraction", 0.01),
+        Default("app.config:ParserSettings", "figure_max_per_page", 10),
+        Default("app.config:ParserSettings", "figure_merge_padding_points", 12.0),
+        Default("app.config:ParserSettings", "figure_caption_max_distance_points", 40.0),
+        Default("app.config:ParserSettings", "figure_max_per_document", 200),
+        Default("app.config:ParserSettings", "figure_budget_seconds", 300.0),
+        Default("app.config:ParserSettings", "figure_max_bytes", 8 * 1024 * 1024),
+        PyTest(
+            "tests/test_figures.py"
+            "::test_extraction_is_off_by_default_and_the_detector_does_not_read_the_flag"
+        ),
+        PyTest("tests/test_figure_extraction.py::test_a_figure_over_the_byte_cap_is_dropped_not_truncated"),
+        PyTest(
+            "tests/test_figure_extraction.py::test_an_exhausted_clock_stops_the_pass_without_failing_it"
+        ),
+        PyTest("tests/test_figure_extraction.py::test_an_extracted_figure_carries_no_text_of_the_document"),
+    ),
+    # FR-CIT-07 and NFR-SEC-10 share a row because they are one surface from two sides: what is
+    # rendered, and who may fetch it. The administrator pointer is the one to protect - it is the
+    # single most likely thing for a later reader to "harmonise" with the four sibling
+    # /documents routes, all of which DO widen under FR-USR-04. The `figures`-key pointer pins
+    # absent-not-null, which a client distinguishes and a schema change would silently flip.
+    "Figure display and serving (Rev 0.61, FR-CIT-07, NFR-SEC-10, R-94)": (
+        PyTest("tests/test_figure_route.py::test_the_owner_is_served_the_raster_inline"),
+        PyTest("tests/test_figure_route.py::test_an_administrator_gets_404_on_another_users_figure"),
+        PyTest("tests/test_figure_route.py::test_storage_being_down_is_503_rather_than_404"),
+        PyTest("tests/test_figure_route.py::test_no_route_serves_the_uploaded_file"),
+        PyTest("tests/test_figure_route.py::test_the_cache_lifetime_is_long_and_private"),
+        PyTest("tests/test_figure_citations.py::test_a_cited_page_resolves_the_figures_printed_on_it"),
+        PyTest("tests/test_figure_citations.py::test_a_citation_with_no_figure_carries_no_key"),
+        PyTest("tests/test_figure_citations.py::test_another_users_figure_is_never_resolved"),
+        Fidelity("FR-CIT-07 figure under the citation"),
+    ),
     "Retrieval default (Rev 0.5)": (
         PyTest("tests/test_fusion.py::test_agreement_between_arms_beats_a_single_arms_top_hit"),
         PyTest("tests/test_router.py::test_every_class_routes_the_way_fr_ret_03_says"),
@@ -726,11 +771,19 @@ NFR_DISPOSITIONS: dict[str, NfrRow] = {
         "app/services/ocr.py reaches deployment/ocr over a local socket; tests/test_ocr.py "
         "guards no in-process engine and no third-party destination"
     ),
-    # Specified by R-94 and **not yet built**: T-713 ships the detector, T-715 the route this
-    # requirement is about. Recorded `OPEN` rather than dispositioned, because the report's
-    # residual list is the one place a half-built requirement must be visible — the alternative
-    # is a green manifest for a route that does not exist.
-    "NFR-SEC-10": _open("R-94(6) specifies it; T-715 builds the route, T-713 detection only"),
+    # Built and closed at T-717. It was `OPEN` from T-713 until T-715 shipped the route, which is
+    # the register working - but the entry then sat for two tasks still saying "T-715 builds the
+    # route" after T-715 had, which is the register rotting. The disposition and the sentence
+    # under it move together (R-56).
+    #
+    # The evidence leads with the administrator case deliberately: NFR-SEC-10 says *the same
+    # predicate as FR-RET-04*, which has no administrator branch, so this is the one route under
+    # /documents that does not widen - and the four beside it do.
+    "NFR-SEC-10": _met(
+        "tests/test_figure_route.py — owner-only with an administrator 404, inline only, 404 for "
+        "deleted/non-ACTIVE/superseded and 503 (never 404) when storage is down; the "
+        "tests/security/ matrix row pins admin_widens=False"
+    ),
     # The policy is configuration rather than code, so the evidence is the guard that reads
     # `deployment/nginx/` back — a header nothing checks is a header that drifts.
     "NFR-SEC-11": _met(
@@ -787,7 +840,10 @@ NFR_DISPOSITIONS: dict[str, NfrRow] = {
     # 5.8 Accessibility
     "NFR-A11Y-01": _met("tokens.test.ts reduced-motion block incl. the --motion-dot exception"),
     "NFR-A11Y-02": _met("the repo-wide outline:none ban with its three enumerated exceptions"),
-    "NFR-A11Y-03": _met("oxlint jsx-a11y; per-component role and label assertions"),
+    "NFR-A11Y-03": _met(
+        "oxlint jsx-a11y; per-component role and label assertions; Composer.test.tsx pins the "
+        "R-96 shape (no combobox role and no aria-expanded on the textarea, asserted together)"
+    ),
     "NFR-A11Y-04": _met(
         "keyboard paths asserted per surface; both role=menu popovers dismiss on Tab"
     ),

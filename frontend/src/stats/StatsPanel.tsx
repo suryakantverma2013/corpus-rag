@@ -279,7 +279,19 @@ function SourcesReferenced({ entries }: { entries: readonly TranscriptEntry[] })
       {sources.length === 0 ? (
         <div className={styles.sourcesEmpty}>{SOURCES_EMPTY}</div>
       ) : (
-        <ul className={styles.list} aria-labelledby={labelId}>
+        // `tabIndex={0}` is load-bearing, not decoration (T-720). R-92(3) capped this list at
+        // three rows and gave it `overflow-y: auto`, which made it a scroll container holding
+        // **no focusable descendant** — so a keyboard-only user could not scroll it and the
+        // fourth source onwards was unreachable. That is WCAG 2.1.1/2.1.3, Level A, and it is
+        // what `scrollable-region-focusable` reports. Unconditional rather than derived from
+        // `sources.length`: whether it overflows depends on zoom and font loading as well as
+        // count, and a length test would re-derive the three-row cap R-92(4) deliberately
+        // *measured*. The rows themselves must stay unfocusable — they are not interactive, and
+        // one tab stop per source is the trap §8.56(2) and R-74(8) both name.
+        // `aria-labelledby` is what keeps this a *named* tab stop; the two go together.
+        // The two a11y linters disagree here and the WCAG-tagged one wins; see above.
+        // oxlint-disable-next-line jsx-a11y/no-noninteractive-tabindex
+        <ul className={styles.list} aria-labelledby={labelId} tabIndex={0}>
           {sources.map((source) => (
             <SourceCard key={source.name} source={source} />
           ))}

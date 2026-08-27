@@ -689,15 +689,11 @@ DEFERRED_NFRS: Final[dict[str, str]] = {
         "worker-side isolation with no request-path surface; guarded in tests/test_ocr.py "
         "and deployment/ocr/ rather than here."
     ),
-    # NFR-SEC-10 *will* be this package's business — it is the only NFR-SEC row that is
-    # purely a route — but the route does not exist yet: T-713 shipped detection only, and
-    # T-715 builds `GET /documents/{id}/figures/{figure_id}`. Deferred here and recorded
-    # `OPEN` in the acceptance manifest, which is the pair of entries that keeps a specified
-    # but unbuilt requirement visible in both registers instead of silently absent from both.
-    "NFR-SEC-10": (
-        "the route does not exist yet — T-715 builds it, and the matrix gains its rows "
-        "there (R-94(6))."
-    ),
+    # NFR-SEC-10's deferral is deliberately GONE, not reworded. T-715 built the route and the
+    # matrix gained its row, so this package now owns the requirement outright and the entry
+    # above it predicted exactly that. Leaving it would still pass — the guard next door is a
+    # containment check, not equality — which is precisely why removing it has to be deliberate:
+    # a deferral nobody deletes is how a covered requirement goes on reading as uncovered.
     "NFR-SEC-11": (
         "a response header set by the edge, not by the application — there is no request "
         "this package can drive that would exercise it, because nginx is not in the ASGI "

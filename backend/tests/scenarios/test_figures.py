@@ -66,6 +66,23 @@ def figures_on(**parser: object) -> Settings:
     )
 
 
+def figures_off(**parser: object) -> Settings:
+    """The same context with extraction disarmed, stated rather than inherited.
+
+    `queue.drain()` with no override builds its settings from the environment, so a developer
+    running the manual test round with `PARSER_FIGURES_ENABLED=true` in `backend/.env` turned
+    every "with the feature off" assertion here into its opposite -- and the tests still read as
+    if they had pinned it, because one of them says so in a comment. The shipped default being
+    off is a claim about `app/config.py`, not about this machine; it is asserted where it can be
+    read off the field (`test_figures.py`).
+    """
+    return Settings(
+        worker=WorkerSettings(max_tries=5, retry_base_seconds=0.01),
+        scanner=ScannerSettings(backend="structural"),
+        parser=ParserSettings(figures_enabled=False, ocr_enabled=False, **parser),
+    )
+
+
 async def figures_of(session: AsyncSession, document_id: object) -> list[DocumentFigure]:
     stmt = (
         select(DocumentFigure)
@@ -214,7 +231,7 @@ async def test_a_replace_with_figures_turned_off_leaves_no_stale_rows(
         headers=caller.headers,
     )
     assert replaced.status_code == 202, replaced.text
-    await queue.drain()  # the default context: PARSER_FIGURES_ENABLED is false
+    await queue.drain(settings_override=figures_off())
 
     assert await figures_of(session, document_id) == []
 
@@ -346,7 +363,7 @@ async def test_the_default_configuration_stores_no_figures_at_all(
         "/api/v1/documents", files=upload_files(figure_pdf()), headers=caller.headers
     )
     document_id = created.json()["document_id"]
-    await queue.drain()
+    await queue.drain(settings_override=figures_off())
 
     assert await figures_of(session, document_id) == []
     assert not [key for key in puts if "/artifacts/" in key]

@@ -61,6 +61,26 @@ describe('FR-LAY-01 landmarks (NFR-A11Y-03)', () => {
     expect(nav.compareDocumentPosition(main) & FOLLOWS).toBeTruthy();
     expect(main.compareDocumentPosition(aside) & FOLLOWS).toBeTruthy();
   });
+
+  it('makes the stats column a named tab stop, and <main> a focus target that is not (T-720)', () => {
+    shell();
+
+    // The column sets `overflow-y: auto` and StatsPanel contains nothing focusable, so once it
+    // overflows there is nothing to give it keyboard access (WCAG 2.1.1). It overflows by a
+    // measured 46px (686 in 640), constant across viewports because R-92 clamps the shell at
+    // `--app-min-h`. axe does NOT report this one -- its matcher wants a descendant wholly
+    // outside the region and a 46px clip never yields one -- so this is fixed on the
+    // requirement, and this test is the only thing guarding it. Named, because a nameless tab
+    // stop is a different defect.
+    const aside = screen.getByRole('complementary');
+    expect(aside.getAttribute('tabindex')).toBe('0');
+    expect(aside.getAttribute('aria-label')).toBe('Session statistics');
+
+    // Asserted beside it because the two values look alike and mean opposite things: -1 is the
+    // skip link's target and adds NO tab stop, 0 is a real one. Swapping them silently breaks
+    // either the bypass or the scroll access.
+    expect(screen.getByRole('main').getAttribute('tabindex')).toBe('-1');
+  });
 });
 
 describe('FR-LAY-02 showStats', () => {

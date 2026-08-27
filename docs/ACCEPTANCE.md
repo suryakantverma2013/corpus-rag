@@ -17,7 +17,7 @@ cd backend && uv run pytest tests/acceptance         # the rule the report canno
 
 The requirements come in two shapes and are checked differently.
 
-**Acceptance-critical literal values** — 60 rows covering the design tokens, the copy strings, the
+**Acceptance-critical literal values** — 62 rows covering the design tokens, the copy strings, the
 route and response contracts, the closed vocabularies and the numeric budgets. Each is mapped to
 one or more evidence pointers in `backend/tests/acceptance/`. Six kinds:
 
@@ -112,6 +112,14 @@ Printed from the manifest by `python -m tools.acceptance`; summarised here.
 **Nothing.** The residual list is empty and no §5 requirement carries an `OPEN` disposition. That
 is a recent state and it is worth saying how it was reached, because "empty" is the easiest thing
 in this document to fake.
+
+It has also not been continuously true, and the exception is the register working rather than
+failing. **NFR-SEC-10 was `OPEN` from T-713 to T-717**: R-94 specified the figure route before
+anything served it, and recording the requirement as open for those three tasks is what kept a
+specified-but-unbuilt guarantee visible instead of silently absent. T-715 built the route; T-717
+closed the disposition and deleted the matching deferral in `tests/security/`. The lesson from that
+interval is the sentence under the disposition, not the disposition itself — it went on saying
+"T-715 builds the route" for two tasks *after* T-715 had.
 
 The review filed **eight** gaps. Two were missing *instruments* and were closed by building them:
 T-613 committed the environment-variable coverage check, and T-614 committed the accessibility

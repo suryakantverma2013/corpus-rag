@@ -207,13 +207,62 @@ describe('inline constructs', () => {
 });
 
 describe('block constructs', () => {
-  it('clamps heading levels into h3..h6', () => {
-    // T-502 owns the only <h1> and T-504's chat title is the <h2>, so a document-supplied
-    // heading must start below both rather than competing with them in the outline.
-    const levels = text([{ text: '# a\n\n## b\n\n#### d\n\n###### f' }])
+  /** Emitted heading levels, in document order. */
+  const levelsOf = (source: string) =>
+    text([{ text: source }])
       .filter((b) => b.kind === 'heading')
       .map((b) => (b as Extract<Block, { kind: 'heading' }>).level);
-    expect(levels).toEqual([3, 4, 6, 6]);
+
+  it('starts a message at h3 and descends one level per nesting step', () => {
+    // T-502 owns the only <h1> and T-504's chat title is the <h2>, so a content-supplied
+    // heading must start below both rather than competing with them in the outline. R-97 maps
+    // by OUTLINE POSITION, not by `#` count: `#` + 2 emitted an <h5> directly after the chat
+    // title's <h2> for any answer opening `### ...`, which is the T-721 skip.
+    expect(levelsOf('# a\n\n## b\n\n#### d\n\n###### f')).toEqual([3, 4, 5, 6]);
+  });
+
+  it('rebases a message whose headings do not start at `#`', () => {
+    // The T-721 case verbatim: an answer opening at `###` still starts at <h3>.
+    expect(levelsOf('### a\n\n#### b')).toEqual([3, 4]);
+  });
+
+  it('keeps sibling headings at one level, however many there are', () => {
+    // The `## A / ## B / ## C` shape, which is what a long answer actually looks like — and the
+    // one case `heading-order` cannot police, since nesting each section one deeper than the
+    // last descends by exactly one every time. Caught by mutation (`>=` -> `>`), not by axe.
+    expect(levelsOf('## a\n\n## b\n\n## c\n\n## d\n\n## e')).toEqual([3, 3, 3, 3, 3]);
+    expect(levelsOf('# a\n\n## b\n\n## c\n\n# d')).toEqual([3, 4, 4, 3]);
+  });
+
+  it('treats a shallower heading as a new top-level section, not a deeper one', () => {
+    expect(levelsOf('#### a\n\n## b\n\n### c')).toEqual([3, 3, 4]);
+  });
+
+  it('clamps beyond four nesting levels at h6', () => {
+    expect(levelsOf('# a\n\n## b\n\n### c\n\n#### d\n\n##### e')).toEqual([3, 4, 5, 6, 6]);
+  });
+
+  it('never skips a level, for any `#` sequence', () => {
+    // The property axe's `heading-order` checks, asserted directly. A plain shift by the
+    // shallowest heading present would pass every case above and fail the first of these.
+    const sources = [
+      '# a\n\n### b',
+      '###### a\n\n# b\n\n###### c',
+      '## a\n\n## b\n\n##### c\n\n# d',
+      '##### a\n\n#### b\n\n### c\n\n## d\n\n# e',
+      '# a\n\n## b\n\n### c\n\n#### d\n\n##### e\n\n###### f',
+    ];
+    for (const source of sources) {
+      const levels = levelsOf(source);
+      expect(levels[0]).toBe(3);
+      for (let i = 1; i < levels.length; i += 1) expect(levels[i] - levels[i - 1]).toBeLessThan(2);
+    }
+  });
+
+  it('normalises each message independently', () => {
+    // One array per parse call, so the stack cannot leak: two answers both open at <h3>.
+    expect(levelsOf('#### a')).toEqual([3]);
+    expect(levelsOf('#### b')).toEqual([3]);
   });
 
   it('does not treat seven hashes as a heading', () => {

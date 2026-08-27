@@ -374,12 +374,53 @@ function alignmentOf(cells: { text: string }[]): Align[] | null {
 }
 
 /**
+ * The outline depth of each heading currently open, by its own `#` count (R-97, T-721).
+ *
+ * One array per `parseBlocks` call, so normalisation is **per message** — which is the right
+ * scope, because every message's headings sit under the same FR-HDR-01 chat title.
+ */
+type HeadingDepths = number[];
+
+/**
+ * Map a heading's `#` count onto the level it renders at, by **outline position** rather than
+ * by the count itself (R-97).
+ *
+ * The first heading of a message is always `<h3>`: T-502 owns the document's only `<h1>` and
+ * T-504's chat title is the `<h2>` inside `<main>`, so content-supplied headings start below
+ * both rather than competing with them. Each further nesting step descends exactly one level.
+ *
+ * **Why not `#` + 2, which is what shipped from T-505 until T-721.** The `#` count is written
+ * by whoever wrote the content — the model composing an answer, or a document it is quoting —
+ * and neither is obliged to start at `#`. An answer opening `### Significance of …` rendered an
+ * `<h5>` directly after the chat title's `<h2>`, skipping two levels, which is what axe's
+ * `heading-order` reported in both themes. Shifting by the shallowest heading present is not
+ * enough either: `#` followed by `###` still skips.
+ *
+ * **The rebasing is free, and that is what makes this the right fix rather than a compromise.**
+ * `AiMessage.module.css` gives `.heading` one size, weight, line-height and colour for h3..h6
+ * and there is no element-level heading rule anywhere in the stylesheet, so the level is already
+ * invisible to a sighted reader and carries information only for assistive technology — for
+ * which a skipped level is precisely what makes an outline unnavigable. Relative nesting, the
+ * only structure that survives rendering at all, is preserved exactly: this compresses gaps and
+ * never inverts a relationship. The absolute depth was already rebased (by +2) before T-721.
+ *
+ * Deeper than four levels clamps at `h6`, as the `#` + 2 mapping did. Clamping makes two
+ * adjacent levels equal, which `heading-order` permits; it can never introduce a skip.
+ */
+function outline(open: HeadingDepths, hashes: number): 3 | 4 | 5 | 6 {
+  while (open.length > 0 && open[open.length - 1] >= hashes) open.pop();
+  open.push(hashes);
+  return Math.min(6, open.length + 2) as 3 | 4 | 5 | 6;
+}
+
+/**
  * Split the source into blocks. Each carries a builder so inline parsing runs *after* anchors
  * have been assigned to blocks — the assignment needs every block's start offset first.
  */
 function parseBlocks(source: string): RawBlock[] {
   const lines = toLines(source);
   const blocks: RawBlock[] = [];
+  const headingDepths: HeadingDepths = [];
   let i = 0;
 
   while (i < lines.length) {
@@ -407,9 +448,7 @@ function parseBlocks(source: string): RawBlock[] {
 
     const heading = HEADING.exec(line.text);
     if (heading !== null) {
-      // `#` → h3: T-502 owns the document's only <h1> and T-504's chat title is the <h2>, so a
-      // heading supplied by a document starts below both rather than competing with them.
-      const level = Math.min(6, heading[1].length + 2) as 3 | 4 | 5 | 6;
+      const level = outline(headingDepths, heading[1].length);
       const start = line.start + line.text.length - heading[2].length;
       blocks.push({
         start: line.start,

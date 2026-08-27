@@ -97,7 +97,26 @@ export function AppShell({ brandName, showStats, sidebar, chat, stats, overlays 
       </main>
 
       {showStats && (
-        <aside className={styles.stats} aria-label="Session statistics">
+        /* `tabIndex={0}` for the same reason as the FR-ANL-05 sources list inside it (T-720),
+           and note this is a *different* value from `<main>`'s `-1` above: that one is a focus
+           target that adds no tab stop, this one is a real tab stop.
+
+           **This one axe does not report, and it was fixed on the requirement rather than on a
+           red run — measured, not assumed.** The column sets `overflow-y: auto` and StatsPanel
+           contains no focusable element at all, so once it overflows there is nothing to give
+           it keyboard access. It *does* overflow: measured **686px of content in 640px** on a
+           signed-in chat, and — the part worth knowing — that 46px is **constant across
+           viewports**, because R-92 clamps the shell at `--app-min-h` and clips the document
+           rather than letting the column shrink. axe stays silent throughout, with or without
+           this attribute (verified both ways at 1440x900, 1440x420, 1440x260 and at 200%/400%
+           zoom): its `scrollable-region-focusable` matcher wants a descendant lying wholly
+           outside the region, and a 46px clip never produces one. So the rule's silence here is
+           a limit of the heuristic, not evidence of access — without this attribute the bottom
+           46px is genuinely unreachable by keyboard, which is WCAG 2.1.1.
+           `aria-label` is what keeps it a *named* tab stop. */
+        // The two a11y linters disagree here and the WCAG-tagged one wins; see above.
+        // oxlint-disable-next-line jsx-a11y/no-noninteractive-tabindex
+        <aside className={styles.stats} aria-label="Session statistics" tabIndex={0}>
           {stats}
         </aside>
       )}

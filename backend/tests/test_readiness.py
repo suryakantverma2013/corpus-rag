@@ -187,7 +187,9 @@ async def test_ocr_down_takes_the_worker_probe_down_but_not_the_api(
     _patch_all_ok(monkeypatch)
 
     def _ocr_on() -> Settings:
-        return Settings(parser=ParserSettings(ocr_enabled=True))
+        # See test_recognition.py: pinned so a developer's .env cannot trip the coupled
+        # OCR + figures boot refusal inside a probe test.
+        return Settings(parser=ParserSettings(ocr_enabled=True, figures_enabled=False))
 
     monkeypatch.setattr(health, "get_settings", _ocr_on)
     monkeypatch.setattr(health, "check_ocr", _down("ConnectionRefusedError"))

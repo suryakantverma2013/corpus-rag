@@ -231,7 +231,7 @@ async def link_complete(
     provider: CloudProvider,
     kc: Keycloak,
     settings: SettingsDep,
-    state: Annotated[str | None, Query()] = None,
+    link_state: Annotated[str | None, Query()] = None,
     link_error: Annotated[str | None, Query()] = None,
 ) -> RedirectResponse:
     """Grant `read-token`, verify the link is real, and return the browser to the GUI.
@@ -242,18 +242,22 @@ async def link_complete(
     measured live (see `cloud_links.grant_read_token`).
 
     The link is then read back rather than assumed. Keycloak signals leg 2's failures by
-    appending `link_error` to this redirect, but a `state` that survives with no error and no
-    federated identity is possible too, and reporting success for it would send the user to a
+    appending `link_error` to this redirect, but a `link_state` that survives with no error and
+    no federated identity is possible too, and reporting success for it would send the user to a
     file list that answers 403.
+
+    **The parameter is `link_state` and must never be renamed back to `state`.** Keycloak
+    rejects a `redirect_uri` carrying a reserved OIDC parameter in its query, so `?state=` makes
+    leg 2 fail with a bare "Invalid Request" — see the writer in `cloud_links`.
     """
-    if link_error or not state:
+    if link_error or not link_state:
         log.warning("cloud.link_rejected", provider=provider.value, link_error=link_error)
         return RedirectResponse(
             cloud_links.return_to(settings, link=_LINK_FAILED, provider=provider.value),
             status_code=status.HTTP_303_SEE_OTHER,
         )
     try:
-        decoded = cloud_links.decode_state(state, settings)
+        decoded = cloud_links.decode_state(link_state, settings)
         await cloud_links.grant_read_token(sub=decoded.sub, kc=kc, settings=settings)
         result = await cloud_links.link_status(
             sub=decoded.sub, provider=provider, kc=kc, settings=settings

@@ -22,6 +22,12 @@ get *"I couldn't ground an answer to that in your documents…"* — never a bes
 model's own training. There is no "try anyway" mode and no setting to add one.
 → [ARCHITECTURE.md §"There is no best effort mode"](ARCHITECTURE.md)
 
+★ **Asking it to draw a diagram gets you an abstention, and that is unchanged.** A drawing's lines
+are claims no retrieved passage supports, so the groundedness gate refuses — which reads like a
+retrieval failure and is not one. Figure display (§2) shows you the picture *already printed* in
+your document; it does not generate one. Generated diagrams are declined for now, not refused
+outright. → [DEPLOYMENT.md §15](DEPLOYMENT.md)
+
 ★ **You never see the answer it refused to serve.** When the groundedness gate rejects a draft, the
 refusal *replaces* it. Serving the text under an "abstained" label would be ungrounded prose with
 no citations wearing an honest-looking badge.
@@ -88,8 +94,32 @@ prose as a grid is worse than missing a table. There is deliberately no setting 
 ★ **A poor built-in text layer is never improved by OCR.** If a page yields any characters at all,
 those characters win — a garbled PDF stays garbled. → [SECURITY.md §11.12](SECURITY.md)
 
-★ **A figure inside a text page may silently not be searchable** while the document still ingests
-fine. Recognition fails *open* per page; only a document with no text anywhere fails closed.
+★ **Text printed inside a picture may silently not be searchable** while the document still ingests
+fine. Recognition fails *open* per page; only a document with no text anywhere fails closed. (This
+is about OCR reading *words* in an image — not about whether the picture is *displayed*, which is
+the separate feature below.)
+
+★ **Figure display ships off.** With it off, a citation never shows the document's own figure. It
+takes exactly **one** switch, `PARSER_FIGURES_ENABLED` — deliberately unlike OCR, there is no second
+half and no compose profile to forget. → [DEPLOYMENT.md §15](DEPLOYMENT.md)
+
+★ **Figure detection is a guess, in both directions.** A boxed sidebar, a large displayed equation
+or heavy page furniture can come back as a "figure"; a figure below the size floors, one drawn as a
+single flat fill, or one on a *scanned* page is not detected at all. Neither costs anything else —
+figures never touch the page's text, so a wrong call cannot change what is searchable or citable.
+
+★ **The figure under a citation is chosen by page, not by relevance.** It is whatever figure sits on
+the page the answer cited — a navigational aid pointing you at that page, **not** a claim that the
+figure supports the sentence. No part of the model chooses, names or describes it.
+
+**Turning figure display on does not backfill.** Documents already in your corpus have no figures
+until they are next ingested — Replace one to re-drive it. Nothing is re-embedded either way, since
+a figure is presentation data and forms no part of the retrieval fingerprint.
+
+**A figure is never downloadable, and an administrator cannot see yours.** What is served is a
+raster re-encoded from a page region, inline only, over the authenticated route; the uploaded file
+itself stays unservable by any route. This is the one route under `/documents` that does *not* widen
+for administrators. → [SECURITY.md §11](SECURITY.md)
 
 ★ **Limits reject, they never truncate.** An over-long or over-complex document fails with
 `CONTENT_LIMIT_EXCEEDED` rather than ingesting partially.
@@ -301,7 +331,10 @@ still generating. The lock is a courtesy, not a correctness mechanism.
 
 **OCR adds roughly two seconds per recognised page**, single-threaded by design.
 
-**Uploads over 50 MB are rejected before storage**, and the whole stack times out on first start if
+**Figure extraction adds tens of milliseconds per figure** — small beside parsing, and far smaller
+than a recognised page. Its cost is disk, not time.
+
+**Uploads over 300 MB are rejected before storage**, and the whole stack times out on first start if
 Docker has under about 6 GB.
 
 ---

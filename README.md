@@ -96,10 +96,10 @@ identity. The API and the worker are the same image with different commands.
 
 | Suite | Count | Run |
 |---|---|---|
-| Backend | **2,079** | `cd backend && OCR_LIVE_TEST=1 uv run pytest` |
+| Backend | **2,225** | `cd backend && OCR_LIVE_TEST=1 uv run pytest` |
 | — of which route-level security | 297 | `uv run pytest tests/security` |
 | — of which production scenarios | 23 | `uv run pytest tests/scenarios` |
-| Frontend unit | **1,142** | `cd frontend && npm test` |
+| Frontend unit | **1,190** | `cd frontend && npm test` |
 | End-to-end (real browser, real stack) | 1 journey, ~20 s | `npm run e2e` |
 | Visual fidelity (headed, both themes) | — | `npm run fidelity` |
 | Accessibility (axe, 10 surfaces × 2 themes) | — | `npm run a11y` |

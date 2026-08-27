@@ -343,7 +343,7 @@ describe('the conversations list (FR-SBR-02/03/04/07)', () => {
 describe('a turn, end to end (FR-CMP-03 / FR-MSG-05 / R-54(2))', () => {
   const send = () => screen.getByRole('button', { name: 'Send' }) as HTMLButtonElement;
   const compose = (text: string) =>
-    fireEvent.change(screen.getByRole('combobox'), { target: { value: text } });
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: text } });
 
   it('posts the query, shows the question and the dots, then renders the answer', async () => {
     await mounted();
@@ -474,11 +474,11 @@ describe('§4.6 stats panel wiring (T-507)', () => {
     // budget, so an untouched composer is disabled either way and the assertion would be
     // vacuous — which is exactly how it read until the mutation check called the bluff.
     const send = () => screen.getByRole('button', { name: 'Send' }) as HTMLButtonElement;
-    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'one more question' } });
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'one more question' } });
     expect(send().disabled).toBe(true);
 
     await open('Analyzing Market Trends');
-    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'one more question' } });
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'one more question' } });
     expect(send().disabled).toBe(false);
   });
 

@@ -301,6 +301,27 @@ describe('FR-ANL-05 — SOURCES REFERENCED', () => {
     const badge = within(screen.getAllByRole('listitem')[0]).getByText('PDF');
     expect(badge.getAttribute('aria-hidden')).toBe('true');
   });
+
+  it('is a NAMED tab stop, because R-92(3) made it a scroll container (T-720)', () => {
+    panel({ entries: CITED });
+    const list = screen.getByRole('list');
+
+    // The pair, asserted together on purpose. `tabIndex` alone satisfies axe's
+    // `scrollable-region-focusable` (WCAG 2.1.1/2.1.3) but would create a tab stop with no
+    // accessible name, which is a different defect; the name alone leaves the region
+    // unreachable by keyboard, which is the one this fixes. Neither half is sufficient.
+    expect(list.getAttribute('tabindex')).toBe('0');
+    expect(list.getAttribute('aria-labelledby')).not.toBeNull();
+  });
+
+  it('does not make the rows themselves tab stops', () => {
+    // §8.56(2) and R-74(8): one stop per source is the traversal trap, and the rows are not
+    // interactive. The container scrolls; the rows are read.
+    panel({ entries: CITED });
+    for (const row of screen.getAllByRole('listitem')) {
+      expect(row.getAttribute('tabindex')).toBeNull();
+    }
+  });
 });
 
 describe('NFR-A11Y-03 — the panel’s outline and its tab order', () => {

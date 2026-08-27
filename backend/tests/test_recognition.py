@@ -622,7 +622,10 @@ def test_the_bound_is_not_enforced_while_recognition_is_off() -> None:
 
 def test_the_shipped_defaults_fit_inside_the_shipped_job_timeout() -> None:
     """Sanity on the arithmetic the defaults claim: 600 + 60 = 660 < 900."""
-    settings = Settings(parser=ParserSettings(ocr_enabled=True))
+    # `figures_enabled` pinned: it is inherited from `backend/.env` otherwise, and the
+    # coupled refusal then fires on the OCR + figures sum (960 > 900), failing this test
+    # for a reason it is not about.
+    settings = Settings(parser=ParserSettings(ocr_enabled=True, figures_enabled=False))
     worst_case = settings.parser.ocr_budget_seconds + settings.ocr.timeout_seconds
     assert worst_case < settings.worker.job_timeout_seconds
 

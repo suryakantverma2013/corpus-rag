@@ -291,7 +291,16 @@ async def complete_authentication(
     query = urlencode(
         {
             "client_id": settings.keycloak.linking_client_id,
-            "redirect_uri": f"{complete_url(state.provider, settings)}?state={onward}",
+            # `link_state`, NOT `state` — and the name is load-bearing, not cosmetic.
+            # Keycloak refuses a `redirect_uri` whose query carries a reserved OIDC parameter
+            # (`state`, `code`, `session_state`, ...): `RedirectUtils` answers
+            # `invalid_redirect_uri` and the user sees a bare "Invalid Request" page naming
+            # nothing. Measured on 26.7.1, where `?state=` is rejected and `?link_state=` is
+            # accepted; 26.4 accepts both, which is why this shipped working in T-214 and broke
+            # only when the dev container's `:latest` moved. Anything outside OIDC's reserved
+            # set works — the constraint is the *name*, not the practice of carrying state here,
+            # which is still what keeps the flow stateless (no pending-link table, R-63).
+            "redirect_uri": f"{complete_url(state.provider, settings)}?link_state={onward}",
             "nonce": link_nonce,
             "hash": _link_hash(
                 nonce=link_nonce,

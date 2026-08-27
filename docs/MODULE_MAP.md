@@ -89,7 +89,7 @@ To remove access now, disable the account.
 the committed realm into a throwaway realm and reads the mapping back — Keycloak ignores realm keys
 it does not recognise, *silently*).
 
-### `app/db/` — 3 modules + `models/` (11) + `repositories/` (13)
+### `app/db/` — 3 modules + `models/` (12) + `repositories/` (14)
 `base` `enums` `session`
 
 **Owns.** The async SQLAlchemy engine, the ORM models registered on `Base.metadata`, and every
@@ -104,16 +104,21 @@ retrieval query until it was dropped.
 
 **Enforced by.** `tests/test_openapi_contract.py`, and the migration round-trip tests.
 
-### `app/ingestion/` — 3 modules + `parsers/` (8)
-`chunker` `incremental` `scanner` · parsers: `base` `csv` `docx` `markdown` `pdf` `recognition`
-`tables` `text`
+### `app/ingestion/` — 4 modules + `parsers/` (9)
+`chunker` `figures` `incremental` `scanner` · parsers: `base` `csv` `docx` `figures` `markdown`
+`pdf` `recognition` `tables` `text`
 
 **Owns.** Bytes to chunks: format sniffing, extraction, optional recognition (OCR), table
-structure, splitting, and the incremental diff that decides what gets re-embedded.
+structure, splitting, and the incremental diff that decides what gets re-embedded. Also optional
+figure extraction, which is **not** part of that pipeline — see below.
 
 **Must not.** Run in the API process (see `app/api/`). Cut a chunk across a `ParsedBlock`. Synthesise
 a page number for a format that has no pagination — DOCX and Markdown carry section locators
-instead, because a "p. 7" the user cannot verify is worse than no locator.
+instead, because a "p. 7" the user cannot verify is worse than no locator. **Put a figure on
+`ParsedDocument`**: that dataclass is the fingerprint-bearing contract, and everything on it
+describes the text a chunk is built from. `parsers/figures.py` detects and renders; `figures.py`
+runs the extraction pass as a **second open of the same bytes**, so "a figure feeds no embedding"
+is unrepresentable rather than remembered.
 
 **The constraint that governs changes here.** `embedding_fingerprint` folds in the embedding model,
 the chunker's sizing knobs and `PREPROCESSING_VERSION`. Change any of them and every stored chunk
@@ -122,7 +127,7 @@ that varies run to run leaves fingerprint reuse permanently empty, so every repl
 rebuild re-embeds the whole document. It is also why `tools.reembed` exists.
 
 **Enforced by.** `tests/test_chunker.py`, `test_parsers.py`, `test_recognition.py`,
-`test_incremental.py`.
+`test_incremental.py`, `test_figures.py`, `test_figure_extraction.py`.
 
 ### `app/rag/` — 17 modules
 `budget` `citations` `errors` `evaluation` `fusion` `generation` `graph` `groundedness` `history`
@@ -171,9 +176,9 @@ the concrete path, so a caller with N documents got N × the budget.
 **Enforced by.** `tests/security/test_injection.py` (a committed evasion corpus; it asserts
 *structure*, not detection rate), `tests/security/` rate-limit bucket rows.
 
-### `app/services/` — 20 modules
+### `app/services/` — 21 modules
 `audit` `chat` `checkpoint_retention` `checkpointer` `clamav` `cloud_import` `cloud_links`
-`conversations` `document_events` `documents` `drive` `embeddings` `health` `jobs` `llm`
+`conversations` `document_events` `documents` `drive` `embeddings` `figures` `health` `jobs` `llm`
 `model_selection` `object_storage` `ocr` `processing_lock` `reembed`
 
 **Owns.** Every boundary to something outside the process: object storage, the model provider,

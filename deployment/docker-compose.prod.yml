@@ -66,6 +66,26 @@ x-corpus-env: &corpus-env
   OCR_PORT: "8884"
   OCR_LANGUAGES: ${OCR_LANGUAGES:-eng}
 
+  # FR-ING-09 figure extraction (R-94 §8.84). ONE switch, unlike recognition: extraction is
+  # in-process PyMuPDF, so there is no sidecar, no profile and no host to get wrong. The four
+  # knobs below are the ones that move disk and wall clock; the seven detection floors stay at
+  # their defaults, because tuning a false-positive threshold is a corpus measurement rather
+  # than an operator action.
+  PARSER_FIGURES_ENABLED: ${PARSER_FIGURES_ENABLED:-false}
+  PARSER_FIGURE_DPI: ${PARSER_FIGURE_DPI:-150}
+  PARSER_FIGURE_MAX_PER_DOCUMENT: ${PARSER_FIGURE_MAX_PER_DOCUMENT:-200}
+  PARSER_FIGURE_BUDGET_SECONDS: ${PARSER_FIGURE_BUDGET_SECONDS:-300}
+  PARSER_FIGURE_MAX_BYTES: ${PARSER_FIGURE_MAX_BYTES:-8388608}
+
+  # Listed here because the two features above force it. Recognition and extraction run in ONE
+  # ingestion job, so the app refuses to construct `Settings` unless
+  # PARSER_OCR_BUDGET_SECONDS + OCR_TIMEOUT_SECONDS + PARSER_FIGURE_BUDGET_SECONDS fits inside
+  # this: 600 + 60 + 300 = 960 against the 900 default, so turning BOTH on at their shipped
+  # values is a stack that does not start. Without this key an operator could not raise it,
+  # because compose does not forward --env-file into containers. Raising it also loosens the
+  # FR-KBM-09 `stalled` flag, which derives from it (R-41(5)): stall_after = this + 60.
+  WORKER_JOB_TIMEOUT_SECONDS: ${WORKER_JOB_TIMEOUT_SECONDS:-900}
+
   EMBEDDING_BACKEND: ${EMBEDDING_BACKEND:-openai}
   LLM_BACKEND: ${LLM_BACKEND:-openai}
   OPENAI_API_KEY: ${OPENAI_API_KEY}

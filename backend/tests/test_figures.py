@@ -517,7 +517,11 @@ def test_extraction_is_off_by_default_and_the_detector_does_not_read_the_flag():
     feature two off switches that could disagree, which is the shape §8.78 warns about for the
     OCR profile and its flag.
     """
-    assert ParserSettings().figures_enabled is False
+    # The *field* default, never `ParserSettings()`: constructing one reads `backend/.env`, so
+    # this assertion inverted on any machine actually running the feature -- which is every
+    # machine where somebody is testing it. R-94(7) is a claim about what ships, and
+    # `tests/acceptance/`'s `Default` pointer reads it exactly this way, for exactly this reason.
+    assert ParserSettings.model_fields["figures_enabled"].default is False
     with make_page() as document:
         assert len(detect_figures(document[0], limits=_limits(figures_enabled=False))) == 1
 
