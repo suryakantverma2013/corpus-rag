@@ -30,8 +30,21 @@ Fresh container (import on start):
 docker run --rm -p 8080:8080 \
   -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
   -v "$PWD/deployment/keycloak:/opt/keycloak/data/import:ro" \
-  quay.io/keycloak/keycloak:latest start-dev --import-realm
+  quay.io/keycloak/keycloak:26.7.1 start-dev --import-realm
 ```
+
+**Pin the tag; do not use `:latest` (T-724/T-725).** This recipe said `:latest` until 2026-08-27,
+and that is how FR-AUT-11 linking broke with no code change: the dev container moved to **26.7.1**,
+which refuses a `redirect_uri` carrying a reserved OIDC parameter, while `docker-compose.prod.yml`
+pins **26.4**, which does not. The feature rotted in place and the two environments disagreed for
+days — see T-725 for the fix and `app/services/cloud_links.py` for the constraint.
+
+**Dev is deliberately AHEAD of production** (26.7.1 here, 26.4 there), because that gap is what
+surfaced the break in dev first rather than in production. Keep it — but move it *deliberately*:
+a version change is the trigger on **T-726**, since the client-initiated account-linking endpoint
+this realm's `corpus-linking` client depends on is deprecated and slated for removal, and its
+removal will break linking exactly the way 26.7.1's tightening did. Before bumping either tag,
+re-run `backend/tests/test_cloud_import.py` and relink an account end to end.
 
 Into a running instance:
 
