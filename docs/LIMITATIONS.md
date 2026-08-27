@@ -17,9 +17,19 @@ report.** See [TESTING.md](TESTING.md#6-what-to-do-with-a-finding).
 
 ## 1. Answering and chat
 
-★ **The system refuses rather than guesses.** Ask something your documents do not support and you
-get *"I couldn't ground an answer to that in your documents…"* — never a best-effort answer from the
-model's own training. There is no "try anyway" mode and no setting to add one.
+★ **The system refuses rather than guesses — and only you can override that, one question at a
+time.** Ask something your documents do not support and you get *"I couldn't ground an answer to
+that in your documents…"*. Since R-98 that abstention may also offer **"Answer from general
+knowledge"** (FR-MSG-09): a second answer from the model's own training, clearly labelled as such,
+carrying **no citations and no DeepEval scores**, excluded from the session averages, and **not
+given to the model as context on later turns** — so a follow-up like *"explain that further"* will
+not see it. It is never automatic, never replaces the grounded attempt, and the deployment switch
+`UNGROUNDED_FALLBACK_ENABLED` (default **off**) only decides whether the control appears.
+**There is still no setting that turns grounding off.**
+
+Worth knowing *why* it is not automatic: abstentions are diagnostic. Three of them against a
+calculus textbook are how we found that its PDF text layer was corrupt — a silent fallback would
+have answered all three from training and hidden the defect.
 → [ARCHITECTURE.md §"There is no best effort mode"](ARCHITECTURE.md)
 
 ★ **Asking it to draw a diagram gets you an abstention, and that is unchanged.** A drawing's lines

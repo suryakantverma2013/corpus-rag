@@ -24,7 +24,7 @@ how you can tell it is real.
 
 | Principle | What it means here |
 |---|---|
-| **Ground or abstain** | An answer is served only if it cites supplied passages. There is no "best effort" mode, and no configuration switch that turns grounding off. |
+| **Ground or abstain** | An answer is served only if it cites supplied passages, and the grounded attempt always runs first. There is still **no configuration switch that turns grounding off** — but since R-98 an abstention may *offer* one opt-in, explicitly labelled answer from the model's own training (FR-MSG-09). It cites nothing, is never scored, and is withheld from the history later turns are generated from. `UNGROUNDED_FALLBACK_ENABLED` (default **false**) decides only whether that control is offered; it can never produce an answer by itself. |
 | **Fail in the direction that preserves correctness** | Every component declares whether it fails *open* (degrade and continue) or *closed* (refuse). The direction follows from what the degraded output would be — see §7. |
 | **Never trust a model's output as control flow** | Citation markers are resolved against a supplied list, not followed. The router returns a *class*, never a strategy. Rerank scores are clamped and bounds-checked. |
 | **Untrusted text never enters the instruction channel** | Retrieved document text is fenced in a non-system message with delimiters neutralised — including filenames, which read like metadata and are attacker-chosen. |
