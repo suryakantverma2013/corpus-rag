@@ -23,7 +23,10 @@ loudly rather than drop out of the checked set and leave a stale number nobody i
 
 from __future__ import annotations
 
+import functools
 import re
+import subprocess
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -46,8 +49,44 @@ ORACLES: Final[Mapping[str, Callable[[], int]]] = MappingProxyType(
         "migration revisions": lambda: len(_migration_revisions()),
         "acceptance section-9 rows": lambda: len(_acceptance_rows()),
         "documentation manifest entries": lambda: len(_documents()),
+        "backend tests": lambda: _collected()["total"],
+        "route-security tests": lambda: _collected()["tests/security"],
+        "production-scenario tests": lambda: _collected()["tests/scenarios"],
     }
 )
+
+
+@functools.cache
+def _collected() -> Mapping[str, int]:
+    """How many tests this suite collects, in total and per sub-package.
+
+    **Collected, not passed** - and that distinction is the whole reason this oracle can
+    exist. How many tests *pass* depends on which services are up; how many are
+    *collected* depends only on the code. Verified rather than assumed: with Keycloak
+    pointed at a closed port the count is identical.
+
+    One `--collect-only` subprocess, cached, serving all three claims. It runs pytest
+    inside pytest, which is safe precisely because `--collect-only` executes no test.
+    """
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q"],
+        cwd=BACKEND_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    ids = [
+        line.strip()
+        for line in result.stdout.splitlines()
+        if "::" in line and line.startswith("tests/")
+    ]
+    if not ids:  # pragma: no cover - the guard below turns this into a readable failure
+        return {"total": 0, "tests/security": 0, "tests/scenarios": 0}
+    return {
+        "total": len(ids),
+        "tests/security": sum(1 for i in ids if i.startswith("tests/security/")),
+        "tests/scenarios": sum(1 for i in ids if i.startswith("tests/scenarios/")),
+    }
 
 
 def _documents() -> tuple[object, ...]:
@@ -80,6 +119,16 @@ def _migration_revisions() -> list[str]:
     """
     versions = BACKEND_ROOT / "app" / "db" / "migrations" / "versions"
     return sorted(path.name for path in versions.glob("*.py") if path.name != "__init__.py")
+
+
+def _as_int(stated: str) -> int:
+    """A number as a document writes it.
+
+    Thousands separators are how a human writes 2,276, and refusing them would push every
+    four-figure claim out of reach of this oracle - which is precisely the class that has
+    rotted five times.
+    """
+    return int(stated.replace(",", "").replace(chr(8239), "").strip())
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +189,42 @@ CLAIMS: Final[tuple[Claim, ...]] = (
         "the number of published documents tests/docs/ reconciles against the tree",
     ),
     Claim(
+        "README.md",
+        r"\| Backend \| \*\*([\d,]+)\*\* \|",
+        "backend tests",
+        "how many tests the backend suite collects",
+    ),
+    Claim(
+        "docs/TESTING.md",
+        r"\| Backend \| ([\d,]+) collected \|",
+        "backend tests",
+        "how many tests the backend suite collects",
+    ),
+    Claim(
+        "README.md",
+        r"of which route-level security \| ([\d,]+) \|",
+        "route-security tests",
+        "how many tests tests/security collects",
+    ),
+    Claim(
+        "docs/TESTING.md",
+        r"route security \| ([\d,]+) \|",
+        "route-security tests",
+        "how many tests tests/security collects",
+    ),
+    Claim(
+        "README.md",
+        r"of which production scenarios \| ([\d,]+) \|",
+        "production-scenario tests",
+        "how many tests tests/scenarios collects",
+    ),
+    Claim(
+        "docs/TESTING.md",
+        r"production scenarios \| ([\d,]+) \|",
+        "production-scenario tests",
+        "how many tests tests/scenarios collects",
+    ),
+    Claim(
         "backend/README.md",
         r"(\d+) groups, ~\d+ composed names",
         "settings groups",
@@ -160,7 +245,7 @@ def _matches(claim: Claim) -> list[tuple[int, int]]:
     found: list[tuple[int, int]] = []
     for match in re.finditer(claim.pattern, text):
         line = text.count("\n", 0, match.start()) + 1
-        found.append((line, int(match.group(1))))
+        found.append((line, _as_int(match.group(1))))
     return found
 
 
@@ -296,13 +381,13 @@ def test_every_module_count_in_the_map_matches_the_package_it_names() -> None:
         for name, stated in ((package, sized.group(1)),) if sized else ():
             checked += 1
             actual = _package_modules(name)
-            if actual != int(stated):
+            if actual != _as_int(stated):
                 wrong.append(f"  MODULE_MAP.md:{line} says {name} has {stated}; it has {actual}")
 
         for sub, stated in _SUBPACKAGE.findall(rest):
             checked += 1
             actual = _package_modules(f"{package}{sub}")
-            if actual != int(stated):
+            if actual != _as_int(stated):
                 wrong.append(
                     f"  MODULE_MAP.md:{line} says {package}{sub}/ has {stated}; it has {actual}"
                 )

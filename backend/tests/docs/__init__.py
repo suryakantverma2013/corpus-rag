@@ -145,13 +145,16 @@ _SPEC_BY_CONVENTION = (
 #: new document fails the suite until somebody declares what a bare section number means in it.
 DOCUMENTS: Final[tuple[Doc, ...]] = (
     Doc("docs/ACCEPTANCE.md", Scope.SELF),
+    Doc("docs/ADMIN_GUIDE.md", Scope.SELF),
     Doc("docs/ARCHITECTURE.md", Scope.SELF),
     Doc("docs/CONFIGURATION.md", Scope.SELF),
     Doc("docs/DATA_MODEL.md", Scope.SELF),
     Doc("docs/DEPLOYMENT.md", Scope.SELF),
     Doc("docs/DEVELOPMENT.md", Scope.SELF),
     Doc("docs/EVALUATION.md", Scope.SELF),
+    Doc("docs/GLOSSARY.md", Scope.SELF),
     Doc("docs/LIMITATIONS.md", Scope.SELF),
+    Doc("docs/README.md", Scope.SELF),
     Doc("docs/SECURITY.md", Scope.SELF),
     Doc("docs/TESTING.md", Scope.SELF),
     Doc("docs/USER_GUIDE.md", Scope.SELF),

@@ -244,7 +244,8 @@ wrong, the change is refused and you stay signed in.
 
 ## Getting help
 
-- Something is broken, or a document will not process → your administrator; see
-  [TROUBLESHOOTING in DEPLOYMENT.md](DEPLOYMENT.md).
+- Something is broken, or a document will not process → your administrator; what they can do
+  about it is in [ADMIN_GUIDE.md](ADMIN_GUIDE.md), and the operational detail in
+  [DEPLOYMENT.md](DEPLOYMENT.md).
 - What Corpus deliberately does *not* do → [LIMITATIONS.md](LIMITATIONS.md).
 - How answers are produced → [ARCHITECTURE.md](ARCHITECTURE.md).

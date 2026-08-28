@@ -78,8 +78,12 @@ identity. The API and the worker are the same image with different commands.
 
 ## Documentation
 
+Start at **[docs/README.md](docs/README.md)** — it says which of these you want and why.
+
 | | |
 |---|---|
+| [User guide](docs/USER_GUIDE.md) | every task in the interface, with screenshots: asking, citations, uploading, `@`-mentions, cloud import, the session panel, themes |
+| [Administrator guide](docs/ADMIN_GUIDE.md) | users and revocation, knowledge-base administration, re-embedding, model slots, the audit trail, rate limits, retention |
 | [Architecture](docs/ARCHITECTURE.md) | design principles, topology, the chat turn, latency budget, retrieval and grounding design, failure semantics, rejected alternatives, known limitations |
 | [Module map](docs/MODULE_MAP.md) | what each package owns, what it must **not** do, its seams, and the test that fails when the rule erodes |
 | [HTTP API](docs/HTTP_API.md) | every endpoint, parameter, status and schema — generated from `backend/openapi.json` and drift-tested |
@@ -90,16 +94,17 @@ identity. The API and the worker are the same image with different commands.
 | [Development](docs/DEVELOPMENT.md) | prerequisites, the native setup, first run in order, the traps, resetting |
 | [Configuration](docs/CONFIGURATION.md) | what you actually set, the boot refusals, coupled knobs, and the three surfaces a value must cross |
 | [Testing](docs/TESTING.md) | how to test by hand, what is already automated, scripted cases, and what to do with a finding |
+| [Glossary](docs/GLOSSARY.md) | the words this documentation uses in a particular way, and the ones that mean something else elsewhere |
 | [Known limitations](docs/LIMITATIONS.md) | the behaviour that looks like a defect and is a decision — **read before testing** |
 
 ## Tests
 
 | Suite | Count | Run |
 |---|---|---|
-| Backend | **2,225** | `cd backend && OCR_LIVE_TEST=1 uv run pytest` |
-| — of which route-level security | 297 | `uv run pytest tests/security` |
-| — of which production scenarios | 23 | `uv run pytest tests/scenarios` |
-| Frontend unit | **1,190** | `cd frontend && npm test` |
+| Backend | **2,276** | `cd backend && OCR_LIVE_TEST=1 uv run pytest` |
+| — of which route-level security | 315 | `uv run pytest tests/security` |
+| — of which production scenarios | 31 | `uv run pytest tests/scenarios` |
+| Frontend unit | **1,205** (as of 2026-08-28) | `cd frontend && npm test` |
 | End-to-end (real browser, real stack) | 1 journey, ~20 s | `npm run e2e` |
 | Visual fidelity (headed, both themes) | — | `npm run fidelity` |
 | Accessibility (axe, 10 surfaces × 2 themes) | — | `npm run a11y` |
