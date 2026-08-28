@@ -176,10 +176,10 @@ the concrete path, so a caller with N documents got N × the budget.
 **Enforced by.** `tests/security/test_injection.py` (a committed evasion corpus; it asserts
 *structure*, not detection rate), `tests/security/` rate-limit bucket rows.
 
-### `app/services/` — 21 modules
+### `app/services/` — 22 modules
 `audit` `chat` `checkpoint_retention` `checkpointer` `clamav` `cloud_import` `cloud_links`
 `conversations` `document_events` `documents` `drive` `embeddings` `figures` `health` `jobs` `llm`
-`model_selection` `object_storage` `ocr` `processing_lock` `reembed`
+`model_selection` `object_storage` `ocr` `processing_lock` `reembed` `ungrounded`
 
 **Owns.** Every boundary to something outside the process: object storage, the model provider,
 ClamAV, the OCR sidecar, Keycloak brokering, Google Drive, the job queue, and the LangGraph

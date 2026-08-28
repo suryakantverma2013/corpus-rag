@@ -3608,6 +3608,115 @@
           }
         }
       }
+    },
+    "/api/v1/messages/{message_id}/general-knowledge": {
+      "post": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "Answer an abstention from the model's own training (FR-MSG-09)",
+        "description": "FR-MSG-09 (R-98) — a second, explicitly ungrounded answer, appended beneath the refusal.\n\n**Not an SSE route, unlike its two siblings, and the difference is the point.** Send and\nregenerate stream because the graph emits FR-ORC-01 stage frames; this path has no stages\nto report — it is one `ChatClient` call — so streaming would be ceremony around a single\nresult. The practical gain is that a plain handler can refuse with an ordinary status: a\ngenerator's body runs *after* the `200` (T-405), which is why regenerate has to hoist every\nrefusal into `admit_regeneration`, and there is nothing here that needs hoisting.\n\n**It appends; the abstention stays.** R-98(1) leans on the abstention as the record that the\ncorpus could not answer — the reason an automatic fallback is declined at all — so replacing\nit would delete the evidence. That is the deliberate opposite of Regenerate, which replaces\n(R-56) because there the old answer and the new one answer the same question; here they are\ndifferent *kinds* of answer and the transcript should show both.\n\nRefusals, in order:\n\n* absent, foreign or non-AI target → one `404` with one copy, for an administrator too\n  (R-55(2), R-54(1)) — identical to the feedback and regenerate routes;\n* the deployment has not enabled the control, or the target is not an abstention → `409`.\n  Both are states a correct client cannot reach: the GUI only offers the control when\n  `is_offerable` says so, and the same predicate is what the service re-checks. This is the\n  server half of R-71(1)'s two-copies-of-one-state problem, and it is a reconciliation path\n  rather than an expected outcome.\n\n**No R-24 lock and no budget check.** The lock gates the four *file* verbs (R-43(4)), and\nR-55(1) settled that a chat-side route must not take it — refusing here because a *different*\nchat is mid-turn is the defect that argument rejected. The FR-STA-04 budget is not checked\nbecause this adds no question: R-51(4) derives usage from `messages`, and the answer it\nappends is counted the next time a turn is submitted, where the refusal belongs.",
+        "operationId": "answer_from_general_knowledge",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "message_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Message Id"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "NFR-SEC-07 — too many attempts. `Retry-After` carries the cooldown.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The identity provider is unreachable (R-28).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such message for this caller, or it is not an AI answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The control is disabled on this server, or the target is not an abstention.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed or expired bearer token, or no local user record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The account is deactivated, or the operation is administrator-only (NFR-SEC-01).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {

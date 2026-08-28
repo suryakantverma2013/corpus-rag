@@ -412,6 +412,23 @@ ROUTE_DECISIONS: Final[tuple[RouteDecision, ...]] = (
     ),
     _r(
         "POST",
+        f"{API}/messages/{{message_id}}/general-knowledge",
+        "answer_from_general_knowledge",
+        Gate.USER,
+        _R55,
+        owns=Owns.MESSAGE,
+        admin_widens=False,
+        foreign=404,
+        admin_foreign=404,
+        bucket=Bucket.CHAT,
+        # NOT an SSE route, unlike its two siblings: FR-MSG-09 has no stages to stream
+        # (one `ChatClient` call), so its refusals are ordinary statuses rather than
+        # dependency-hoisted ones. It shares the CHAT bucket because it costs the same
+        # models and the same seconds as the turn it follows.
+        sse=False,
+    ),
+    _r(
+        "POST",
         f"{API}/messages/{{message_id}}/feedback",
         "set_feedback",
         Gate.USER,

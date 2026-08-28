@@ -259,7 +259,7 @@ table.
 
 ## 10. Migrations
 
-11 revisions, oldest first. `alembic upgrade head` runs them all on an empty database in a few
+12 revisions, oldest first. `alembic upgrade head` runs them all on an empty database in a few
 seconds.
 
 | Revision | Change |

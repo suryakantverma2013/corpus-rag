@@ -31,12 +31,15 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated, Literal
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.sse import EventSourceResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.errors import (
+    RATE_LIMITED,
+    UPSTREAM_DOWN,
     ChatConflictResponse,
     ContextWindowExceededDetail,
     ContextWindowExceededResponse,
@@ -67,10 +70,14 @@ from app.rag.errors import (
 )
 from app.security.rate_limit import chat_limit, limiter, principal_or_ip_key
 from app.services import chat as chat_service
+from app.services import ungrounded
 from app.services.chat import ContextWindowExceededError, MessageEvent, StageEvent, TurnResult
 from app.services.jobs import JobQueueDep
+from app.services.llm import ChatError
 
 __all__ = ["ChatStreamFrame", "MessageResponse", "message_router", "router"]
+
+log = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/conversations", tags=["messages"])
 
@@ -83,6 +90,14 @@ _NOT_FOUND = "Conversation not found."
 
 #: One string for all three ways a message can fail to be rateable — see `set_feedback`.
 _MESSAGE_NOT_FOUND = "Message not found."
+#: FR-MSG-09 refusals. Both describe a state a correct client cannot reach - the GUI only
+#: offers the control when `ungrounded.is_offerable` says so - so these are reconciliation
+#: copy, the server half of R-71(1)'s two-copies-of-one-state problem.
+# TBD(§8.4)
+_UNGROUNDED_DISABLED = "Answering from general knowledge is not enabled on this server."
+# TBD(§8.4)
+_NOT_AN_ABSTENTION = "That answer came from your documents, so there is nothing to fall back from."
+_UNGROUNDED_UNAVAILABLE = "The model is unavailable — please try again."  # TBD(§8.4)
 
 _QUERY_MAX = 8000  # TBD(§8.4) — a hard ceiling well above the NFR-CAP-01 budget FR-STA-04 enforces
 
@@ -894,3 +909,88 @@ async def set_feedback(
         feedback=body.feedback,
     )
     return await _response(session, message, owner_id=user.id)
+
+
+@message_router.post(
+    "/{message_id}/general-knowledge",
+    response_model=MessageResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        **RATE_LIMITED,
+        **UPSTREAM_DOWN,
+        **error_responses(
+            (
+                status.HTTP_404_NOT_FOUND,
+                "No such message for this caller, or it is not an AI answer.",
+            ),
+            (
+                status.HTTP_409_CONFLICT,
+                "The control is disabled on this server, or the target is not an "
+                "abstention.",
+            ),
+        ),
+    },
+    summary="Answer an abstention from the model's own training (FR-MSG-09)",
+)
+@limiter.shared_limit(chat_limit, scope=_CHAT_BUCKET, key_func=principal_or_ip_key)
+async def answer_from_general_knowledge(
+    request: Request,
+    response: Response,
+    message_id: uuid.UUID,
+    user: CurrentUser,
+    session: DbSession,
+    settings: SettingsDep,
+) -> MessageResponse:
+    """FR-MSG-09 (R-98) — a second, explicitly ungrounded answer, appended beneath the refusal.
+
+    **Not an SSE route, unlike its two siblings, and the difference is the point.** Send and
+    regenerate stream because the graph emits FR-ORC-01 stage frames; this path has no stages
+    to report — it is one `ChatClient` call — so streaming would be ceremony around a single
+    result. The practical gain is that a plain handler can refuse with an ordinary status: a
+    generator's body runs *after* the `200` (T-405), which is why regenerate has to hoist every
+    refusal into `admit_regeneration`, and there is nothing here that needs hoisting.
+
+    **It appends; the abstention stays.** R-98(1) leans on the abstention as the record that the
+    corpus could not answer — the reason an automatic fallback is declined at all — so replacing
+    it would delete the evidence. That is the deliberate opposite of Regenerate, which replaces
+    (R-56) because there the old answer and the new one answer the same question; here they are
+    different *kinds* of answer and the transcript should show both.
+
+    Refusals, in order:
+
+    * absent, foreign or non-AI target → one `404` with one copy, for an administrator too
+      (R-55(2), R-54(1)) — identical to the feedback and regenerate routes;
+    * the deployment has not enabled the control, or the target is not an abstention → `409`.
+      Both are states a correct client cannot reach: the GUI only offers the control when
+      `is_offerable` says so, and the same predicate is what the service re-checks. This is the
+      server half of R-71(1)'s two-copies-of-one-state problem, and it is a reconciliation path
+      rather than an expected outcome.
+
+    **No R-24 lock and no budget check.** The lock gates the four *file* verbs (R-43(4)), and
+    R-55(1) settled that a chat-side route must not take it — refusing here because a *different*
+    chat is mid-turn is the defect that argument rejected. The FR-STA-04 budget is not checked
+    because this adds no question: R-51(4) derives usage from `messages`, and the answer it
+    appends is counted the next time a turn is submitted, where the refusal belongs.
+    """
+    answer = await MessageRepository(session).get_owned(message_id, owner_id=user.id)
+    if answer is None or answer.role is not MessageRole.AI:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, _MESSAGE_NOT_FOUND)
+
+    conversation = await _owned_or_404(session, answer.conversation_id, user.id)
+
+    try:
+        row = await ungrounded.answer_from_general_knowledge(
+            session, conversation=conversation, target=answer, settings=settings
+        )
+    except ungrounded.UngroundedDisabledError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, _UNGROUNDED_DISABLED) from exc
+    except ungrounded.NotAnAbstentionError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, _NOT_AN_ABSTENTION) from exc
+    except ChatError as exc:
+        # Generation failed. Nothing was written - the persist follows the call - so the
+        # abstention is untouched and the user can simply press the control again. That is the
+        # same shape as a failed regenerate (R-56): the transcript never records the attempt.
+        log.warning("chat.ungrounded.failed", message_id=str(message_id), error=type(exc).__name__)
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, _UNGROUNDED_UNAVAILABLE) from exc
+
+    return await _response(session, row, owner_id=user.id)

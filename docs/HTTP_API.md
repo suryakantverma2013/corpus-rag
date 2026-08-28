@@ -2,7 +2,7 @@
 
 **Generated from `backend/openapi.json` -- do not edit.** Regenerate with `cd backend && uv run python -m tools.httpdocs`; `tests/test_http_docs.py` fails if this file stops matching the specification, and that specification is itself checked against the running application.
 
-API version `0.1.0` -- **39 operations** across 30 paths and 85 schemas.
+API version `0.1.0` -- **40 operations** across 31 paths and 85 schemas.
 
 Authentication is a bearer token on every operation marked **yes**; see [SECURITY.md](SECURITY.md) for how one is obtained and what invalidates it. Error bodies carry a stable `error_code` -- match on that, never on the prose.
 
@@ -42,6 +42,7 @@ Authentication is a bearer token on every operation marked **yes**; see [SECURIT
 | `messages` | **POST** | [`/api/v1/conversations/{conversation_id}/messages`](#send-message) | yes | Ask a question (SSE) |
 | `messages` | **POST** | [`/api/v1/messages/{message_id}/regenerate`](#regenerate-message) | yes | Regenerate an answer (SSE) |
 | `messages` | **POST** | [`/api/v1/messages/{message_id}/feedback`](#set-feedback) | yes | Rate an answer |
+| `messages` | **POST** | [`/api/v1/messages/{message_id}/general-knowledge`](#answer-from-general-knowledge) | yes | Answer an abstention from the model's own training (FR-MSG-09) |
 | `system` | **GET** | [`/health`](#liveness) | no | Liveness probe |
 | `system` | **GET** | [`/health/ready`](#readiness) | no | API readiness probe |
 | `system` | **GET** | [`/health/ready/worker`](#worker-readiness) | no | Worker readiness probe |
@@ -795,6 +796,32 @@ FR-MSG-08's 👍/👎, and FR-MSG-06's third state, the clear (T-403, R-55). Add
 | `403` | [`ErrorResponse`](#errorresponse) | The account is deactivated, or the operation is administrator-only (NFR-SEC-01). |
 | `404` | -- | No AI message with this id for this caller. |
 | `422` | [`HTTPValidationError`](#httpvalidationerror) | Validation Error |
+
+### POST /api/v1/messages/{message_id}/general-knowledge
+
+<a id="answer-from-general-knowledge"></a>
+
+Answer an abstention from the model's own training (FR-MSG-09)
+
+FR-MSG-09 (R-98) — a second, explicitly ungrounded answer, appended beneath the refusal. **Not an SSE route, unlike its two siblings, and the difference is the point.** Send and regenerate stream because the graph emits FR-ORC-01 stage frames; this path has no stages to report — it is one `ChatClient` call — so streaming would be ceremony around a single result. The practical gain is that a plain handler can refuse with an ordinary status: a generator's body runs *after* the `200` (T-405), which is why regenerate has to hoist every refusal into `admit_regeneration`, and there is nothing here that needs hoisting. **It appends; the abstention stays.** R-98(1) leans on the abstention as the record that the corpus could not answer — the reason an automatic fallback is declined at all — so replacing it would delete the evidence. That is the deliberate opposite of Regenerate, which replaces (R-56) because there the old answer and the new one answer the same question; here they are different *kinds* of answer and the transcript should show both. Refusals, in order: * absent, foreign or non-AI target → one `404` with one copy, for an administrator too (R-55(2), R-54(1)) — identical to the feedback and regenerate routes; * the deployment has not enabled the control, or the target is not an abstention → `409`. Both are states a correct client cannot reach: the GUI only offers the control when `is_offerable` says so, and the same predicate is what the service re-checks. This is the server half of R-71(1)'s two-copies-of-one-state problem, and it is a reconciliation path rather than an expected outcome. **No R-24 lock and no budget check.** The lock gates the four *file* verbs (R-43(4)), and R-55(1) settled that a chat-side route must not take it — refusing here because a *different* chat is mid-turn is the defect that argument rejected. The FR-STA-04 budget is not checked because this adds no question: R-51(4) derives usage from `messages`, and the answer it appends is counted the next time a turn is submitted, where the refusal belongs.
+
+- **Operation id:** `answer_from_general_knowledge`
+- **Authentication:** bearer token
+
+| Parameter | In | Required | Type | Description |
+|---|---|---|---|---|
+| `message_id` | path | yes | string (uuid) |  |
+
+| Status | Body | Meaning |
+|---|---|---|
+| `201` | [`MessageResponse`](#messageresponse) | Successful Response |
+| `401` | [`ErrorResponse`](#errorresponse) | Missing, malformed or expired bearer token, or no local user record. |
+| `403` | [`ErrorResponse`](#errorresponse) | The account is deactivated, or the operation is administrator-only (NFR-SEC-01). |
+| `404` | [`ErrorResponse`](#errorresponse) | No such message for this caller, or it is not an AI answer. |
+| `409` | [`ErrorResponse`](#errorresponse) | The control is disabled on this server, or the target is not an abstention. |
+| `422` | [`HTTPValidationError`](#httpvalidationerror) | Validation Error |
+| `429` | [`ErrorResponse`](#errorresponse) | NFR-SEC-07 — too many attempts. `Retry-After` carries the cooldown. |
+| `503` | [`ErrorResponse`](#errorresponse) | The identity provider is unreachable (R-28). |
 
 ## `system`
 
