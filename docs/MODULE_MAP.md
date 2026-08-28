@@ -222,11 +222,17 @@ see [DEPLOYMENT.md §9.2](DEPLOYMENT.md).
 **Enforced by.** `tests/test_ingest_task.py`, `test_delete_task.py`, `tests/scenarios/` (the twelve
 §11 production scenarios — the only tests that cross route → worker → route).
 
-### `tools/` — 7 modules
-`acceptance` `apidocs` `feedback_calibration` `httpdocs` `reembed` `set_model` `spec_xref`
+### `tools/` — 8 modules
+`acceptance` `apidocs` `feedback_calibration` `httpdocs` `reembed` `seed_demo` `set_model` `spec_xref`
 
 **Owns.** Operator and repository tooling: neither application code nor tests, excluded from the
 wheel.
+
+**One exception to how they reach the system.** Every module here works in-process against the
+ORM except `seed_demo`, which drives the **HTTP API** - so the demo corpus it creates inherits
+deduplication, the quota, type sniffing, scanning and the ingestion pipeline by construction
+rather than by a second implementation. The cost is that it needs a running API and worker,
+which it checks for and says so.
 
 **The shape they share.** Where a rule is objective it is a *test*; where it needs judgement it is a
 *report* that always exits 0. `spec_xref` and `acceptance` are the pattern — a hard test for "every

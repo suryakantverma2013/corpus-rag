@@ -18,9 +18,7 @@ import io
 
 import pymupdf
 import pytest
-
 from tools import seed_demo
-
 
 # --- the generated corpus ------------------------------------------------------------
 
@@ -107,10 +105,14 @@ def test_one_seeded_chat_is_expected_to_abstain() -> None:
         seed_demo._build(doc.build) for doc in seed_demo.DOCUMENTS if doc.build != "scanned_pdf"
     )
     for question in unanswerable.questions:
-        for word in ("home", "address"):
-            assert word.encode() not in corpus, (
-                f"{word!r} appears in the corpus, so this chat may not abstain"
-            )
+        # Derived from the question, so rewording it re-checks the new wording rather
+        # than silently keeping a stale pair of words green.
+        distinctive = {
+            word.strip("?'.,").lower() for word in question.split() if len(word.strip("?'.,")) > 5
+        }
+        assert distinctive, f"no distinctive word in {question!r} to check"
+        found = sorted(word for word in distinctive if word.encode() in corpus.lower())
+        assert not found, f"{found} appear in the corpus, so {question!r} may not abstain"
 
 
 # --- the console it has to print to --------------------------------------------------
@@ -174,3 +176,30 @@ def test_run_refuses_without_yes(capsys: pytest.CaptureFixture[str]) -> None:
     )
     assert code != 0
     assert "--yes" in capsys.readouterr().out
+
+
+def test_every_generated_document_is_byte_stable() -> None:
+    """Build twice, get the same bytes - the property the corpus reproducibility rests on.
+
+    Found by re-running the seeder against a live stack: the CSV and Markdown deduped and both
+    PDFs ingested a second time, because PyMuPDF writes a random `/ID` pair into every trailer.
+    So identical input produced a different checksum, FR-KBM-08 saw a new document, and the
+    claim that the corpus is reproducible from source was false.
+
+    `_run` does not depend on this - it skips by filename - but a reviewer reproducing the
+    manual should get the same chunks, and therefore the same citations, as the screenshots.
+    """
+    unstable = [
+        name for name in seed_demo._BUILDERS if seed_demo._build(name) != seed_demo._build(name)
+    ]
+    assert not unstable, f"these builders are not reproducible: {unstable}"
+
+
+def test_the_pdfs_still_open_after_the_id_is_normalised() -> None:
+    """The trailer rewrite is a byte substitution, so this is the guard that it stays valid."""
+    for name in ("table_pdf", "scanned_pdf"):
+        doc = pymupdf.open(stream=seed_demo._build(name), filetype="pdf")
+        try:
+            assert doc.page_count >= 1, name
+        finally:
+            doc.close()

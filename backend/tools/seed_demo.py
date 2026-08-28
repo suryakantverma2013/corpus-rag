@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -149,6 +150,25 @@ CHATS: tuple[SeedChat, ...] = (
 # `make_scanned_pdf`, deliberately not imported: a shipped tool must not depend on the suite.
 
 
+#: PyMuPDF writes a random `/ID` pair into every trailer, so the same drawing commands
+#: produce different bytes each run. That alone defeated FR-KBM-08's checksum dedup and
+#: made re-running the seeder ingest the PDFs again.
+_PDF_ID = re.compile(rb"/ID\s*\[\s*<[0-9A-Fa-f]*>\s*<[0-9A-Fa-f]*>\s*\]")
+
+
+def _finalise_pdf(doc: object) -> bytes:
+    """Serialise a PyMuPDF document reproducibly.
+
+    Clears the Info dictionary (which carries creation and modification dates) and
+    rewrites the trailer `/ID` to a constant. **Best effort on purpose**: if a future
+    PyMuPDF stops matching the pattern the bytes are simply non-reproducible again,
+    which costs a duplicate upload rather than a corrupt file - and `_run` does not
+    depend on this holding.
+    """
+    doc.set_metadata({})  # type: ignore[attr-defined]
+    return _PDF_ID.sub(b"/ID[<0><0>]", doc.tobytes())  # type: ignore[attr-defined]
+
+
 def _table_pdf() -> bytes:
     import pymupdf
 
@@ -179,7 +199,7 @@ def _table_pdf() -> bytes:
         "EMEA growth was driven by the renewal of three enterprise contracts.",
         fontsize=11,
     )
-    data = doc.tobytes()
+    data = _finalise_pdf(doc)
     doc.close()
     return data
 
@@ -203,7 +223,7 @@ def _scanned_pdf() -> bytes:
         target = out.new_page(width=rendered[index].rect.width, height=rendered[index].rect.height)
         target.insert_image(target.rect, stream=pixmap.tobytes("png"))
     rendered.close()
-    data = out.tobytes()
+    data = _finalise_pdf(out)
     out.close()
     return data
 
@@ -262,9 +282,17 @@ class Api:
         return {"Authorization": f"Bearer {self.token}"} if self.token else {}
 
     def login(self, email: str, password: str) -> str:
-        resp = self.client.post(
-            f"{self.base_url}/api/v1/auth/login", json={"email": email, "password": password}
-        )
+        try:
+            resp = self.client.post(
+                f"{self.base_url}/api/v1/auth/login",
+                json={"email": email, "password": password},
+            )
+        except httpx.RequestError as exc:
+            # A stack trace is the wrong answer to 'the API is not running'.
+            raise SeedError(
+                f"no API at {self.base_url} - start it, or pass --base-url "
+                f"(the containerised stack serves the edge on :8088). {exc}"
+            ) from exc
         if resp.status_code != 200:
             raise SeedError(f"login failed for {email}: {resp.status_code} {resp.text[:200]}")
         return str(resp.json()["access_token"])
@@ -349,6 +377,21 @@ def _await_active(
         f"{filename} stuck in {last} after {INGEST_TIMEOUT_SECONDS:.0f}s "
         "- is the arq worker running?"
     )
+
+
+def _existing_filenames(api: Api) -> set[str]:
+    """What the demo user already has, so a re-run is a no-op rather than a second copy.
+
+    Keyed on the **filename**, which R-40 refuses as *document identity* for the product
+    - and rightly, since a user may upload two different files with one name. This is a
+    different question: not 'are these the same document' but 'has this seed script
+    already placed this document in this corpus', asked of a corpus the script owns.
+    Byte-identical regeneration would answer it too, and is not something to depend on.
+    """
+    resp = api.get("/api/v1/documents", params={"limit": 500})
+    if resp.status_code != 200:
+        raise SeedError(f"could not list documents: {resp.status_code}")
+    return {str(row.get("filename", "")) for row in resp.json()}
 
 
 def _existing_titles(api: Api) -> set[str]:
@@ -461,7 +504,12 @@ def _run(api: Api, demo_email: str, demo_password: str) -> int:
 
     print("\ndocuments")
     seeded = 0
+    present = _existing_filenames(api)
     for doc in DOCUMENTS:
+        if doc.filename in present:
+            print(f"  {doc.filename:<28} already present")
+            seeded += 1
+            continue
         document_id, duplicate = _upload(api, doc, _build(doc.build))
         if duplicate:
             print(f"  {doc.filename:<28} already present")
@@ -527,13 +575,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     api = Api(base_url=args.base_url.rstrip("/"))
 
+    # Checked before anything reaches the network: a refusal that needs a running API
+    # is a worse refusal, and this one is purely about consent.
+    if args.command == "run" and not args.yes:
+        print("refusing to run without --yes (it creates a user and spends model calls)")
+        return 2
+
     try:
         api.token = api.login(args.admin_email, args.admin_password)
         if args.command == "plan":
             return _plan(api, args.demo_email)
-        if not args.yes:
-            print("refusing to run without --yes (it creates a user and spends model calls)")
-            return 2
         return _run(api, args.demo_email, args.demo_password)
     except SeedError as exc:
         print(f"error: {exc}", file=sys.stderr)

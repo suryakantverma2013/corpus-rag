@@ -189,7 +189,38 @@ The dependency note that matters here: **a backend run is only meaningful at 0 s
 many skip depends on what is running — 4 with MinIO down, 8 without `OCR_LIVE_TEST=1` and the OCR
 sidecar, about 25 with Keycloak down.
 
-## 7. Resetting
+## 7. A demo corpus
+
+`tools.seed_demo` creates a known starting point: a demo user, four documents covering every
+accepted format plus a scan, and four conversations — three answered with citations and one
+that deliberately abstains.
+
+```bash
+cd backend
+uv run python -m tools.seed_demo --admin-email you@example.com --admin-password '...' plan
+uv run python -m tools.seed_demo --admin-email you@example.com --admin-password '...' run --yes
+```
+
+`plan` writes nothing and reports what it would create. `run` needs `--yes`, because it creates
+a user and spends model calls.
+
+Four things worth knowing before you run it:
+
+- **It needs a running API *and* worker.** It drives the HTTP API rather than the database, so
+  the corpus inherits deduplication, the quota, type sniffing and the whole ingestion pipeline
+  exactly as a real upload would. Pass `--base-url http://localhost:8088` for the containerised
+  stack, where only the edge publishes a port.
+- **Re-running is a no-op.** Documents are skipped by filename and conversations by title, so
+  it converges instead of accumulating copies. It never deletes anything you created.
+- **The documents are generated, not shipped.** There are no binary fixtures in this
+  repository. They are also byte-stable, so the same run produces the same chunks and
+  therefore the same citations.
+- **The answers are only as good as the backend behind them.** Under `LLM_BACKEND=fake` the
+  wiring runs end to end but the prose is synthetic — fine as a smoke test, wrong as a source
+  for screenshots. The scan needs `PARSER_OCR_ENABLED` and the `ocr` sidecar; without them it
+  is uploaded, found to be unreadable, and removed again rather than left as a `FAILED` row.
+
+## 8. Resetting
 
 Containers, keeping data:
 
@@ -206,7 +237,7 @@ The **native** halves have no `down`:
   no user id, so a re-import mints a fresh subject while `users.email` is unique — which strands the
   administrator. Recreate both together, or fix it in the database.
 
-## 8. Configuration
+## 9. Configuration
 
 Which settings actually matter, what breaks when they are wrong, and the three surfaces a value has
 to cross to reach a running container: [CONFIGURATION.md](CONFIGURATION.md).
