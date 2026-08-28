@@ -17,24 +17,25 @@ recapturing is cheap — not that anything detects the need.
 
 from __future__ import annotations
 
-import pathlib
-import re
+from tests.docs import REPO_ROOT, documents
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 DOCS = REPO_ROOT / "docs"
 IMAGES = DOCS / "images"
 
-#: Markdown image embeds: `![alt](images/name.png)`.
-_EMBED = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
-
 
 def _referenced() -> dict[str, list[str]]:
-    """`{image filename: [documents that embed it]}`."""
+    """`{image filename: [documents that embed it]}`.
+
+    Read from `Markdown.images` rather than a regex of this file's own (T-729). markdown-it
+    knows an embed from an *example of* an embed inside a fenced block; a pattern does not. It
+    is also one definition: `test_tracked.py` asks a different question of the same references.
+    """
     found: dict[str, list[str]] = {}
-    for document in sorted(DOCS.glob("*.md")):
-        for target in _EMBED.findall(document.read_text(encoding="utf-8")):
-            name = target.rsplit("/", 1)[-1]
-            found.setdefault(name, []).append(document.name)
+    for parsed in documents():
+        for image in parsed.images:
+            if image.target:
+                name = image.target.rsplit("/", 1)[-1]
+                found.setdefault(name, []).append(parsed.path.rsplit("/", 1)[-1])
     return found
 
 
@@ -89,7 +90,8 @@ def test_the_user_guide_is_illustrated() -> None:
     """
     guide = DOCS / "USER_GUIDE.md"
     assert guide.is_file(), "docs/USER_GUIDE.md is missing"
-    embeds = _EMBED.findall(guide.read_text(encoding="utf-8"))
+    parsed = next(d for d in documents() if d.path == "docs/USER_GUIDE.md")
+    embeds = parsed.images
     assert len(embeds) >= 8, (
         f"the guide embeds only {len(embeds)} image(s); it is meant to be illustrated"
     )

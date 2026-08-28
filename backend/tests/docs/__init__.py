@@ -239,6 +239,9 @@ class Markdown:
     sections: Mapping[str, str]
     numbered_headings: tuple[str, ...]
     links: tuple[Link, ...]
+    #: Image embeds, in the same shape as a link. Collected from markdown-it `image`
+    #: tokens, so an example inside a fenced block is correctly not one.
+    images: tuple[Link, ...]
     refs: tuple[SectionRef, ...]
     code: tuple[Code, ...]
 
@@ -397,6 +400,7 @@ def _walk_inline(  # noqa: C901 - one pass over one token stream; splitting it h
     span: tuple[int, int] | None,
     lines: _Lines,
     links: list[Link],
+    images: list[Link],
     refs: list[SectionRef],
     code: list[Code],
 ) -> None:
@@ -416,6 +420,20 @@ def _walk_inline(  # noqa: C901 - one pass over one token stream; splitting it h
     since = ""
 
     for child in inline.children or ():
+        if child.type == "image":
+            src = child.attrGet("src") or ""
+            if src and not src.startswith(_EXTERNAL):
+                path, _, anchor = src.partition("#")
+                images.append(
+                    Link(
+                        href=src,
+                        target=_href_target(doc, path) if path else None,
+                        anchor=anchor or None,
+                        line=lines.find(span, src),
+                    )
+                )
+            continue
+
         if child.type == "link_open":
             link_href = child.attrGet("href") or ""
             if link_href.split("#")[0].endswith(".md"):
@@ -484,6 +502,7 @@ def read(doc: Doc) -> Markdown:
     slugs: list[str] = []
     ids: list[str] = []
     links: list[Link] = []
+    images: list[Link] = []
     refs: list[SectionRef] = []
     code: list[Code] = []
 
@@ -500,7 +519,7 @@ def read(doc: Doc) -> Markdown:
             for child in token.children or ():
                 if child.type == "html_inline":
                     ids.extend(_HTML_ID.findall(child.content))
-            _walk_inline(doc, token, span, lines, links, refs, code)
+            _walk_inline(doc, token, span, lines, links, images, refs, code)
 
     sections, headings = _sections(tokens, lines)
     # Counted within each kind, never across them: `docs/HTTP_API.md` writes an explicit
@@ -518,6 +537,7 @@ def read(doc: Doc) -> Markdown:
         sections=MappingProxyType(sections),
         numbered_headings=tuple(headings),
         links=tuple(links),
+        images=tuple(images),
         refs=tuple(refs),
         code=tuple(code),
     )
