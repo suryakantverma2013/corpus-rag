@@ -16,7 +16,8 @@
     "format:check": "prettier --check .",
     "preview": "vite preview",
     "e2e": "playwright test",
-    "a11y": "node a11y/run.mjs"
+    "a11y": "node a11y/run.mjs",
+    "docs:shots": "node docs-shots/capture.mjs"
   },
   "dependencies": {
     "openapi-fetch": "^0.17.0",

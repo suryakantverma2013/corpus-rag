@@ -395,13 +395,14 @@ Documentation rots; these do not, because they fail.
 | `tests/test_openapi_contract.py` | `openapi.json` still matches the app |
 | `tests/test_http_docs.py` | `docs/HTTP_API.md` still matches `openapi.json` |
 | `tests/test_env_templates.py` | both env templates match the settings model, and boot |
-| `tests/docs/` (21-document manifest) | every link, anchor and section reference in the published documentation resolves; every variable, route and command it names exists |
+| `tests/docs/` (22-document manifest) | every link, anchor and section reference in the published documentation resolves; every variable, route and command it names exists |
 | `tests/test_spec_xref.py` | no `TBD` marker cites a closed issue |
 | `tests/test_graph.py` | `RAGState` field names frozen; per-turn reset covers every channel |
 | `test_no_api_module_imports_*` (x4) | the API/ingestion boundary |
 | `*_imports_no_langgraph` (x7) | the seven modules callable from outside the graph |
 | `frontend/fidelity/` | computed-style checks over every surface, both themes, headed |
 | `frontend/a11y/` | ten surfaces x two themes; no new WCAG violation outside the enumerated exceptions |
+| `frontend/docs-shots/` | captures the screenshots `USER_GUIDE.md` embeds, against the `tools.seed_demo` corpus; reports a surface it could not reach rather than writing a wrong frame |
 
 **One convention the last of those imposes on whoever writes documentation.** A `§` reference is
 resolved against the document it sits in, or against the document its sentence names —

@@ -154,6 +154,7 @@ DOCUMENTS: Final[tuple[Doc, ...]] = (
     Doc("docs/LIMITATIONS.md", Scope.SELF),
     Doc("docs/SECURITY.md", Scope.SELF),
     Doc("docs/TESTING.md", Scope.SELF),
+    Doc("docs/USER_GUIDE.md", Scope.SELF),
     Doc(
         "docs/HTTP_API.md",
         Scope.SPEC,

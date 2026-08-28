@@ -45,8 +45,18 @@ ORACLES: Final[Mapping[str, Callable[[], int]]] = MappingProxyType(
         "container environment keys": lambda: len(_compose_container_env()),
         "migration revisions": lambda: len(_migration_revisions()),
         "acceptance section-9 rows": lambda: len(_acceptance_rows()),
+        "documentation manifest entries": lambda: len(_documents()),
     }
 )
+
+
+def _documents() -> tuple[object, ...]:
+    """Every published markdown file, from the manifest tests/docs/ already reconciles
+    against the tree in both directions - so this counts the set the guard enforces, not a
+    second list that could disagree with it."""
+    from tests.docs import DOCUMENTS
+
+    return DOCUMENTS
 
 
 def _acceptance_rows() -> Mapping[str, object]:
@@ -122,6 +132,12 @@ CLAIMS: Final[tuple[Claim, ...]] = (
         r"literal values\*\* — (\d+) rows",
         "acceptance section-9 rows",
         "the number of section-9 rows the acceptance manifest covers",
+    ),
+    Claim(
+        "docs/MODULE_MAP.md",
+        r"\((\d+)-document manifest\)",
+        "documentation manifest entries",
+        "the number of published documents tests/docs/ reconciles against the tree",
     ),
     Claim(
         "backend/README.md",
