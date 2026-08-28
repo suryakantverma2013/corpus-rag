@@ -27,12 +27,18 @@
  *    FR-ANL-04's "Scores appear once a response is evaluated" without a polling loop, and
  *    finding nothing costs nothing — FR-EVL-01 says a response *may* carry scores.
  */
-import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 
 import type { ChatFrame, ContextWindow, Feedback, Message } from '../api';
 import { isFrozen } from '../tokens';
 import type { TranscriptEntry } from './messages';
-import { deleteConversation, getConversation, listMessages, setFeedback } from './mutations';
+import {
+  answerFromGeneralKnowledge,
+  deleteConversation,
+  getConversation,
+  listMessages,
+  setFeedback,
+} from './mutations';
 import { streamRegenerate, streamSend } from './useChatStream';
 import type { TurnFailure } from './useChatStream';
 import { EMPTY_CHAT_STATE, chatOf, chatReducer, degradedEntry, entriesOf } from './turns';
@@ -68,6 +74,16 @@ export interface ChatStore {
   send: (text: string, documentIds: readonly string[], targetId?: string) => void;
   regenerate: (messageId: string) => void;
   feedback: (messageId: string, value: Feedback | null) => void;
+  /** FR-MSG-09 — ask an abstention for an answer from the model's own training (R-98). */
+  answerUngrounded: (messageId: string) => void;
+  /**
+   * The abstentions whose FR-MSG-09 request is in flight, by message id.
+   *
+   * A set rather than a boolean because the control is per message and a transcript can hold
+   * several abstentions; disabling all of them because one is answering would be wrong, and
+   * disabling none of them invites the double-submit the reducer then has to de-duplicate.
+   */
+  readonly ungroundedBusy: ReadonlySet<string>;
   /** FR-SBR-07 — `DELETE /conversations/{id}`. Resolves to the server's copy, or `null`. */
   remove: (conversationId: string) => Promise<string | null>;
   /** Adopt the meter a `201` already carried, so a new chat needs no follow-up GET. */
@@ -110,6 +126,17 @@ export function useChat({
   const localSeq = useRef(0);
   const evalTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const mounted = useRef(true);
+
+  /**
+   * FR-MSG-09's in-flight set, held twice on purpose.
+   *
+   * The ref is the authority the callback reads and writes — it is correct in the same tick, so
+   * two clicks in one frame cannot both pass the guard, which state would allow because a
+   * `setState` is not visible to the closure that scheduled it. The state exists only to make
+   * React re-render the disabled control; a ref alone would leave the button live-looking.
+   */
+  const ungroundedPending = useRef<Set<string>>(new Set());
+  const [ungroundedBusy, setUngroundedBusy] = useState<ReadonlySet<string>>(new Set());
 
   /**
    * State and callbacks, read through refs so neither can reach an effect's dependencies.
@@ -350,6 +377,57 @@ export function useChat({
     [conversationId, refresh],
   );
 
+  /**
+   * FR-MSG-09 — ask for an answer from the model's own training (R-98).
+   *
+   * Three things about the shape, each deliberate:
+   *
+   * **It appends and never replaces.** The abstention stays on screen beneath its own answer,
+   * because it is the record that the corpus could not answer and R-98(1) rests on it — this is
+   * the opposite of `regenerate`, whose whole job is to replace.
+   *
+   * **It does not take the turn.** `state.turn` is the FR-MSG-05 typing indicator and the R-24
+   * one-turn-at-a-time signal; this is a single non-streaming call with no stages to report, and
+   * claiming the turn would disable the composer and the KB modal for its duration (the §8.58
+   * deadlock shape). `pending` is its own local flag instead.
+   *
+   * **A failure renders beneath the abstention, not in place of it.** `failureRow` anchored on
+   * the target is the same treatment a failed regenerate gets, and for the same reason: the user
+   * asked for something, it did not happen, and the answer they were reading is still there.
+   */
+  const answerUngrounded = useCallback(
+    (messageId: string) => {
+      if (conversationId === null) return;
+      if (ungroundedPending.current.has(messageId)) return;
+      ungroundedPending.current.add(messageId);
+      setUngroundedBusy(new Set(ungroundedPending.current));
+      void answerFromGeneralKnowledge(messageId).then((outcome) => {
+        if (!mounted.current) return;
+        ungroundedPending.current.delete(messageId);
+        setUngroundedBusy(new Set(ungroundedPending.current));
+        if (outcome.kind === 'ok') {
+          dispatch({ type: 'ungrounded', conversationId, message: outcome.data });
+          return;
+        }
+        if (outcome.kind === 'unauthorized') return;
+        // Our copy of the world is stale — the chat or the answer is gone. Re-read rather than
+        // tell the user off for clicking what we were showing them (`mutations.ts`'s rule).
+        if (outcome.kind === 'gone') {
+          void refresh(conversationId).catch(() => undefined);
+          return;
+        }
+        const text =
+          outcome.kind === 'invalid'
+            ? INVALID_NOTICE
+            : outcome.kind === 'frozen'
+              ? NETWORK_NOTICE
+              : outcome.detail;
+        dispatch(failureRow(conversationId, text, messageId));
+      });
+    },
+    [conversationId, refresh],
+  );
+
   const remove = useCallback(async (id: string): Promise<string | null> => {
     const outcome = await deleteConversation(id);
     // A chat that is already gone *is* deleted, from the user's point of view.
@@ -383,6 +461,8 @@ export function useChat({
     send,
     regenerate,
     feedback,
+    answerUngrounded,
+    ungroundedBusy,
     remove,
     adopt,
   };

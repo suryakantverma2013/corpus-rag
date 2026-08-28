@@ -58,6 +58,66 @@
   color: var(--muted2);
 }
 
+/* ── FR-MSG-09 — the ungrounded answer (R-98) ─────────────────────────────────
+
+   The distinct treatment. Three things about it are deliberate.
+
+   1. **The words carry it, the colour does not.** NFR-A11Y-06 accepts this palette's contrast
+      failures strictly on condition that colour is never the sole carrier of information, so the
+      rule and the tone are decoration and `.ungroundedLabel`'s text is the whole guarantee. The
+      rule is `--eval-warn` because that hue already means "read this more carefully" on the
+      FR-EVL-03 chips; `--eval-bad` would say the answer is wrong, which it is not.
+
+   2. **No new failing contrast pair.** The label is `--muted`, NOT `--muted2` — NFR-A11Y-06
+      enumerates `--muted2`-as-text as failing in both themes, and while `.sourceLine` above is
+      an accepted existing exception, "no new pair may go below threshold" forbids adding
+      another. `--eval-warn` appears only as a 2px border, where the 3:1 non-text threshold
+      applies rather than 4.5:1.
+
+   3. **The rule is on the content column, not the row**, so it does not displace the avatar and
+      an ungrounded answer keeps the same left edge as every other answer. */
+.ungrounded {
+  border-left: 2px solid var(--eval-warn);
+  padding-left: 10px;
+}
+
+.ungroundedLabel {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+/* The control on an abstention. NOT inside `.actions`: that bar is revealed on hover or focus,
+   and this is the abstention's primary affordance — a control the user cannot see is one they
+   cannot know exists, and R-98(2) makes pressing it the only way the fallback ever runs. */
+.ungroundedAction {
+  display: flex;
+}
+
+.ungroundedButton {
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-btn);
+  background: transparent;
+  color: var(--accent);
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition:
+    background var(--motion-fast) ease,
+    border-color var(--motion-fast) ease;
+}
+
+.ungroundedButton:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+.ungroundedButton:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
 /* FR-MSG-08's bar, revealed on hover or keyboard focus. It lives here rather than in
    `MessageActions.module.css` because the hover target is `.row`, and a CSS Module cannot
    select another module's hashed class.

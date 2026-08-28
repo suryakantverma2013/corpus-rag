@@ -17,7 +17,7 @@ cd backend && uv run pytest tests/acceptance         # the rule the report canno
 
 The requirements come in two shapes and are checked differently.
 
-**Acceptance-critical literal values** — 62 rows covering the design tokens, the copy strings, the
+**Acceptance-critical literal values** — 63 rows covering the design tokens, the copy strings, the
 route and response contracts, the closed vocabularies and the numeric budgets. Each is mapped to
 one or more evidence pointers in `backend/tests/acceptance/`. Six kinds:
 

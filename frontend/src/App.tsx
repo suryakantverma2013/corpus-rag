@@ -470,6 +470,8 @@ function Corpus({ brandName, showStats }: { brandName: string; showStats: boolea
                 userInitials={sidebarUser.initials}
                 onFeedback={chat.feedback}
                 onRegenerate={chat.regenerate}
+                onAnswerUngrounded={chat.answerUngrounded}
+                ungroundedBusy={chat.ungroundedBusy}
               />
               <Composer
                 documents={mentionDocuments}

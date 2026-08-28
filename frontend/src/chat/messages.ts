@@ -157,6 +157,32 @@ export function citationFooter(citation: CitationSegment): string {
 export const EVAL_SCORE_TOOLTIP =
   'DeepEval metric — indicative judge score, not an exact measurement';
 
+/* ── FR-MSG-09 — the ungrounded answer (R-98) ──────────────────────────────── */
+
+/**
+ * The label an FR-MSG-09 answer carries, verbatim from §9.
+ *
+ * **This string is the safety control**, which is why it is a constant and not markup. R-98(6)
+ * requires that a reader can always tell which kind of answer they are reading, and NFR-A11Y-06
+ * forbids colour as the sole carrier of information — so the border and the muted tone are
+ * decoration, and these words are the whole of the guarantee. The typographic apostrophe and the
+ * em dash are the spec's own; a fidelity check reads this constant rather than a copy.
+ */
+export const UNGROUNDED_LABEL = 'From the model’s general knowledge — not from your documents';
+
+/** FR-MSG-09's control, offered on an abstention only. §9's literal. */
+export const UNGROUNDED_ACTION_LABEL = 'Answer from general knowledge';
+
+/**
+ * Whether this message is an FR-MSG-09 answer.
+ *
+ * Reads the server's column rather than inferring from "an AI answer with no citations", which
+ * an ordinary abstention also satisfies — the two must never render alike.
+ */
+export function isUngrounded(message: Message | DegradedMessage): boolean {
+  return !isDegraded(message) && message.ungrounded;
+}
+
 export type EvalBand = 'good' | 'warn' | 'bad';
 
 export interface EvalChip {

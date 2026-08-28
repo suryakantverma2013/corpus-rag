@@ -26,6 +26,8 @@ function answer(segs: Segment[], extra: Partial<Message> = {}): Message {
     role: 'ai',
     segs,
     created_at: '2026-07-16T09:12:00Z',
+    ungrounded: false,
+    ungrounded_offerable: false,
     ...extra,
   };
 }

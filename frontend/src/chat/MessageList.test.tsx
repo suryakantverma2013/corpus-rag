@@ -18,13 +18,30 @@ let seq = 0;
 
 function user(text: string): TranscriptEntry {
   seq += 1;
-  return { message: { id: `u${seq}`, role: 'user', segs: [{ text }], created_at: 'x' } };
+  return {
+    message: {
+      id: `u${seq}`,
+      role: 'user',
+      segs: [{ text }],
+      created_at: 'x',
+      ungrounded: false,
+      ungrounded_offerable: false,
+    },
+  };
 }
 
 function ai(segs: Segment[], extra: Partial<Message> = {}): TranscriptEntry {
   seq += 1;
   return {
-    message: { id: `a${seq}`, role: 'ai', segs, created_at: 'x', ...extra },
+    message: {
+      id: `a${seq}`,
+      role: 'ai',
+      segs,
+      created_at: 'x',
+      ungrounded: false,
+      ungrounded_offerable: false,
+      ...extra,
+    },
     outcome: 'answered',
   };
 }
@@ -40,6 +57,8 @@ function list(props: Partial<MessageListProps> = {}): RenderResult {
         userInitials="MJ"
         onFeedback={() => {}}
         onRegenerate={() => {}}
+        onAnswerUngrounded={() => {}}
+        ungroundedBusy={new Set()}
         {...props}
       />
     </CitationHoverProvider>,
@@ -94,6 +113,8 @@ describe('FR-MSG-01 — auto-scroll', () => {
           userInitials="MJ"
           onFeedback={() => {}}
           onRegenerate={() => {}}
+          onAnswerUngrounded={() => {}}
+          ungroundedBusy={new Set()}
         />
       </CitationHoverProvider>,
     );
@@ -115,6 +136,8 @@ describe('FR-MSG-01 — auto-scroll', () => {
           userInitials="MJ"
           onFeedback={() => {}}
           onRegenerate={() => {}}
+          onAnswerUngrounded={() => {}}
+          ungroundedBusy={new Set()}
         />
       </CitationHoverProvider>,
     );
@@ -137,6 +160,8 @@ describe('FR-MSG-01 — auto-scroll', () => {
           userInitials="MJ"
           onFeedback={() => {}}
           onRegenerate={() => {}}
+          onAnswerUngrounded={() => {}}
+          ungroundedBusy={new Set()}
         />
       </CitationHoverProvider>,
     );
@@ -166,6 +191,8 @@ describe('FR-MSG-01 — auto-scroll', () => {
           userInitials="MJ"
           onFeedback={() => {}}
           onRegenerate={() => {}}
+          onAnswerUngrounded={() => {}}
+          ungroundedBusy={new Set()}
         />
       </CitationHoverProvider>,
     );
@@ -277,6 +304,8 @@ describe('NFR-A11Y-05 — the live region', () => {
           userInitials="MJ"
           onFeedback={() => {}}
           onRegenerate={() => {}}
+          onAnswerUngrounded={() => {}}
+          ungroundedBusy={new Set()}
         />
       </CitationHoverProvider>,
     );
@@ -314,6 +343,8 @@ describe('NFR-A11Y-05 — the live region', () => {
           userInitials="MJ"
           onFeedback={() => {}}
           onRegenerate={() => {}}
+          onAnswerUngrounded={() => {}}
+          ungroundedBusy={new Set()}
         />
       </CitationHoverProvider>,
     );

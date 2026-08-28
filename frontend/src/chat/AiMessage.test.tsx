@@ -12,7 +12,11 @@ import { act, fireEvent, render, screen, within } from '@testing-library/react';
 const figureGet = vi.fn();
 vi.mock('../api/client', () => ({ api: { GET: (...args: unknown[]) => figureGet(...args) } }));
 import { AiMessage } from './AiMessage';
-import { EVAL_SCORE_TOOLTIP } from './messages';
+import {
+  EVAL_SCORE_TOOLTIP,
+  UNGROUNDED_ACTION_LABEL,
+  UNGROUNDED_LABEL,
+} from './messages';
 import { CitationHoverProvider } from './CitationHoverProvider';
 import type { CitationSegment, Evaluation, Feedback, Message, Segment } from '../api';
 
@@ -21,7 +25,15 @@ function cite(doc: string, extra: Partial<CitationSegment> = {}): CitationSegmen
 }
 
 function answer(segs: Segment[], extra: Partial<Message> = {}): Message {
-  return { id: 'a1', role: 'ai', segs, created_at: 'x', ...extra };
+  return {
+    id: 'a1',
+    role: 'ai',
+    segs,
+    created_at: 'x',
+    ungrounded: false,
+    ungrounded_offerable: false,
+    ...extra,
+  };
 }
 
 function show(
@@ -29,6 +41,8 @@ function show(
   handlers: Partial<{
     onFeedback: (f: Feedback | null) => void;
     onRegenerate: () => void;
+    onAnswerUngrounded: () => void;
+    ungroundedBusy: boolean;
     busy: boolean;
   }> = {},
 ) {
@@ -39,6 +53,8 @@ function show(
         busy={handlers.busy ?? false}
         onFeedback={handlers.onFeedback ?? (() => {})}
         onRegenerate={handlers.onRegenerate ?? (() => {})}
+        onAnswerUngrounded={handlers.onAnswerUngrounded ?? (() => {})}
+        ungroundedBusy={handlers.ungroundedBusy ?? false}
       />
     </CitationHoverProvider>,
   );
@@ -364,5 +380,76 @@ describe('FR-CIT-07 figures', () => {
 
     expect(view.container.querySelector('img')).toBeNull();
     expect(figureGet).not.toHaveBeenCalled();
+  });
+});
+
+describe('FR-MSG-09 — the ungrounded answer (R-98)', () => {
+  it('carries the label, above the answer it qualifies', () => {
+    // R-98(6): the reader must be able to tell which kind of answer this is, and the
+    // words are the whole carrier because NFR-A11Y-06 forbids colour being it. Order is
+    // asserted because a label underneath is one a confident reader never reaches.
+    const view = show(answer([{ text: 'Induction proves a statement for all n.' }], {
+      ungrounded: true,
+    }));
+
+    const label = screen.getByText(UNGROUNDED_LABEL);
+    const body = screen.getByText(/Induction proves/);
+    expect(precedes(label, body)).toBe(true);
+    expect(view.container.textContent).toContain(UNGROUNDED_LABEL);
+  });
+
+  it('shows no label on an ordinary grounded answer', () => {
+    show(answer([{ text: 'Grounded.' }], { evaluation: BOTH }));
+
+    expect(screen.queryByText(UNGROUNDED_LABEL)).toBeNull();
+  });
+
+  it('offers the control only where the server says it may', () => {
+    // `ungrounded_offerable` is the server's `is_offerable`, and the deciding term - the
+    // deployment switch - is not otherwise on the wire. Deriving the control from
+    // 'an AI answer with no citations' would offer it on every abstention, including on
+    // a deployment that never opted in, and every press would earn a 409.
+    show(answer([{ text: 'I could not ground an answer to that.' }]));
+    expect(screen.queryByRole('button', { name: UNGROUNDED_ACTION_LABEL })).toBeNull();
+
+    show(answer([{ text: 'I could not ground an answer to that.' }], {
+      ungrounded_offerable: true,
+    }));
+    expect(screen.getByRole('button', { name: UNGROUNDED_ACTION_LABEL })).toBeTruthy();
+  });
+
+  it('is never offered on an ungrounded answer itself', () => {
+    // Falling back from a fallback is refused server-side; the control must not be there
+    // to press. `ungrounded_offerable` already encodes it - this pins that the component
+    // reads that field rather than re-deriving from the absence of citations.
+    show(answer([{ text: 'From training.' }], { ungrounded: true }));
+
+    expect(screen.queryByRole('button', { name: UNGROUNDED_ACTION_LABEL })).toBeNull();
+  });
+
+  it('calls back when pressed, and is inert while its request is in flight', () => {
+    const onAnswerUngrounded = vi.fn();
+    const message = answer([{ text: 'No grounding.' }], { ungrounded_offerable: true });
+
+    const view = show(message, { onAnswerUngrounded });
+    fireEvent.click(screen.getByRole('button', { name: UNGROUNDED_ACTION_LABEL }));
+    expect(onAnswerUngrounded).toHaveBeenCalledTimes(1);
+
+    view.unmount();
+    show(message, { onAnswerUngrounded, ungroundedBusy: true });
+    const busy = screen.getByRole('button', { name: UNGROUNDED_ACTION_LABEL });
+    expect(busy.hasAttribute('disabled')).toBe(true);
+    fireEvent.click(busy);
+    expect(onAnswerUngrounded).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders no citation chips and no eval chips', () => {
+    // FR-MSG-09(2)/(3). The envelope is empty by construction server-side (R-98(3)), so
+    // this asserts the consequence a reader sees: nothing that would make invented text
+    // look sourced or scored.
+    const view = show(answer([{ text: 'From training alone.' }], { ungrounded: true }));
+
+    expect(view.container.querySelector('[data-band]')).toBeNull();
+    expect(screen.queryByRole('button', { name: /passage/i })).toBeNull();
   });
 });

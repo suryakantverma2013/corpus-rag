@@ -24,7 +24,12 @@ import { CitationFigures } from './CitationFigures';
 import { EvalChips } from './EvalChips';
 import { MessageActions } from './MessageActions';
 import { renderMarkdown } from './markdown';
-import { citationsOf, sourceLine } from './messages';
+import {
+  UNGROUNDED_ACTION_LABEL,
+  UNGROUNDED_LABEL,
+  citationsOf,
+  sourceLine,
+} from './messages';
 import type { Feedback, Message } from '../api';
 
 /** The brand mark, as the prototype writes it. `brandName`'s initial is deliberately *not*
@@ -50,9 +55,20 @@ export interface AiMessageProps {
   busy: boolean;
   onFeedback: (feedback: Feedback | null) => void;
   onRegenerate: () => void;
+  /** FR-MSG-09 — the user asked this abstention for an answer from the model's own training. */
+  onAnswerUngrounded?: () => void;
+  /** That request is in flight for *this* message. */
+  ungroundedBusy?: boolean;
 }
 
-export function AiMessage({ message, busy, onFeedback, onRegenerate }: AiMessageProps) {
+export function AiMessage({
+  message,
+  busy,
+  onFeedback,
+  onRegenerate,
+  onAnswerUngrounded,
+  ungroundedBusy = false,
+}: AiMessageProps) {
   const citations = useMemo(() => citationsOf(message.segs), [message.segs]);
   const source = sourceLine(citations);
 
@@ -98,10 +114,28 @@ export function AiMessage({ message, busy, onFeedback, onRegenerate }: AiMessage
     <article className={`${styles.row} animate-fade-up`}>
       <span className="visually-hidden">Corpus replied:</span>
       <AiAvatar />
-      <div className={styles.content}>
+      <div
+        className={message.ungrounded ? `${styles.content} ${styles.ungrounded}` : styles.content}
+      >
+        {/* FR-MSG-09 — **above** the answer, not below it. The label's job is to be read before
+            the text it qualifies; underneath, a reader who stops at the end of a confident
+            paragraph never reaches it, which is the one failure R-98(6) exists to prevent. */}
+        {message.ungrounded && <p className={styles.ungroundedLabel}>{UNGROUNDED_LABEL}</p>}
         <div className={styles.body}>{body}</div>
         {source !== null && <div className={`${styles.sourceLine} mono`}>{source}</div>}
         <EvalChips evaluation={message.evaluation} />
+        {message.ungrounded_offerable && onAnswerUngrounded !== undefined && (
+          <div className={styles.ungroundedAction}>
+            <button
+              type="button"
+              className={styles.ungroundedButton}
+              onClick={onAnswerUngrounded}
+              disabled={ungroundedBusy}
+            >
+              {UNGROUNDED_ACTION_LABEL}
+            </button>
+          </div>
+        )}
         <div className={styles.actions}>
           <MessageActions
             feedback={message.feedback}

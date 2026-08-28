@@ -47,6 +47,7 @@ import {
   checkCitationFigure,
   checkEvalHues,
   checkMentionMenu,
+  checkUngroundedAnswer,
   checkUserMenu,
 } from './checks/surfaces.mjs';
 
@@ -100,6 +101,7 @@ try {
     await checkCitationCard(page, r, theme);
     await checkCitationFigure(page, r, theme);
     await checkActionBar(page, r, theme);
+    await checkUngroundedAnswer(page, r, theme);
     await checkEvalHues(page, r, theme);
     await checkUserMenu(page, r, theme);
 

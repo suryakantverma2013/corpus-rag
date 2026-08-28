@@ -105,6 +105,8 @@ export type ChatAction =
     }
   /** FR-MSG-08's 👍/👎 — the `200` body, or an optimistic write. */
   | { type: 'feedback'; conversationId: string; message: Message }
+  /** FR-MSG-09 — the ungrounded answer's `201` body, appended beneath its abstention. */
+  | { type: 'ungrounded'; conversationId: string; message: Message }
   /** The turn left no trace server-side, so its local entries must go too. */
   | { type: 'discarded'; conversationId: string }
   /** The turn ended, however it ended. */
@@ -174,6 +176,21 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           entry.message.id === action.message.id ? { ...entry, message: action.message } : entry,
         ),
       }));
+
+    case 'ungrounded':
+      // Appended to the **server's** transcript rather than to `pendingTurn`, because the row
+      // already exists server-side: the `201` is the created message, so this is adopting a
+      // confirmed row and not an optimistic write. It goes last because `messages` is ordered by
+      // `seq` and this is the newest — the control is offered only when no turn is in flight, so
+      // there is nothing it could be appended out of order with.
+      //
+      // Guarded against a double dispatch: React 18 StrictMode double-invokes, and a duplicated
+      // id would render the answer twice with the same key.
+      return patch(state, action.conversationId, (chat) =>
+        chat.messages.some((message) => message.id === action.message.id)
+          ? chat
+          : { ...chat, messages: [...chat.messages, action.message] },
+      );
 
     case 'discarded':
       // FR-STA-04's refusal is the case: `record_question` raises *before* it inserts, so no
@@ -264,6 +281,10 @@ export function pendingEntry(text: string, localId: string): TranscriptEntry {
       id: `${LOCAL_ID_PREFIX}${localId}`,
       role: 'user',
       segs: [{ text }],
+      // FR-MSG-09 - a question the user just typed is neither, and the server
+      // will say the same when this bubble is replaced by the real row.
+      ungrounded: false,
+      ungrounded_offerable: false,
       created_at: new Date().toISOString(),
     },
   };

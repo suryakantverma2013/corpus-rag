@@ -59,6 +59,10 @@ export interface MessageListProps {
   userInitials: string;
   onFeedback: (messageId: string, feedback: Feedback | null) => void;
   onRegenerate: (messageId: string) => void;
+  /** FR-MSG-09 (R-98) — offered on an abstention only, and only where the server says so. */
+  onAnswerUngrounded: (messageId: string) => void;
+  /** The message ids whose FR-MSG-09 request is in flight. */
+  ungroundedBusy: ReadonlySet<string>;
 }
 
 export function MessageList({
@@ -69,6 +73,8 @@ export function MessageList({
   userInitials,
   onFeedback,
   onRegenerate,
+  onAnswerUngrounded,
+  ungroundedBusy,
 }: MessageListProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const { dismiss } = useCitationHover();
@@ -123,6 +129,8 @@ export function MessageList({
           userInitials={userInitials}
           onFeedback={onFeedback}
           onRegenerate={onRegenerate}
+          onAnswerUngrounded={onAnswerUngrounded}
+          ungroundedBusy={ungroundedBusy}
         />
       ))}
 
@@ -139,9 +147,19 @@ interface EntryProps {
   userInitials: string;
   onFeedback: (messageId: string, feedback: Feedback | null) => void;
   onRegenerate: (messageId: string) => void;
+  onAnswerUngrounded: (messageId: string) => void;
+  ungroundedBusy: ReadonlySet<string>;
 }
 
-function Entry({ entry, busy, userInitials, onFeedback, onRegenerate }: EntryProps) {
+function Entry({
+  entry,
+  busy,
+  userInitials,
+  onFeedback,
+  onRegenerate,
+  onAnswerUngrounded,
+  ungroundedBusy,
+}: EntryProps) {
   const { message } = entry;
   if (message.role === 'user') {
     return <UserMessage text={plainText(message.segs)} initials={userInitials} />;
@@ -156,6 +174,8 @@ function Entry({ entry, busy, userInitials, onFeedback, onRegenerate }: EntryPro
       busy={busy}
       onFeedback={(feedback) => onFeedback(message.id, feedback)}
       onRegenerate={() => onRegenerate(message.id)}
+      onAnswerUngrounded={() => onAnswerUngrounded(message.id)}
+      ungroundedBusy={ungroundedBusy.has(message.id)}
     />
   );
 }

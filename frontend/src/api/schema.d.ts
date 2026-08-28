@@ -784,6 +784,55 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/messages/{message_id}/general-knowledge': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Answer an abstention from the model's own training (FR-MSG-09)
+     * @description FR-MSG-09 (R-98) — a second, explicitly ungrounded answer, appended beneath the refusal.
+     *
+     *     **Not an SSE route, unlike its two siblings, and the difference is the point.** Send and
+     *     regenerate stream because the graph emits FR-ORC-01 stage frames; this path has no stages
+     *     to report — it is one `ChatClient` call — so streaming would be ceremony around a single
+     *     result. The practical gain is that a plain handler can refuse with an ordinary status: a
+     *     generator's body runs *after* the `200` (T-405), which is why regenerate has to hoist every
+     *     refusal into `admit_regeneration`, and there is nothing here that needs hoisting.
+     *
+     *     **It appends; the abstention stays.** R-98(1) leans on the abstention as the record that the
+     *     corpus could not answer — the reason an automatic fallback is declined at all — so replacing
+     *     it would delete the evidence. That is the deliberate opposite of Regenerate, which replaces
+     *     (R-56) because there the old answer and the new one answer the same question; here they are
+     *     different *kinds* of answer and the transcript should show both.
+     *
+     *     Refusals, in order:
+     *
+     *     * absent, foreign or non-AI target → one `404` with one copy, for an administrator too
+     *       (R-55(2), R-54(1)) — identical to the feedback and regenerate routes;
+     *     * the deployment has not enabled the control, or the target is not an abstention → `409`.
+     *       Both are states a correct client cannot reach: the GUI only offers the control when
+     *       `is_offerable` says so, and the same predicate is what the service re-checks. This is the
+     *       server half of R-71(1)'s two-copies-of-one-state problem, and it is a reconciliation path
+     *       rather than an expected outcome.
+     *
+     *     **No R-24 lock and no budget check.** The lock gates the four *file* verbs (R-43(4)), and
+     *     R-55(1) settled that a chat-side route must not take it — refusing here because a *different*
+     *     chat is mid-turn is the defect that argument rejected. The FR-STA-04 budget is not checked
+     *     because this adds no question: R-51(4) derives usage from `messages`, and the answer it
+     *     appends is counted the next time a turn is submitted, where the refusal belongs.
+     */
+    post: operations['answer_from_general_knowledge'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1794,6 +1843,18 @@ export interface components {
       completion_tokens?: number | null;
       /** Latency Ms */
       latency_ms?: number | null;
+      /**
+       * Ungrounded
+       * @description FR-MSG-09 - this answer was generated from the model's own training with no retrieved passages. It never carries citations or evaluation scores, and it is excluded from FR-EVL-04's session averages. Render it in a visually distinct treatment so a reader can always tell it from a grounded answer.
+       * @default false
+       */
+      ungrounded: boolean;
+      /**
+       * Ungrounded Offerable
+       * @description Whether to offer FR-MSG-09's “Answer from general knowledge” control on this message. True only for an AI answer that abstained - it cites nothing and is not itself ungrounded - on a deployment where the operator enabled the fallback. The last term is not otherwise on the wire, so do not re-derive this.
+       * @default false
+       */
+      ungrounded_offerable: boolean;
       /**
        * Created At
        * Format: date-time
@@ -4815,6 +4876,91 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+    };
+  };
+  answer_from_general_knowledge: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        message_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['MessageResponse'];
+        };
+      };
+      /** @description Missing, malformed or expired bearer token, or no local user record. */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description The account is deactivated, or the operation is administrator-only (NFR-SEC-01). */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description No such message for this caller, or it is not an AI answer. */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description The control is disabled on this server, or the target is not an abstention. */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+      /** @description NFR-SEC-07 — too many attempts. `Retry-After` carries the cooldown. */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
+        };
+      };
+      /** @description The identity provider is unreachable (R-28). */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorResponse'];
         };
       };
     };

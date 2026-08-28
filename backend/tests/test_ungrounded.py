@@ -52,7 +52,10 @@ async def _abstention(session: AsyncSession, chat: Conversation) -> Message:
             conversation_id=chat.id,
             role=MessageRole.AI,
             content="I couldn't ground an answer to that in your documents",
-            citations=None,
+            # The shape `abstain` actually persists: a complete envelope whose segments
+            # carry no `chunkId`. `citations=None` is a shape the pipeline never writes,
+            # and a fixture using it hid T-727's column-vs-citations defect entirely.
+            citations={"segments": [{"text": "I couldn't ground an answer"}], "source_ids": []},
         )
     )
     await session.commit()
@@ -65,6 +68,16 @@ def enabled(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
     settings = get_settings()
     monkeypatch.setattr(settings.ungrounded, "fallback_enabled", True)
     return settings
+
+
+@pytest.fixture
+def disabled(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
+    """Force the control OFF - see the twin in `test_ungrounded_api.py` for why.
+
+    A behavioural test must not depend on the developer's `.env`; the shipped default is
+    asserted by `test_the_switch_is_off_by_default` from the field declaration itself.
+    """
+    monkeypatch.setattr(get_settings().ungrounded, "fallback_enabled", False)
 
 
 async def test_the_switch_is_off_by_default(session: AsyncSession) -> None:
@@ -80,7 +93,9 @@ async def test_the_switch_is_off_by_default(session: AsyncSession) -> None:
 
 
 async def test_it_refuses_when_the_deployment_has_not_enabled_it(
-    session: AsyncSession, make_token: Callable[..., str]
+    session: AsyncSession,
+    make_token: Callable[..., str],
+    disabled,  # noqa: ANN001
 ) -> None:
     """The switch gates the *service*, not merely the GUI control.
 
@@ -91,9 +106,7 @@ async def test_it_refuses_when_the_deployment_has_not_enabled_it(
     target = await _abstention(session, chat)
 
     with pytest.raises(ungrounded.UngroundedDisabledError):
-        await ungrounded.answer_from_general_knowledge(
-            session, conversation=chat, target=target
-        )
+        await ungrounded.answer_from_general_knowledge(session, conversation=chat, target=target)
 
 
 async def test_the_answer_cites_nothing_and_is_marked(
@@ -108,9 +121,7 @@ async def test_the_answer_cites_nothing_and_is_marked(
     chat = await _chat(session, make_token)
     target = await _abstention(session, chat)
 
-    row = await ungrounded.answer_from_general_knowledge(
-        session, conversation=chat, target=target
-    )
+    row = await ungrounded.answer_from_general_knowledge(session, conversation=chat, target=target)
 
     assert row.ungrounded is True
     assert not row.citations
@@ -149,9 +160,7 @@ async def test_it_is_withheld_from_the_history_a_later_turn_sees(
     """
     chat = await _chat(session, make_token)
     target = await _abstention(session, chat)
-    row = await ungrounded.answer_from_general_knowledge(
-        session, conversation=chat, target=target
-    )
+    row = await ungrounded.answer_from_general_knowledge(session, conversation=chat, target=target)
 
     # A later question, as a real turn would write it.
     later = await MessageRepository(session).add(
@@ -183,15 +192,23 @@ async def test_a_grounded_answer_is_not_a_fallback_target(
             conversation_id=chat.id,
             role=MessageRole.AI,
             content="Grounded.",
-            citations={"segments": [{"isCite": True, "doc": "a.pdf", "quote": "q"}]},
+            citations={
+                "segments": [
+                    {
+                        "isCite": True,
+                        "doc": "a.pdf",
+                        "quote": "q",
+                        "chunkId": "11111111-1111-1111-1111-111111111111",
+                    }
+                ],
+                "source_ids": ["11111111-1111-1111-1111-111111111111"],
+            },
         )
     )
     await session.commit()
 
     with pytest.raises(ungrounded.NotAnAbstentionError):
-        await ungrounded.answer_from_general_knowledge(
-            session, conversation=chat, target=answered
-        )
+        await ungrounded.answer_from_general_knowledge(session, conversation=chat, target=answered)
 
 
 async def test_the_offer_predicate_agrees_with_the_service(
@@ -206,7 +223,5 @@ async def test_the_offer_predicate_agrees_with_the_service(
     target = await _abstention(session, chat)
     assert ungrounded.is_offerable(target) is True
 
-    row = await ungrounded.answer_from_general_knowledge(
-        session, conversation=chat, target=target
-    )
+    row = await ungrounded.answer_from_general_knowledge(session, conversation=chat, target=target)
     assert ungrounded.is_offerable(row) is False, "no fallback on a fallback"

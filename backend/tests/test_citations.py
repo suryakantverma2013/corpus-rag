@@ -21,6 +21,7 @@ from app.rag.citations import (
     SOURCE_IDS_KEY,
     TextSegment,
     build_citations,
+    envelope_cites_nothing,
     envelope_segments,
     scores_by_chunk_id,
 )
@@ -192,3 +193,65 @@ def test_a_segment_that_is_neither_shape_falls_back_to_the_answer_text() -> None
     assert envelope_segments({"segments": [{"isCite": True, "doc": "d.pdf"}]}, content="x") == [
         TextSegment(text="x")
     ]
+
+
+# --- envelope_cites_nothing (T-727) ------------------------------------------------
+
+
+def test_a_real_abstention_envelope_cites_nothing() -> None:
+    """The shape `abstain` persists: complete envelope, segments, empty `source_ids`.
+
+    This is the case the helper exists for. `messages.citations` is a **non-empty dict** here,
+    so a truthiness test on the column answers 'this cites something' - which is exactly the
+    defect T-727's live pass found in `is_offerable`, where it made FR-MSG-09's control
+    unreachable on every real abstention while every unit test passed.
+    """
+    envelope = {
+        SEGMENTS_KEY: [{"text": "I could not ground an answer to that."}],
+        SOURCE_IDS_KEY: [],
+    }
+
+    assert envelope, "the fixture must be a non-empty dict, or it proves nothing"
+    assert envelope_cites_nothing(envelope) is True
+
+
+def test_an_answer_with_a_cited_segment_does_not() -> None:
+    envelope = {
+        SEGMENTS_KEY: [
+            {"text": "Revenue rose "},
+            {
+                "isCite": True,
+                "doc": "q3.pdf",
+                "quote": "revenue rose 12%",
+                "chunkId": "11111111-1111-1111-1111-111111111111",
+            },
+        ],
+        SOURCE_IDS_KEY: ["11111111-1111-1111-1111-111111111111"],
+    }
+
+    assert envelope_cites_nothing(envelope) is False
+
+
+def test_source_ids_alone_are_not_a_citation() -> None:
+    """The grounding set is what was *supplied*; a citation is what the answer *used*.
+
+    A turn can be given passages and cite none of them - the gate then rejects it and the turn
+    abstains - so keying on `source_ids` would call that a grounded answer and withhold the
+    FR-MSG-09 control from precisely the turn that needs it.
+    """
+    envelope = {
+        SEGMENTS_KEY: [{"text": "no marker resolved"}],
+        SOURCE_IDS_KEY: ["11111111-1111-1111-1111-111111111111"],
+    }
+
+    assert envelope_cites_nothing(envelope) is True
+
+
+def test_anything_unreadable_counts_as_citing_nothing() -> None:
+    """Fails safe in the direction that matters: an unreadable envelope must never make an
+    answer look grounded."""
+    assert envelope_cites_nothing(None) is True
+    assert envelope_cites_nothing({}) is True
+    assert envelope_cites_nothing({SEGMENTS_KEY: "not a list"}) is True
+    assert envelope_cites_nothing({SEGMENTS_KEY: [{"chunkId": ""}]}) is True
+    assert envelope_cites_nothing({SEGMENTS_KEY: [{"chunkId": 7}]}) is True

@@ -204,6 +204,37 @@ class MessageResponse(BaseModel):
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     latency_ms: int | None = None
+    #: FR-MSG-09 (R-98) — this answer came from the model's own training, not from the
+    #: documents. The GUI needs it on the wire, not merely at the moment it was created:
+    #: after a reload the transcript is the only source, and without it the distinct
+    #: treatment and its label would vanish on refresh while the text stayed. It is also
+    #: what excludes the row from FR-EVL-04's averages.
+    ungrounded: bool = Field(
+        default=False,
+        description=(
+            "FR-MSG-09 - this answer was generated from the model's own training with no "
+            "retrieved passages. It never carries citations or evaluation scores, and it is "
+            "excluded from FR-EVL-04's session averages. Render it in a visually distinct "
+            "treatment so a reader can always tell it from a grounded answer."
+        ),
+    )
+    #: Whether the GUI should offer FR-MSG-09's control on *this* message.
+    #:
+    #: Server-computed rather than client-derived, and that is deliberate. The predicate
+    #: is four terms — the deployment switch, the AI role, no citations, and not itself
+    #: ungrounded — of which the **first is not on the wire at all**. A client could only
+    #: re-derive the other three and would still need the switch from somewhere, which is
+    #: two copies of one state and exactly the drift R-71(1) had to reconcile. Reusing
+    #: `ungrounded.is_offerable` is what `is_offerable`'s own docstring asks for.
+    ungrounded_offerable: bool = Field(
+        default=False,
+        description=(
+            "Whether to offer FR-MSG-09's “Answer from general knowledge” control on this "
+            "message. True only for an AI answer that abstained - it cites nothing and is "
+            "not itself ungrounded - on a deployment where the operator enabled the "
+            "fallback. The last term is not otherwise on the wire, so do not re-derive this."
+        ),
+    )
     created_at: datetime
 
 
@@ -324,6 +355,8 @@ def _to_response(
         prompt_tokens=message.prompt_tokens,
         completion_tokens=message.completion_tokens,
         latency_ms=message.latency_ms,
+        ungrounded=message.ungrounded,
+        ungrounded_offerable=ungrounded.is_offerable(message),
         created_at=message.created_at,
     )
 
@@ -925,8 +958,7 @@ async def set_feedback(
             ),
             (
                 status.HTTP_409_CONFLICT,
-                "The control is disabled on this server, or the target is not an "
-                "abstention.",
+                "The control is disabled on this server, or the target is not an abstention.",
             ),
         ),
     },

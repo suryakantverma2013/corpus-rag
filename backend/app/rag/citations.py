@@ -71,6 +71,7 @@ __all__ = [
     "Segment",
     "TextSegment",
     "build_citations",
+    "envelope_cites_nothing",
     "envelope_segments",
     "plain_segments",
     "scores_by_chunk_id",
@@ -393,6 +394,39 @@ def plain_segments(content: str) -> list[Segment]:
     empty for a message that has text, so the fallback is one text run rather than `[]`.
     """
     return [TextSegment(text=content)]
+
+
+def envelope_cites_nothing(envelope: object) -> bool:
+    """Whether a stored `messages.citations` envelope contains no citation at all.
+
+    **The distinction this exists to make is not "is the column empty".** An abstained or
+    injection-blocked turn is persisted as an ordinary row and the `abstain` node writes a
+    *complete* envelope — segments for the refusal text, an empty `source_ids` — so the column
+    is a non-empty dict and a truthiness test on it answers "this cites something". That is the
+    defect T-727's live pass found: `is_offerable` read the column, so FR-MSG-09's control was
+    never offered on any real abstention and the route refused every request with `409`, while
+    every unit test passed because its fixture set `citations=None` by hand — which is a shape
+    the pipeline never writes.
+
+    So the question is asked of the **segments**: does any of them carry a `chunkId`?
+    `workers/evaluate.py` asks the same question the same way for R-50's skip rule, and its
+    comment says why in one line — *"the `abstain` node writes an empty citation list"*.
+
+    Deliberately tolerant, like `envelope_segments` beside it: anything that is not a
+    recognisable envelope counts as citing nothing, because the two callers both fail safe that
+    way — an unreadable envelope must not make an answer look grounded.
+    """
+    if not isinstance(envelope, Mapping):
+        return True
+    segments = envelope.get(SEGMENTS_KEY)
+    if not isinstance(segments, list):
+        return True
+    return not any(
+        isinstance(segment, Mapping)
+        and isinstance(segment.get("chunkId"), str)
+        and segment["chunkId"]
+        for segment in segments
+    )
 
 
 def envelope_segments(envelope: object, *, content: str) -> list[Segment]:

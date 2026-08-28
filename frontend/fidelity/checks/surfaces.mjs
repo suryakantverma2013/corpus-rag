@@ -295,3 +295,73 @@ export async function checkCitationFigure(page, r, theme) {
   // NFR-A11Y-06: `--muted`, not `--muted2`, which fails contrast as text on every surface.
   r.eq('the caption is --muted, not --muted2', found.captionColor, found.mutedColor);
 }
+
+/**
+ * §9 "Ungrounded answer" — FR-MSG-09's label and control (R-98).
+ *
+ * **Two branches, and both measure something.** The surface exists only where the operator
+ * set `UNGROUNDED_FALLBACK_ENABLED` (default **false**, R-98(2)) and the corpus has actually
+ * abstained, so a check that merely looked for the control would fail on a correctly
+ * configured default deployment. Recording that as a pass is the T-606 defect — 39
+ * checks measuring the wrong page — so instead:
+ *
+ * - the **negative invariant** runs everywhere: no grounded answer may carry the label.
+ *   Render it unconditionally and this fails on every run, on every deployment.
+ * - the **positive branch** runs where the control is present, and prints which world it
+ *   measured. A differing check count between runs is a signal, not noise.
+ */
+export async function checkUngroundedAnswer(page, r, theme) {
+  r.context('§9 ungrounded answer', theme);
+
+  const found = await page.evaluate(`
+    const LABEL = 'From the model’s general knowledge — not from your documents';
+    const ACTION = 'Answer from general knowledge';
+    const answers = [...document.querySelectorAll('main article')];
+    const control = [...document.querySelectorAll('main button')]
+      .find((b) => (b.textContent || '').trim() === ACTION) || null;
+    const labelled = answers.filter((a) => (a.textContent || '').includes(LABEL));
+    // 'Grounded-looking' = it carries an FR-EVL-02 chip, which only a scored answer has.
+    const grounded = answers.filter((a) => a.querySelector('[data-band]') !== null);
+    return {
+      hasControl: control !== null,
+      controlName: control ? (control.textContent || '').trim() : null,
+      controlDisabled: control ? control.disabled : null,
+      labelledCount: labelled.length,
+      groundedCarryingLabel:
+        grounded.filter((a) => (a.textContent || '').includes(LABEL)).length,
+      labelPrecedesBody: labelled.every((a) => {
+        const p = [...a.querySelectorAll('p')];
+        const i = p.findIndex((n) => (n.textContent || '').trim() === LABEL);
+        return i <= 0 || p.slice(0, i).every((n) => !(n.textContent || '').trim());
+      }),
+    };`);
+
+  // Measured on every deployment, whatever the flag says.
+  r.eq('no grounded answer carries the FR-MSG-09 label', found.groundedCarryingLabel, 0);
+
+  if (!found.hasControl && found.labelledCount === 0) {
+    r.truthy(
+      'no ungrounded label appears without the control that produces one',
+      true,
+      'the fallback is off, or nothing has abstained',
+    );
+    console.log(
+      `    note  [${theme}] FR-MSG-09 control not offered here ` +
+        `(UNGROUNDED_FALLBACK_ENABLED off, or no turn has abstained) ` +
+        `- negative invariant measured, rendered treatment not`,
+    );
+    return;
+  }
+
+  if (found.hasControl) {
+    r.eq('the control reads the §9 literal exactly', found.controlName, 'Answer from general knowledge');
+    r.eq('the control is live at rest, not disabled', found.controlDisabled, false);
+  }
+  if (found.labelledCount > 0) {
+    r.truthy(
+      'the label is read before the answer it qualifies',
+      found.labelPrecedesBody,
+      'a label beneath the text is one a confident reader never reaches',
+    );
+  }
+}

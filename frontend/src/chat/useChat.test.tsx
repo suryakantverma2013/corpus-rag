@@ -19,6 +19,7 @@ const listMessages = vi.fn();
 const getConversation = vi.fn();
 const setFeedbackCall = vi.fn();
 const deleteConversationCall = vi.fn();
+const ungroundedCall = vi.fn();
 
 vi.mock('./mutations', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./mutations')>()),
@@ -26,6 +27,7 @@ vi.mock('./mutations', async (importOriginal) => ({
   getConversation: (...a: unknown[]) => getConversation(...a),
   setFeedback: (...a: unknown[]) => setFeedbackCall(...a),
   deleteConversation: (...a: unknown[]) => deleteConversationCall(...a),
+  answerFromGeneralKnowledge: (...a: unknown[]) => ungroundedCall(...a),
 }));
 
 /** The stream, played by hand: the test decides which frames arrive and how it ends. */
@@ -65,6 +67,8 @@ function ai(id: string, text: string, over: Partial<Message> = {}): Message {
     role: 'ai',
     segs: [{ text }],
     created_at: '2026-08-13T09:00:00Z',
+    ungrounded: false,
+    ungrounded_offerable: false,
     ...over,
   };
 }
@@ -105,6 +109,7 @@ beforeEach(() => {
   getConversation.mockReset().mockResolvedValue(detail());
   setFeedbackCall.mockReset();
   deleteConversationCall.mockReset();
+  ungroundedCall.mockReset();
   streamSend.mockClear();
   streamRegenerate.mockClear();
 });
@@ -492,5 +497,71 @@ describe('remove (FR-SBR-07)', () => {
     });
     const { result } = await activated();
     await expect(result.current.remove(CHAT)).resolves.toContain('try again shortly');
+  });
+});
+
+describe('FR-MSG-09 — answerUngrounded (R-98)', () => {
+  it('appends the answer and never claims the turn', async () => {
+    // Taking the turn would disable the composer and the KB modal for the length of the call
+    // (section 8.58's deadlock shape), and this is one non-streaming request with no stages.
+    const answer = ai('a2', 'From training.', { ungrounded: true });
+    ungroundedCall.mockResolvedValue({ kind: 'ok', data: answer });
+    const view = await activated();
+
+    await act(async () => {
+      view.result.current.answerUngrounded('a1');
+    });
+
+    expect(ungroundedCall).toHaveBeenCalledWith('a1');
+    const ids = view.result.current.entries.map((entry) => entry.message.id);
+    expect(ids).toContain('a2');
+    expect(view.result.current.turnInFlight).toBe(false);
+    expect(view.result.current.ungroundedBusy.has('a1')).toBe(false);
+  });
+
+  it('refuses a second press while the first is in flight', async () => {
+    // The guard is a ref, not state: two clicks in one frame both read the pre-setState value,
+    // so a state-only guard would let both through and the reducer would have to de-duplicate.
+    let settle: (value: unknown) => void = () => {};
+    ungroundedCall.mockReturnValue(new Promise((resolve) => { settle = resolve; }));
+    const view = await activated();
+
+    await act(async () => {
+      view.result.current.answerUngrounded('a1');
+      view.result.current.answerUngrounded('a1');
+    });
+    expect(ungroundedCall).toHaveBeenCalledTimes(1);
+    expect(view.result.current.ungroundedBusy.has('a1')).toBe(true);
+
+    await act(async () => {
+      settle({ kind: 'ok', data: ai('a2', 'From training.', { ungrounded: true }) });
+    });
+    expect(view.result.current.ungroundedBusy.has('a1')).toBe(false);
+  });
+
+  it("renders the server's copy beneath the abstention when it is refused", async () => {
+    // A failure must not replace the answer the user is reading - the same treatment a failed
+    // regenerate gets (R-56), because in both cases the row on screen is still the truth.
+    ungroundedCall.mockResolvedValue({
+      kind: 'refused',
+      detail: 'Answering from general knowledge is not enabled on this server.',
+      status: 409,
+    });
+    // The notice is anchored to the abstention's **id**, so that row has to exist for it
+    // to render at all - `entriesOf` drops a notice whose anchor is not in the transcript.
+    listMessages.mockResolvedValue({
+      kind: 'ok',
+      data: [ai('a1', 'I could not ground an answer to that.')],
+    });
+    const view = await activated();
+
+    await act(async () => {
+      view.result.current.answerUngrounded('a1');
+    });
+
+    const text = view.result.current.entries
+      .flatMap((entry) => entry.message.segs.map((seg) => ('text' in seg ? seg.text : '')))
+      .join(' ');
+    expect(text).toContain('not enabled on this server');
   });
 });

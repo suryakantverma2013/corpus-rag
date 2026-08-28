@@ -7,7 +7,7 @@
  * is testable without rendering. FR-CST-02 names exactly this set as "derived per active chat".
  */
 import type { Evaluation } from '../api';
-import { citationsOf, evalBand, isDegraded } from '../chat/messages';
+import { citationsOf, evalBand, isDegraded, isUngrounded } from '../chat/messages';
 import type { EvalBand, TranscriptEntry } from '../chat/messages';
 
 /** FR-ANL-04's "no evaluations" cell, and FR-EVL-04's permanent one. U+2014. */
@@ -175,6 +175,15 @@ function evaluationsOf(entries: readonly TranscriptEntry[]): Evaluation[] {
   const found: Evaluation[] = [];
   for (const { message } of entries) {
     if (isDegraded(message) || message.role !== 'ai') continue;
+    // FR-EVL-04 (R-98(4)) — an FR-MSG-09 answer is excluded from the session averages.
+    //
+    // **Explicit, although the backend never scores one.** R-50 skips a message that cites
+    // nothing, so an ungrounded row arrives with `evaluation: null` and the next line would drop
+    // it anyway — today. That makes this look redundant and it is not: the card's meaning is the
+    // requirement, and leaning on a *different* subsystem's skip rule to enforce it is how a
+    // later change to the judge silently redefines what the panel measures. R-98(3)'s discipline
+    // one layer up: make the invariant a property of this code, not a fact about another's.
+    if (isUngrounded(message)) continue;
     const { evaluation } = message;
     if (evaluation === null || evaluation === undefined) continue;
     found.push(evaluation);

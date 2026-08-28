@@ -58,11 +58,17 @@ async def _abstained_turn(
     conversation = Conversation(owner_id=owner, tenant_id=DEFAULT_TENANT_ID, title="A chat")
     session.add(conversation)
     await session.flush()
-    session.add(
-        Message(conversation_id=conversation.id, role=MessageRole.USER, content=_QUESTION)
-    )
+    session.add(Message(conversation_id=conversation.id, role=MessageRole.USER, content=_QUESTION))
     target = Message(
-        conversation_id=conversation.id, role=MessageRole.AI, content=_ABSTENTION, citations=None
+        conversation_id=conversation.id,
+        role=MessageRole.AI,
+        content=_ABSTENTION,
+        # **The shape the pipeline actually writes, not `None`.** The `abstain` node persists a
+        # complete envelope - the refusal text as segments, an empty `source_ids` - so the
+        # column is a non-empty dict on every real abstention. A fixture using `citations=None`
+        # passes against a predicate that tests the column instead of the citations, which is
+        # exactly the defect T-727's live pass found and this suite did not.
+        citations={SEGMENTS_KEY: [{"text": _ABSTENTION}], SOURCE_IDS_KEY: []},
     )
     session.add(target)
     await session.flush()
@@ -77,6 +83,23 @@ def _url(message_id: uuid.UUID) -> str:
 @pytest.fixture
 def enabled(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
     monkeypatch.setattr(get_settings().ungrounded, "fallback_enabled", True)
+
+
+@pytest.fixture
+def disabled(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
+    """Force the control OFF, rather than trusting the ambient default.
+
+    `tests/conftest.py` loads `backend/.env` into `os.environ`, and it pins only four
+    backends - so a developer who sets `UNGROUNDED_FALLBACK_ENABLED=true` locally to try
+    the feature would break every test that leaned on the default being off. Measured:
+    three of them did.
+
+    The *shipped default* keeps its own oracle and does not need this one:
+    `test_the_switch_is_off_by_default` reads `model_fields[...].default`, and
+    `tests/acceptance/` carries the same `Default` pointer. This fixture is about
+    behaviour when the switch is off, which is a different claim.
+    """
+    monkeypatch.setattr(get_settings().ungrounded, "fallback_enabled", False)
 
 
 # ---- the happy path ----
@@ -105,9 +128,7 @@ async def test_it_appends_an_uncited_answer_and_leaves_the_abstention(
 
     rows = (
         await session.scalars(
-            select(Message)
-            .where(Message.conversation_id == conversation.id)
-            .order_by(Message.seq)
+            select(Message).where(Message.conversation_id == conversation.id).order_by(Message.seq)
         )
     ).all()
     assert [r.content for r in rows][:2] == [_QUESTION, _ABSTENTION]
@@ -119,9 +140,12 @@ async def test_it_appends_an_uncited_answer_and_leaves_the_abstention(
 
 
 async def test_it_is_refused_when_the_deployment_has_not_enabled_it(
-    client: httpx.AsyncClient, session: AsyncSession, make_token: Callable[..., str]
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    make_token: Callable[..., str],
+    disabled,  # noqa: ANN001
 ) -> None:
-    """No `enabled` fixture: the default is off (R-98(2)), and the route must honour it.
+    """The switch is off, so the route must refuse (R-98(2)).
 
     If only the GUI hid the control, any client could still ask a deployment that never opted
     in to produce ungrounded text.
@@ -148,7 +172,19 @@ async def test_a_grounded_answer_cannot_be_fallen_back_from(
         conversation_id=conversation.id,
         role=MessageRole.AI,
         content="Grounded.",
-        citations={SEGMENTS_KEY: [{"text": "Grounded."}], SOURCE_IDS_KEY: ["c1"]},
+        # A GROUNDED answer carries a segment with a `chunkId` - that is what "cites
+        # something" means, and it is the same question `workers/evaluate.py` asks.
+        citations={
+            SEGMENTS_KEY: [
+                {
+                    "isCite": True,
+                    "doc": "brief.pdf",
+                    "quote": "the passage",
+                    "chunkId": "11111111-1111-1111-1111-111111111111",
+                }
+            ],
+            SOURCE_IDS_KEY: ["11111111-1111-1111-1111-111111111111"],
+        },
     )
     session.add(answered)
     await session.commit()
@@ -177,17 +213,15 @@ async def test_the_four_not_found_cases_are_one_indistinguishable_404(
     my_chat = Conversation(owner_id=owner, tenant_id=DEFAULT_TENANT_ID, title="Mine")
     session.add(my_chat)
     await session.flush()
-    question = Message(
-        conversation_id=my_chat.id, role=MessageRole.USER, content="not an answer"
-    )
+    question = Message(conversation_id=my_chat.id, role=MessageRole.USER, content="not an answer")
     session.add(question)
     await session.commit()
 
     responses = [
-        await client.post(_url(uuid.uuid4()), headers=mine),      # absent
-        await client.post(_url(target.id), headers=stranger),      # foreign
-        await client.post(_url(target.id), headers=admin),         # foreign, to an admin
-        await client.post(_url(question.id), headers=mine),        # mine, but not an AI answer
+        await client.post(_url(uuid.uuid4()), headers=mine),  # absent
+        await client.post(_url(target.id), headers=stranger),  # foreign
+        await client.post(_url(target.id), headers=admin),  # foreign, to an admin
+        await client.post(_url(question.id), headers=mine),  # mine, but not an AI answer
     ]
 
     assert [r.status_code for r in responses] == [404, 404, 404, 404]
@@ -201,3 +235,111 @@ async def test_it_requires_authentication(
 ) -> None:
     _headers, _conversation, target = await _abstained_turn(session, make_token)
     assert (await client.post(_url(target.id))).status_code == 401
+
+
+# ---- the two wire fields the GUI branches on (T-727) ----
+
+
+async def test_the_answer_is_marked_ungrounded_on_the_wire(
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    make_token: Callable[..., str],
+    enabled,  # noqa: ANN001
+) -> None:
+    """FR-MSG-09(1)/(4): the marker is a field on the message, not a moment in time.
+
+    After a reload the transcript is the only source the GUI has. A treatment derived
+    from the response of the call that *created* the answer would survive until the
+    next refresh and then silently vanish, leaving invented text rendered exactly like
+    a grounded answer - which is the one thing R-98(6) requires the reader can tell.
+    """
+    headers, conversation, target = await _abstained_turn(session, make_token)
+
+    created = (await client.post(_url(target.id), headers=headers)).json()
+
+    assert created["ungrounded"] is True
+    assert created["ungrounded_offerable"] is False, "it cannot fall back from itself"
+
+    transcript = (
+        await client.get(f"/api/v1/conversations/{conversation.id}/messages", headers=headers)
+    ).json()
+    assert [m["ungrounded"] for m in transcript] == [False, False, True], (
+        "the marker must survive the reload that is the GUI's only source"
+    )
+
+
+async def test_the_control_is_offered_on_an_abstention_and_not_on_a_grounded_answer(
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    make_token: Callable[..., str],
+    enabled,  # noqa: ANN001
+) -> None:
+    """`ungrounded_offerable` is `is_offerable`, published rather than re-derived.
+
+    One predicate with one home is what `is_offerable`'s own docstring asks for, and it
+    is what stops the GUI offering a control the route then refuses with a 409.
+    """
+    owner, headers = await _caller(session, make_token)
+    conversation = Conversation(owner_id=owner, tenant_id=DEFAULT_TENANT_ID, title="A chat")
+    session.add(conversation)
+    await session.flush()
+    session.add(Message(conversation_id=conversation.id, role=MessageRole.USER, content=_QUESTION))
+    session.add(
+        Message(
+            conversation_id=conversation.id,
+            role=MessageRole.AI,
+            content=_ABSTENTION,
+            citations=None,
+        )
+    )
+    session.add(
+        Message(
+            conversation_id=conversation.id,
+            role=MessageRole.AI,
+            content="Grounded.",
+            citations={
+                SEGMENTS_KEY: [
+                    {
+                        "isCite": True,
+                        "doc": "brief.pdf",
+                        "quote": "the passage",
+                        "chunkId": "11111111-1111-1111-1111-111111111111",
+                    }
+                ],
+                SOURCE_IDS_KEY: ["11111111-1111-1111-1111-111111111111"],
+            },
+        )
+    )
+    await session.commit()
+
+    transcript = (
+        await client.get(f"/api/v1/conversations/{conversation.id}/messages", headers=headers)
+    ).json()
+
+    assert [m["ungrounded_offerable"] for m in transcript] == [False, True, False], (
+        "the question is not an answer; the cited answer needs no fallback"
+    )
+
+
+async def test_the_control_is_not_offered_when_the_deployment_disables_it(
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    make_token: Callable[..., str],
+    disabled,  # noqa: ANN001
+) -> None:
+    """The deciding term of the predicate is the one **not otherwise on the wire**.
+
+    Three of `is_offerable`'s four terms - the AI role, the absent citations, and the
+    row not being ungrounded itself - a client could re-derive from the transcript. The
+    deployment switch it could not, at any price, which is the whole reason the
+    predicate is computed server-side. No `enabled` fixture here: the default is off.
+    """
+    headers, conversation, _target = await _abstained_turn(session, make_token)
+
+    transcript = (
+        await client.get(f"/api/v1/conversations/{conversation.id}/messages", headers=headers)
+    ).json()
+
+    assert [m["ungrounded_offerable"] for m in transcript] == [False, False], (
+        "an abstention on a deployment that never opted in offers nothing"
+    )

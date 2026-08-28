@@ -25,12 +25,29 @@ function cite(doc: string): CitationSegment {
 }
 
 function ai(segs: Segment[], extra: Partial<Message> = {}): TranscriptEntry {
-  return { message: { id: 'a', role: 'ai', segs, created_at: '2026-07-16T09:12:00Z', ...extra } };
+  return {
+    message: {
+      id: 'a',
+      role: 'ai',
+      segs,
+      created_at: '2026-07-16T09:12:00Z',
+      ungrounded: false,
+      ungrounded_offerable: false,
+      ...extra,
+    },
+  };
 }
 
 function user(text: string): TranscriptEntry {
   return {
-    message: { id: 'u', role: 'user', segs: [{ text }], created_at: '2026-07-16T09:00:00Z' },
+    message: {
+      id: 'u',
+      role: 'user',
+      segs: [{ text }],
+      created_at: '2026-07-16T09:00:00Z',
+      ungrounded: false,
+      ungrounded_offerable: false,
+    },
   };
 }
 

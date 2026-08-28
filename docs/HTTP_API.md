@@ -1637,6 +1637,8 @@ One message, in the FR-MSG-06 shape. `segs` is **derived, never stored as such**
 | `prompt_tokens` | integer \| null | no |  |
 | `role` | [`MessageRole`](#messagerole) | yes |  |
 | `segs` | [`Segment`](#segment)[] | yes |  |
+| `ungrounded` | boolean | no | FR-MSG-09 - this answer was generated from the model's own training with no retrieved passages. It never carries citations or evaluation scores, and it is excluded from FR-EVL-04's session averages. Render it in a visually distinct treatment so a reader can always tell it from a grounded answer. |
+| `ungrounded_offerable` | boolean | no | Whether to offer FR-MSG-09's “Answer from general knowledge” control on this message. True only for an AI answer that abstained - it cites nothing and is not itself ungrounded - on a deployment where the operator enabled the fallback. The last term is not otherwise on the wire, so do not re-derive this. |
 
 ### `MessageRole`
 

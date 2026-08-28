@@ -27,7 +27,15 @@ function cite(doc: string): CitationSegment {
 
 function ai(segs: Segment[], extra: Partial<Message> = {}): TranscriptEntry {
   return {
-    message: { id: 'a', role: 'ai', segs, created_at: '2026-07-16T09:12:00Z', ...extra },
+    message: {
+      id: 'a',
+      role: 'ai',
+      segs,
+      created_at: '2026-07-16T09:12:00Z',
+      ungrounded: false,
+      ungrounded_offerable: false,
+      ...extra,
+    },
   };
 }
 
@@ -37,7 +45,14 @@ function scored(evaluation: Evaluation): TranscriptEntry {
 
 function user(text: string): TranscriptEntry {
   return {
-    message: { id: 'u', role: 'user', segs: [{ text }], created_at: '2026-07-16T09:00:00Z' },
+    message: {
+      id: 'u',
+      role: 'user',
+      segs: [{ text }],
+      created_at: '2026-07-16T09:00:00Z',
+      ungrounded: false,
+      ungrounded_offerable: false,
+    },
   };
 }
 
@@ -282,5 +297,39 @@ describe('FR-ANL-05 — sources referenced', () => {
     expect(documentTypeBadge('REPORT.PDF')).toBe('PDF');
     expect(documentTypeBadge('README')).toBe('DOC');
     expect(documentTypeBadge('archive.zip')).toBe('DOC');
+  });
+});
+
+describe('FR-EVL-04 — FR-MSG-09 answers are excluded (R-98(4))', () => {
+  it('ignores an ungrounded answer even when it carries scores', () => {
+    // The fixture is deliberately IMPOSSIBLE today: R-50 skips a message that cites nothing,
+    // so the backend never writes an evaluation onto an ungrounded row and a realistic fixture
+    // would be excluded by the `evaluation === null` line whether the FR-MSG-09 guard existed
+    // or not - a test that passes for the wrong reason. Scoring it forces the guard to be the
+    // only thing that can exclude it, so deleting the guard fails this and nothing else.
+    const grounded = ai([{ text: 'grounded' }], {
+      evaluation: { relevancy: 1, faithfulness: 1 },
+    });
+    const invented = ai([{ text: 'invented' }], {
+      ungrounded: true,
+      evaluation: { relevancy: 0, faithfulness: 0 },
+    });
+
+    const { rows, overall } = evalAverages([grounded, invented]);
+
+    expect(rows[0].score).toBe('1.00');
+    expect(rows[1].score).toBe('1.00');
+    expect(overall).toBe(1);
+  });
+
+  it('shows the empty state when the only answer is ungrounded', () => {
+    // A chat whose one answer came from training has nothing evaluated in it, so FR-ANL-04
+    // reads its em dash rather than averaging a single invented row.
+    const { rows, overall } = evalAverages([
+      ai([{ text: 'invented' }], { ungrounded: true, evaluation: { relevancy: 0.9 } }),
+    ]);
+
+    expect(overall).toBeNull();
+    expect(rows.every((row) => row.score === null)).toBe(true);
   });
 });

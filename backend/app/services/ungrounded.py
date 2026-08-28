@@ -36,6 +36,7 @@ from app.db.enums import MessageRole
 from app.db.models.conversation import Conversation
 from app.db.models.message import Message
 from app.db.repositories.messages import MessageRepository
+from app.rag.citations import envelope_cites_nothing
 from app.rag.history import load_history, to_messages
 from app.services.llm import build_chat_client
 from app.services.model_selection import resolve_models
@@ -87,7 +88,13 @@ async def answer_from_general_knowledge(
         raise UngroundedDisabledError("UNGROUNDED_FALLBACK_ENABLED is false")
     # An abstention cites nothing. Checked on the stored row rather than on a flag the client
     # sends, because "this turn abstained" is a fact about the transcript, not a claim.
-    if target.citations:
+    #
+    # **Asked of the segments, never of the column.** The `abstain` node persists a complete
+    # envelope - refusal text as segments, an empty `source_ids` - so `messages.citations` is a
+    # non-empty dict on every real abstention and `if target.citations:` refused all of them.
+    # T-727's live pass found it; the unit tests could not, because their fixtures wrote
+    # `citations=None`, a shape the pipeline never produces.
+    if not envelope_cites_nothing(target.citations):
         raise NotAnAbstentionError("the target answer carries citations")
     if target.ungrounded:
         raise NotAnAbstentionError("the target is itself an ungrounded answer")
@@ -157,7 +164,7 @@ def is_offerable(target: Message, settings: Settings | None = None) -> bool:
     return (
         settings.ungrounded.fallback_enabled
         and target.role is MessageRole.AI
-        and not target.citations
+        and envelope_cites_nothing(target.citations)
         and not target.ungrounded
     )
 

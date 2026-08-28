@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { ContextWindow, Message } from '../api';
 import {
+  EMPTY_CHAT,
   EMPTY_CHAT_STATE,
   LOCAL_ID_PREFIX,
   chatOf,
@@ -30,12 +31,21 @@ function ai(id: string, text: string, over: Partial<Message> = {}): Message {
     segs: [{ text }],
     created_at: '2026-08-13T09:00:00Z',
     model_name: 'gpt-4o',
+    ungrounded: false,
+    ungrounded_offerable: false,
     ...over,
   };
 }
 
 function user(id: string, text: string): Message {
-  return { id, role: 'user', segs: [{ text }], created_at: '2026-08-13T08:59:00Z' };
+  return {
+    id,
+    role: 'user',
+    segs: [{ text }],
+    created_at: '2026-08-13T08:59:00Z',
+    ungrounded: false,
+    ungrounded_offerable: false,
+  };
 }
 
 const USAGE: ContextWindow = {
@@ -374,5 +384,47 @@ describe('local ids', () => {
     expect(pendingEntry('hi', '3').message.id).toBe(`${LOCAL_ID_PREFIX}3`);
     expect(isLocalId('c8f1e2a0-0000-4000-8000-000000000000')).toBe(false);
     expect(isLocalId(null)).toBe(false);
+  });
+});
+
+describe("the 'ungrounded' action (FR-MSG-09, R-98)", () => {
+  it('appends the answer and leaves the abstention in place', () => {
+    // R-98(1) leans on the abstention as the record that the corpus could not answer, so this
+    // is the deliberate opposite of a regenerate: both rows survive, in order.
+    const abstention = ai('a1', 'I could not ground an answer to that.');
+    const state = chatReducer(
+      { byConversation: { [CHAT]: { ...EMPTY_CHAT, messages: [abstention] } }, turn: null },
+      { type: 'ungrounded', conversationId: CHAT, message: ai('a2', 'From training.', {
+        ungrounded: true,
+      }) },
+    );
+
+    const messages = state.byConversation[CHAT].messages;
+    expect(messages.map((m) => m.id)).toEqual(['a1', 'a2']);
+    expect(messages[1].ungrounded).toBe(true);
+  });
+
+  it('is idempotent on the same id', () => {
+    // StrictMode double-invokes, and a duplicated id renders the answer twice under one key.
+    const message = ai('a2', 'From training.', { ungrounded: true });
+    const once = chatReducer(
+      { byConversation: { [CHAT]: { ...EMPTY_CHAT, messages: [ai('a1', 'no')] } }, turn: null },
+      { type: 'ungrounded', conversationId: CHAT, message },
+    );
+    const twice = chatReducer(once, { type: 'ungrounded', conversationId: CHAT, message });
+
+    expect(twice.byConversation[CHAT].messages.map((m) => m.id)).toEqual(['a1', 'a2']);
+  });
+
+  it('does not claim the turn', () => {
+    // `turn` drives the FR-MSG-05 dots, the composer and the KB modal's disabled state. This is
+    // one non-streaming call with no stages to report; taking the turn would disable half the
+    // product for its duration - the deadlock shape of section 8.58.
+    const state = chatReducer(
+      { byConversation: { [CHAT]: { ...EMPTY_CHAT, messages: [] } }, turn: null },
+      { type: 'ungrounded', conversationId: CHAT, message: ai('a2', 'x', { ungrounded: true }) },
+    );
+
+    expect(state.turn).toBeNull();
   });
 });

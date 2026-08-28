@@ -639,6 +639,23 @@ SPEC_9_ROWS: dict[str, tuple[Evidence, ...]] = {
         Source("frontend/src/chat/MessageActions.tsx", "Regenerate"),
         Fidelity("§9 message action bar"),
     ),
+    "Ungrounded answer (Rev 0.65, FR-MSG-09, R-98)": (
+        Default(
+            "app.config:UngroundedSettings", "fallback_enabled", False
+        ),
+        Source("frontend/src/chat/messages.ts", "From the model’s general knowledge — not from your documents"),
+        Source("frontend/src/chat/messages.ts", "Answer from general knowledge"),
+        PyTest(
+            "tests/test_ungrounded_api.py::test_it_appends_an_uncited_answer_and_leaves_the_abstention"
+        ),
+        PyTest(
+            "tests/test_ungrounded_api.py::test_it_is_refused_when_the_deployment_has_not_enabled_it"
+        ),
+        PyTest(
+            "tests/test_ungrounded_api.py::test_the_answer_is_marked_ungrounded_on_the_wire"
+        ),
+        Fidelity("§9 ungrounded answer"),
+    ),
     "Login copy (Rev 0.6)": (
         Source("frontend/src/auth/copy.ts", "Sign in to your knowledge base"),
         Source("frontend/src/auth/copy.ts", "Invalid email or password."),

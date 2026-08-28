@@ -48,7 +48,17 @@ let seq = 0;
 function user(text: string): TranscriptEntry {
   seq += 1;
   return {
-    message: { id: `u${seq}`, role: 'user', segs: [{ text }], created_at: '2026-07-16T09:12:00Z' },
+    message: {
+      id: `u${seq}`,
+      role: 'user',
+      segs: [{ text }],
+      // FR-MSG-09 — false on both counts for a question, and stated rather than defaulted: the
+      // server always sends them, so `MessageResponse` is non-optional here and a fixture that
+      // omitted them would be describing a message the API cannot produce.
+      ungrounded: false,
+      ungrounded_offerable: false,
+      created_at: '2026-07-16T09:12:00Z',
+    },
   };
 }
 
@@ -61,6 +71,10 @@ function ai(segs: Segment[], extra: Partial<Message> = {}, outcome?: TranscriptE
       segs,
       created_at: '2026-07-16T09:12:20Z',
       model_name: 'gpt-4o',
+      // FR-MSG-09's defaults, **before** the spread so a fixture can override either — an
+      // ungrounded answer and an abstention that offers the control are both built this way.
+      ungrounded: false,
+      ungrounded_offerable: false,
       ...extra,
     },
     outcome,

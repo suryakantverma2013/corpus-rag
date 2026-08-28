@@ -197,5 +197,29 @@ export function setFeedback(
   });
 }
 
+/**
+ * FR-MSG-09 — a second answer for an abstention, from the model's own training (R-98).
+ *
+ * The `201` carries the whole new message, which **appends** beneath the abstention rather than
+ * replacing it: R-98(1) leans on the abstention as the record that the corpus could not answer,
+ * so this is the deliberate opposite of `streamRegenerate`. It is not an SSE call for the same
+ * reason the route is not one — there are no stages to report, only a result.
+ *
+ * Both of its `409`s carry **no `error_code`**, so `classifyChat` lands them on `refused` and the
+ * caller renders `detail` verbatim. That is correct rather than a gap: each describes a state a
+ * correct client cannot reach — the deployment never enabled the control, or the target is not an
+ * abstention — so they are reconciliation copy (R-71(1)), and there is nothing for the client to
+ * branch on because there is nothing different for it to do.
+ */
+export function answerFromGeneralKnowledge(messageId: string): Promise<ChatOutcome<Message>> {
+  return attempt(async () => {
+    const { data, error, response } = await api.POST(
+      '/api/v1/messages/{message_id}/general-knowledge',
+      { params: { path: { message_id: messageId } } },
+    );
+    return { status: response.status, error, data };
+  });
+}
+
 /** Copy this surface owns rather than the server — states the server has no answer for. */
 export const NETWORK = 'Could not reach the server. Check your connection and try again.'; // TBD(§8.4)
