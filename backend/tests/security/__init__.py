@@ -223,15 +223,9 @@ ROUTE_DECISIONS: Final[tuple[RouteDecision, ...]] = (
         Gate.PUBLIC,
         "R-63(3)/§8.53(1) — Keycloak returns the browser here on a full page load, so there "
         "is no bearer token to present; trust rides on the signed `state`, and the callback "
-        "refuses a `sub` that does not match the initiator.",
-    ),
-    _r(
-        "GET",
-        f"{API}/cloud/links/{{provider}}/complete",
-        "link_complete",
-        Gate.PUBLIC,
-        "R-63(3) — the second leg of the same browser redirect; identity comes from the "
-        "signed `state`, not from a header.",
+        "refuses a `sub` that does not match the initiator. **(Rev 0.66, R-99)** under the "
+        "AIA `idp_link` action this is the only return — there is no second leg to bridge, "
+        "so the `sub` checked here is the one that just authenticated.",
     ),
     # --- authenticated, no owned resource ---------------------------------------------
     _r(

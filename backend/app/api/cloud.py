@@ -182,7 +182,7 @@ async def start_link(
     response_class=RedirectResponse,
     status_code=status.HTTP_303_SEE_OTHER,
     include_in_schema=False,
-    summary="Keycloak's return from leg 1 (browser navigation, not an API call)",
+    summary="Keycloak's return from the linking request (browser navigation, not an API call)",
 )
 async def link_callback(
     provider: CloudProvider,
@@ -191,85 +191,60 @@ async def link_callback(
     code: Annotated[str | None, Query()] = None,
     state: Annotated[str | None, Query()] = None,
     error: Annotated[str | None, Query()] = None,
+    kc_action_status: Annotated[str | None, Query()] = None,
 ) -> RedirectResponse:
-    """Finish authentication, then redirect the browser onward to the provider's consent.
+    """The whole of the return path (R-99). One request linked; this finishes it.
 
-    `include_in_schema=False`: this is a browser redirect target, not something a client
-    calls. Publishing it would put a route in the generated TypeScript client that no
-    TypeScript can usefully invoke.
+    `include_in_schema=False`: a browser redirect target, not something a client calls.
+    Publishing it would put a route in the generated TypeScript client that no TypeScript
+    can usefully invoke.
 
-    Every failure lands the user back in the GUI with a stable outcome code rather than on a
-    JSON error page — they are in a browser, mid-flow, and an `{"detail": ...}` body is a dead
-    end. The reason is logged; only the outcome crosses the redirect.
+    **The grant is why this endpoint exists** rather than the flow simply ending at
+    Keycloak: `addReadTokenRoleOnCreate` cannot fire under `linkOnly: true`, so without it
+    every link would be complete, correct and unusable - the defect T-214 measured live.
+
+    **The link is read back rather than assumed.** A callback can arrive with a valid code
+    and no federated identity, and reporting success for that sends the user to a file
+    list that answers 403.
+
+    **`kc_action_status` is advisory and deliberately not load-bearing.** Measured on a real
+    consent (Rev 0.66.1, closing R-99(7)): Keycloak does send `kc_action_status=success`, and
+    the redirect carries `state`, `session_state`, `iss`, `kc_action` and `code` beside it.
+    It is still read only to tell a *cancellation* apart from a failure, and success keys on
+    what it always keyed on: the code exchange and the `sub` check. That is a decision rather
+    than ignorance - if Keycloak stops sending the status, nothing here changes.
+
+    **The returned `kc_action` is bare - `idp_link`, without the `:google` alias we sent.**
+    Do not derive the provider from it. `provider` is a path parameter and must stay one.
+
+    Every failure lands the user back in the GUI with a stable outcome code rather than on
+    a JSON error page - they are in a browser, mid-flow, and a `{"detail": ...}` body is a
+    dead end. The reason is logged; only the outcome crosses the redirect.
     """
-    if error or not code or not state:
-        # `error` is Keycloak's — the user cancelled at the login page, most often.
+    if kc_action_status == "cancelled" or error or not code or not state:
+        # `error` is Keycloak's - most often the user cancelled at the login page - and
+        # `cancelled` is the AIA action's own way of saying they declined the link.
+        log.info(
+            "cloud.link_declined",
+            provider=provider.value,
+            action_status=kc_action_status,
+            error=error,
+        )
         return RedirectResponse(
             cloud_links.return_to(settings, link=_LINK_DENIED, provider=provider.value),
             status_code=status.HTTP_303_SEE_OTHER,
         )
     try:
-        onward = await cloud_links.complete_authentication(
-            code=code, raw_state=state, kc=kc, settings=settings
-        )
-    except cloud_links.LinkError, KeycloakUnavailableError:
-        log.warning("cloud.link_callback_failed", provider=provider.value, exc_info=True)
-        return RedirectResponse(
-            cloud_links.return_to(settings, link=_LINK_FAILED, provider=provider.value),
-            status_code=status.HTTP_303_SEE_OTHER,
-        )
-    return RedirectResponse(onward, status_code=status.HTTP_303_SEE_OTHER)
-
-
-@router.get(
-    "/links/{provider}/complete",
-    response_class=RedirectResponse,
-    status_code=status.HTTP_303_SEE_OTHER,
-    include_in_schema=False,
-    summary="Keycloak's return from leg 2 (browser navigation, not an API call)",
-)
-async def link_complete(
-    provider: CloudProvider,
-    kc: Keycloak,
-    settings: SettingsDep,
-    link_state: Annotated[str | None, Query()] = None,
-    link_error: Annotated[str | None, Query()] = None,
-) -> RedirectResponse:
-    """Grant `read-token`, verify the link is real, and return the browser to the GUI.
-
-    **The grant is why this endpoint exists at all** rather than the flow ending at Keycloak:
-    `addReadTokenRoleOnCreate` cannot fire under `linkOnly: true`, so without this step every
-    link would be complete, correct, and unusable — which is precisely the defect T-214
-    measured live (see `cloud_links.grant_read_token`).
-
-    The link is then read back rather than assumed. Keycloak signals leg 2's failures by
-    appending `link_error` to this redirect, but a `link_state` that survives with no error and
-    no federated identity is possible too, and reporting success for it would send the user to a
-    file list that answers 403.
-
-    **The parameter is `link_state` and must never be renamed back to `state`.** Keycloak
-    rejects a `redirect_uri` carrying a reserved OIDC parameter in its query, so `?state=` makes
-    leg 2 fail with a bare "Invalid Request" — see the writer in `cloud_links`.
-    """
-    if link_error or not link_state:
-        log.warning("cloud.link_rejected", provider=provider.value, link_error=link_error)
-        return RedirectResponse(
-            cloud_links.return_to(settings, link=_LINK_FAILED, provider=provider.value),
-            status_code=status.HTTP_303_SEE_OTHER,
-        )
-    try:
-        decoded = cloud_links.decode_state(link_state, settings)
-        await cloud_links.grant_read_token(sub=decoded.sub, kc=kc, settings=settings)
-        result = await cloud_links.link_status(
-            sub=decoded.sub, provider=provider, kc=kc, settings=settings
-        )
+        sub = await cloud_links.complete_link(code=code, raw_state=state, kc=kc, settings=settings)
+        await cloud_links.grant_read_token(sub=sub, kc=kc, settings=settings)
+        result = await cloud_links.link_status(sub=sub, provider=provider, kc=kc, settings=settings)
     except (
         cloud_links.LinkError,
         KeycloakUnavailableError,
         KeycloakForbiddenError,
         KeycloakRejectedError,
     ):
-        log.error("cloud.link_complete_failed", provider=provider.value, exc_info=True)
+        log.warning("cloud.link_callback_failed", provider=provider.value, exc_info=True)
         return RedirectResponse(
             cloud_links.return_to(settings, link=_LINK_FAILED, provider=provider.value),
             status_code=status.HTTP_303_SEE_OTHER,

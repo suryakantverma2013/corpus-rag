@@ -5,20 +5,28 @@ exchange, keeps the tokens (`storeToken`) and refreshes them, and the backend re
 access token from the broker endpoint. So this module holds no token, no table and no
 provider secret — it builds two URLs, verifies what comes back, and grants one role.
 
-**Why linking is two legs, measured rather than assumed.** Keycloak's client-initiated
-account-linking endpoint requires a browser SSO session; with none it redirects straight back
-carrying ``link_error=not_logged_in`` (probed live, T-214). ROPC issues tokens and creates no
-browser session (R-28), so there is never one when the user clicks "Add from cloud drive".
-Hence:
+**One request, not two (R-99).** Linking runs as Keycloak's *application-initiated action*:
+an ordinary authorization request carrying ``kc_action=idp_link:<alias>``, which both
+authenticates the browser and starts the link. It replaced the client-initiated
+account-linking endpoint, which Keycloak deprecated and announced for removal — that endpoint
+logged its own deprecation on every call, and T-725 had already had to rename a parameter to
+survive one Keycloak bump.
 
-    leg 1  authorization code flow on `corpus-linking`  → the browser is now authenticated
-    leg 2  /broker/google/link with a session-bound hash → Google consent → back
+    one  authorization code flow on `corpus-linking` with `kc_action` → login → Keycloak's
+         "do you want to link?" confirmation → provider consent → back here
 
-Leg 1 is also what makes the flow *safe*, not merely possible. Whoever types credentials into
-Keycloak's page is the account Google gets linked to — so the callback exchanges the code and
-checks the authenticated ``sub`` against the Corpus user who started the flow. Without that
-check a user could start linking and an entirely different account could receive the link,
-while Corpus reported success to the initiator.
+**What makes it safe is unchanged, and is now structurally tighter.** Whoever types
+credentials into Keycloak's page is the account the provider gets linked to — so the callback
+exchanges the code and checks the authenticated ``sub`` against the Corpus user who started
+the flow. Without that check a user could start linking and an entirely different account
+could receive the link, while Corpus reported success to the initiator. Under the old two-leg
+flow that check had to *bridge* two separate requests; here authentication and linking are one
+request, so there is no interval between the identity verified and the identity linked.
+
+Two things this depends on, both measured on Keycloak 26.4 before the migration (R-99(2)):
+``prompt=login`` composes with ``kc_action`` (without it an existing SSO session would decide
+silently who gets linked), and Keycloak relays our ``state`` verbatim through the provider and
+back, which is what keeps the flow stateless.
 
 **There is no pending-link table and no in-process store**, which is a deliberate constraint
 rather than a shortcut. R-63 promised no schema change; and in-process state is the failure
@@ -187,19 +195,18 @@ def callback_url(provider: CloudProvider, settings: Settings) -> str:
     return f"{base}/api/v1/cloud/links/{provider.value}/callback"
 
 
-def complete_url(provider: CloudProvider, settings: Settings) -> str:
-    """Where Keycloak returns after leg 2 (the link itself)."""
-    base = settings.cloud.callback_base_url.rstrip("/")
-    return f"{base}/api/v1/cloud/links/{provider.value}/complete"
-
-
 def start_link(*, sub: uuid.UUID, provider: CloudProvider, settings: Settings) -> str:
-    """Leg 1's URL: authenticate this browser against Keycloak (FR-AUT-11).
+    """The linking URL: one request that authenticates *and* links (FR-AUT-11, R-99).
 
     `prompt=login` is deliberate. Without it a browser that happens to hold a Keycloak SSO
     session would sail through, and the flow would link Google to *that* session's user —
     which is correct only by coincidence. Forcing the prompt makes the identity check below
     a check rather than a formality, and FR-AUT-11 already accepts one password prompt here.
+    Measured: it composes with `kc_action` rather than being ignored beside it.
+
+    `kc_action` is what replaced the deprecated client-initiated endpoint. The value is
+    `idp_link:<alias>`, and the alias is the provider's Keycloak alias — the same string the
+    broker token endpoint uses, so there is one name for one provider and no mapping table.
     """
     state = _LinkState(
         sub=sub,
@@ -217,6 +224,7 @@ def start_link(*, sub: uuid.UUID, provider: CloudProvider, settings: Settings) -
             "redirect_uri": callback_url(provider, settings),
             "state": encoded,
             "prompt": "login",
+            "kc_action": f"idp_link:{provider.value}",
             "code_challenge": _challenge(_verifier(payload, settings)),
             "code_challenge_method": "S256",
         }
@@ -224,31 +232,32 @@ def start_link(*, sub: uuid.UUID, provider: CloudProvider, settings: Settings) -
     return f"{settings.keycloak.authorization_endpoint()}?{query}"
 
 
-def _link_hash(*, nonce: str, session_state: str, client_id: str, provider: str) -> str:
-    """Keycloak's account-link hash.
-
-    ``base64url(sha256(nonce + session_state + client_id + provider))``.
-
-    Unpadded, and the concatenation order is Keycloak's, not ours — it is verified server-side,
-    so a wrong order shows up as ``link_error=invalid_hash`` rather than as anything subtler.
-    """
-    raw = f"{nonce}{session_state}{client_id}{provider}".encode()
-    return _b64(hashlib.sha256(raw).digest())
-
-
-async def complete_authentication(
+async def complete_link(
     *,
     code: str,
     raw_state: str,
     kc: KeycloakClient,
     settings: Settings,
-) -> str:
-    """Finish leg 1 and return leg 2's URL (the provider consent redirect).
+) -> uuid.UUID:
+    """Finish the linking request and return the user it belongs to (R-99).
 
-    Three things happen here and each one is load-bearing: the state is verified (this is our
-    flow, not a forged callback), the code is exchanged (which authenticates the browser and
-    yields the `session_state` leg 2 is bound to), and the authenticated `sub` is checked
-    against the initiator.
+    Under the AIA action the link has **already happened** by the time Keycloak sends the
+    browser back here: one authorization request authenticated the user, ran the
+    `idp_link` action, took them to the provider and returned. So this is no longer a
+    hand-off to a second leg - it is the end of the flow, and all that remains is to prove
+    whose link it is.
+
+    Two things are load-bearing and neither is new:
+
+    * **The state is verified before anything else.** It is ours, signed, and carries the
+      `sub` of whoever started the flow. A forged callback fails here.
+    * **The authenticated `sub` is checked against that initiator.** This is R-63's
+      guarantee: whoever typed credentials into Keycloak's page is the account the
+      provider was linked to. Without the check, one user could start linking and a
+      different account could receive the link while Corpus reported success to the first.
+
+    The caller grants `read-token` and reads the link back; that is deliberately not done
+    here, so this function has one job and the route keeps the ordering visible.
     """
     state = decode_state(raw_state, settings)
     payload = raw_state.partition(".")[0]
@@ -258,17 +267,12 @@ async def complete_authentication(
         redirect_uri=callback_url(state.provider, settings),
         verifier=_verifier(payload, settings),
     )
-    session_state = tokens.get("session_state")
-    if not session_state:
-        # Without it the link hash cannot be computed, and Keycloak would answer
-        # `invalid_hash` — a message that describes our arithmetic rather than the cause.
-        raise LinkError("the linking token response carried no session_state")
 
     authenticated = _sub_of(tokens)
     if authenticated != state.sub:
-        # Not merely unequal — this is the case where a different person authenticated in the
-        # browser, and completing would link *their* Google account while telling the
-        # initiator it worked.
+        # Not merely unequal - this is the case where a different person authenticated in
+        # the browser, and reporting success would tell the initiator that *their* account
+        # was linked when somebody else's was.
         log.warning(
             "cloud.link_identity_mismatch",
             expected=str(state.sub),
@@ -276,41 +280,7 @@ async def complete_authentication(
         )
         raise LinkIdentityMismatchError("the browser authenticated as a different user")
 
-    link_nonce = secrets.token_urlsafe(16)
-    # A fresh state for leg 2 — same signature, new nonce — so the completion endpoint knows
-    # whose link it is without trusting anything Keycloak echoes back.
-    onward = encode_state(
-        _LinkState(
-            sub=state.sub,
-            provider=state.provider,
-            nonce=link_nonce,
-            expires_at=int(time.time()) + settings.cloud.link_state_ttl_seconds,
-        ),
-        settings,
-    )
-    query = urlencode(
-        {
-            "client_id": settings.keycloak.linking_client_id,
-            # `link_state`, NOT `state` — and the name is load-bearing, not cosmetic.
-            # Keycloak refuses a `redirect_uri` whose query carries a reserved OIDC parameter
-            # (`state`, `code`, `session_state`, ...): `RedirectUtils` answers
-            # `invalid_redirect_uri` and the user sees a bare "Invalid Request" page naming
-            # nothing. Measured on 26.7.1, where `?state=` is rejected and `?link_state=` is
-            # accepted; 26.4 accepts both, which is why this shipped working in T-214 and broke
-            # only when the dev container's `:latest` moved. Anything outside OIDC's reserved
-            # set works — the constraint is the *name*, not the practice of carrying state here,
-            # which is still what keeps the flow stateless (no pending-link table, R-63).
-            "redirect_uri": f"{complete_url(state.provider, settings)}?link_state={onward}",
-            "nonce": link_nonce,
-            "hash": _link_hash(
-                nonce=link_nonce,
-                session_state=session_state,
-                client_id=settings.keycloak.linking_client_id,
-                provider=state.provider.value,
-            ),
-        }
-    )
-    return f"{settings.keycloak.account_link_endpoint(state.provider.value)}?{query}"
+    return state.sub
 
 
 def _sub_of(tokens: dict) -> uuid.UUID | None:
@@ -418,7 +388,7 @@ __all__ = [
     "LinkIdentityMismatchError",
     "LinkStateError",
     "LinkStatus",
-    "complete_authentication",
+    "complete_link",
     "decode_state",
     "grant_read_token",
     "link_status",

@@ -236,27 +236,6 @@ def test_the_pkce_verifier_never_appears_in_the_url(settings) -> None:  # noqa: 
     assert query["code_challenge_method"] == ["S256"]
 
 
-def test_the_link_hash_is_keycloaks_formula() -> None:
-    """base64url(sha256(nonce + session_state + client_id + provider)), unpadded.
-
-    Pinned as arithmetic because the failure mode is remote and mute: a wrong order or a
-    padded encoding comes back as `link_error=invalid_hash` on a redirect, with nothing in our
-    logs saying which of the four inputs was wrong.
-    """
-    import base64
-    import hashlib
-
-    expected = (
-        base64.urlsafe_b64encode(hashlib.sha256(b"nsessclientgoogle").digest()).decode().rstrip("=")
-    )
-    assert (
-        cloud_links._link_hash(
-            nonce="n", session_state="sess", client_id="client", provider="google"
-        )
-        == expected
-    )
-
-
 def test_the_return_url_comes_from_settings_not_the_request(settings) -> None:  # noqa: ANN001
     """`/callback` and `/complete` are unauthenticated, so a caller-chosen redirect target
     here would be an open redirect reachable without a token."""
@@ -314,11 +293,13 @@ class _FakeKeycloak:
 
 
 async def test_a_different_user_authenticating_is_refused(settings) -> None:  # noqa: ANN001
-    """The defect this check exists for: leg 1 authenticates *whoever* types credentials.
+    """The defect this check exists for: the request authenticates *whoever* types credentials.
 
     Without it, a user could start linking, someone else could complete the Keycloak login in
     that browser, and Google would be linked to the second account while Corpus reported
-    success to the first.
+    success to the first. Under AIA (R-99) the link has already happened by the time we get
+    here, which makes the check more important rather than less: there is no second leg to
+    withhold, only a success to refuse to report.
     """
     starter, other = uuid.uuid4(), uuid.uuid4()
     raw = cloud_links.encode_state(
@@ -331,12 +312,12 @@ async def test_a_different_user_authenticating_is_refused(settings) -> None:  # 
         settings,
     )
     with pytest.raises(cloud_links.LinkIdentityMismatchError):
-        await cloud_links.complete_authentication(
+        await cloud_links.complete_link(
             code="c", raw_state=raw, kc=_FakeKeycloak(id_token_sub=other), settings=settings
         )
 
 
-async def test_the_matching_user_is_sent_on_to_the_provider(settings) -> None:  # noqa: ANN001
+async def test_the_matching_user_completes_the_link(settings) -> None:  # noqa: ANN001
     sub = uuid.uuid4()
     raw = cloud_links.encode_state(
         cloud_links._LinkState(
@@ -344,58 +325,10 @@ async def test_the_matching_user_is_sent_on_to_the_provider(settings) -> None:  
         ),
         settings,
     )
-    onward = await cloud_links.complete_authentication(
+    linked_sub = await cloud_links.complete_link(
         code="c", raw_state=raw, kc=_FakeKeycloak(id_token_sub=sub), settings=settings
     )
-    assert onward.startswith(settings.keycloak.account_link_endpoint("google"))
-    assert "hash=" in onward
-
-
-async def test_leg_two_redirect_uri_carries_no_reserved_oidc_parameter(settings) -> None:  # noqa: ANN001
-    """Keycloak refuses a `redirect_uri` whose query holds a reserved OIDC parameter.
-
-    **This is a regression guard for a defect that shipped and then broke without a code
-    change.** T-214 carried the signed state onward as `?state=`, which Keycloak accepted
-    through 26.4 and **rejects from 26.7.1** — `RedirectUtils` logs
-    `contains forbidden OIDC parameter 'state' in query string`, the event is
-    `CLIENT_INITIATED_ACCOUNT_LINKING_ERROR`/`invalid_redirect_uri`, and the user is shown a
-    bare "Invalid Request" page that names neither the parameter nor the cause. The dev
-    container tracks `:latest` while production pins a version, so it failed in one environment
-    and not the other.
-
-    The whole set is asserted rather than just `state`: `code` would fail identically, and the
-    next reader reaching for a name to carry something else deserves the rule, not the instance.
-    """
-    sub = uuid.uuid4()
-    raw = cloud_links.encode_state(
-        cloud_links._LinkState(
-            sub=sub, provider=CloudProvider.GOOGLE, nonce="n", expires_at=int(time.time()) + 60
-        ),
-        settings,
-    )
-    onward = await cloud_links.complete_authentication(
-        code="c", raw_state=raw, kc=_FakeKeycloak(id_token_sub=sub), settings=settings
-    )
-
-    redirect_uri = parse_qs(urlparse(onward).query)["redirect_uri"][0]
-    carried = set(parse_qs(urlparse(redirect_uri).query))
-    reserved = {
-        "state",
-        "code",
-        "session_state",
-        "iss",
-        "error",
-        "error_description",
-        "error_uri",
-        "id_token",
-        "access_token",
-        "token_type",
-        "expires_in",
-    }
-    assert carried & reserved == set(), f"reserved OIDC parameter in redirect_uri: {carried}"
-    # And it still carries the state, under a name Keycloak permits — without this the guard
-    # passes for a flow that forgot to carry it at all, which fails at the completion endpoint.
-    assert "link_state" in carried
+    assert linked_sub == sub
 
 
 async def test_grant_read_token_targets_the_broker_client(settings) -> None:  # noqa: ANN001
@@ -645,7 +578,10 @@ async def test_completion_grants_read_token_before_reporting_success(
     from app.auth.dependencies import get_keycloak_client
 
     sub = uuid.uuid4()
-    kc = _FakeKeycloak(linked=True)
+    # The fake must authenticate AS the initiator: under AIA the callback runs the identity
+    # check itself, so a fake returning any other `sub` is correctly refused - which would make
+    # this test pass for a reason that has nothing to do with the grant it is named for.
+    kc = _FakeKeycloak(linked=True, id_token_sub=sub)
     app.dependency_overrides[get_keycloak_client] = lambda: kc
     state = cloud_links.encode_state(
         cloud_links._LinkState(
@@ -655,7 +591,9 @@ async def test_completion_grants_read_token_before_reporting_success(
     )
 
     resp = await client.get(
-        "/api/v1/cloud/links/google/complete", params={"link_state": state}, follow_redirects=False
+        "/api/v1/cloud/links/google/callback",
+        params={"code": "c", "state": state},
+        follow_redirects=False,
     )
 
     assert resp.status_code == 303
@@ -663,7 +601,7 @@ async def test_completion_grants_read_token_before_reporting_success(
     assert kc.granted == [f"{sub}:read-token"]
 
 
-async def test_a_link_keycloak_rejected_is_not_reported_as_success(
+async def test_a_rejected_link_is_reported_as_declined_not_failed(
     client: httpx.AsyncClient,
     app,  # noqa: ANN001
 ) -> None:
@@ -671,11 +609,13 @@ async def test_a_link_keycloak_rejected_is_not_reported_as_success(
 
     app.dependency_overrides[get_keycloak_client] = lambda: _FakeKeycloak(linked=True)
     resp = await client.get(
-        "/api/v1/cloud/links/google/complete",
-        params={"link_error": "not_logged_in"},
+        "/api/v1/cloud/links/google/callback",
+        params={"error": "access_denied"},
         follow_redirects=False,
     )
-    assert "link=failed" in resp.headers["location"]
+    # `denied`, not `failed`: the user turned it down, and reporting a fault would be false.
+    # R-99 keeps the two apart - a rejection is a decision, an exception is a fault.
+    assert "link=denied" in resp.headers["location"]
 
 
 async def test_a_link_that_did_not_land_is_not_reported_as_success(
@@ -700,7 +640,9 @@ async def test_a_link_that_did_not_land_is_not_reported_as_success(
         get_settings(),
     )
     resp = await client.get(
-        "/api/v1/cloud/links/google/complete", params={"link_state": state}, follow_redirects=False
+        "/api/v1/cloud/links/google/callback",
+        params={"code": "c", "state": state},
+        follow_redirects=False,
     )
     assert "link=failed" in resp.headers["location"]
 
@@ -1008,3 +950,38 @@ async def test_import_requires_a_token(client: httpx.AsyncClient) -> None:
         "/api/v1/documents/import", json={"provider": "google", "file_id": _FILE_ID}
     )
     assert resp.status_code == 401
+
+
+def test_the_linking_url_carries_the_aia_action(settings) -> None:  # noqa: ANN001
+    """R-99: the whole migration is this one parameter, so it is asserted directly.
+
+    `kc_action=idp_link:<alias>` is what replaced Keycloak's client-initiated account-linking
+    endpoint, which logged its own deprecation on every call and is announced for removal. If
+    it goes missing the flow does not fail loudly - it authenticates the user, links nothing,
+    and returns a perfectly good code, so the callback reports success for a link that never
+    happened. That is precisely the shape of failure a test has to catch, because a browser
+    walking the flow looks identical.
+    """
+    url = cloud_links.start_link(sub=uuid.uuid4(), provider=CloudProvider.GOOGLE, settings=settings)
+    query = parse_qs(urlparse(url).query)
+
+    assert query["kc_action"] == ["idp_link:google"]
+    # Both, and in one test: `prompt=login` without the action links nothing, and the action
+    # without `prompt=login` lets an existing SSO session decide silently who gets linked.
+    # Measured on 26.4 that they compose; this is the guard that they still both ship.
+    assert query["prompt"] == ["login"]
+
+
+def test_the_linking_redirect_uri_carries_no_query_at_all(settings) -> None:  # noqa: ANN001
+    """The constraint T-725 discovered cannot recur, because there is nothing to carry.
+
+    Keycloak refuses a `redirect_uri` whose query holds a reserved OIDC parameter - which is
+    how FR-AUT-11 broke with no code change when the dev container moved to 26.7.1. Under AIA
+    the state travels in the request's own `state`, so our redirect URI is bare. This asserts
+    the *shape* rather than the old workaround: a future reader reaching for somewhere to stash
+    a value should find the query empty and leave it that way.
+    """
+    url = cloud_links.start_link(sub=uuid.uuid4(), provider=CloudProvider.GOOGLE, settings=settings)
+    redirect_uri = parse_qs(urlparse(url).query)["redirect_uri"][0]
+
+    assert urlparse(redirect_uri).query == ""

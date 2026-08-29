@@ -306,7 +306,7 @@ SPEC_9_ROWS: dict[str, tuple[Evidence, ...]] = {
         PyTest(
             "tests/test_account_linking.py::test_the_service_account_can_resolve_the_broker_client"
         ),
-        PyTest("tests/test_cloud_import.py::test_the_link_hash_is_keycloaks_formula"),
+        PyTest("tests/test_cloud_import.py::test_the_linking_url_carries_the_aia_action"),
     ),
     "Drop-zone caption": (
         Source("frontend/src/kb/DropZone.tsx", "PDF · DOCX · CSV · MD — max 300 MB"),

@@ -101,8 +101,8 @@ Start at **[docs/README.md](docs/README.md)** — it says which of these you wan
 
 | Suite | Count | Run |
 |---|---|---|
-| Backend | **2,276** | `cd backend && OCR_LIVE_TEST=1 uv run pytest` |
-| — of which route-level security | 315 | `uv run pytest tests/security` |
+| Backend | **2,274** | `cd backend && OCR_LIVE_TEST=1 uv run pytest` |
+| — of which route-level security | 313 | `uv run pytest tests/security` |
 | — of which production scenarios | 31 | `uv run pytest tests/scenarios` |
 | Frontend unit | **1,205** (as of 2026-08-28) | `cd frontend && npm test` |
 | End-to-end (real browser, real stack) | 1 journey, ~20 s | `npm run e2e` |
