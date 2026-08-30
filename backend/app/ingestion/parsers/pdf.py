@@ -79,6 +79,7 @@ from app.ingestion.parsers.recognition import (
 )
 from app.ingestion.parsers.tables import DetectedTable, compose_page, detect_tables
 from app.ingestion.parsers.text import is_blank, normalize
+from app.ingestion.parsers.textquality import TextQuality
 from app.services.ocr import OcrClient, get_ocr_client
 
 log = structlog.get_logger(__name__)
@@ -116,6 +117,7 @@ def parse(
     passes = RecognitionBudget.for_(limits)
     degraded: str | None = None
     tables_degraded: str | None = None
+    quality = TextQuality()  # FR-ING-10 / R-100
 
     try:
         if document.needs_pass:
@@ -147,6 +149,9 @@ def parse(
                 ) from exc
 
             content = normalize(raw)
+            # FR-ING-10: measured on the text the parser goes on to use, so the
+            # denominator is exactly what gets chunked. Never raises (R-100).
+            quality.page(document, page, content)
             locator = page_locator(page_number)
 
             if not is_blank(content):
@@ -264,4 +269,9 @@ def parse(
             "image-only export, which needs OCR"
         )
 
-    return ParsedDocument(suffix=SUFFIX, blocks=tuple(blocks), page_count=page_count)
+    return ParsedDocument(
+        suffix=SUFFIX,
+        blocks=tuple(blocks),
+        page_count=page_count,
+        text_quality_ratio=quality.ratio,
+    )

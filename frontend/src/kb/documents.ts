@@ -234,13 +234,20 @@ export function replaceFailed(document: DocumentEvent): boolean {
 }
 
 /**
- * FR-KBM-04's meta line: `{unit} · indexed {date}`, plus OI-29's qualifier when it applies.
+ * FR-KBM-04's meta line: `{unit} · indexed {date}`, plus the two qualifiers when they apply.
  *
  * **The unit falls back to chunks (R-71(4)).** `page_count` is PDF-only by R-34 — DOCX and
  * Markdown store no pagination and a synthesised page number would be a citation the user cannot
  * verify — and no row count is carried anywhere on the wire, so a CSV cannot render the
  * prototype's "1,204 rows" either. `chunk_count` is on the DTO and FR-KBM-08 sanctions showing
  * it. When neither exists the clause is dropped rather than rendered as a zero.
+ *
+ * **`text may be unreadable` is FR-ING-10's qualifier (R-100 §8.90).** A PDF whose embedded fonts
+ * carry no Unicode mapping ingests perfectly and then answers nothing, because the extracted
+ * characters are mojibake — `f(x)` arrives as `fsxd`. The row keeps its ordinary `Ready` label,
+ * because the document genuinely is ready; the words carry what the badge cannot, and are the
+ * NFR-A11Y-06 non-colour carrier. **The server decides**, not this function: the deciding
+ * threshold is not on the wire, so re-deriving it here would be two copies of one state.
  */
 export function metaLine(document: DocumentEvent): string {
   const parts: string[] = [];
@@ -249,6 +256,12 @@ export function metaLine(document: DocumentEvent): string {
   parts.push(`indexed ${indexedOn(document)}`);
   if (replaceFailed(document)) {
     parts.push(`update failed, v${document.current_version} still answering`);
+  }
+  // Not `else`: the two are mutually exclusive in practice (a failed replace is not ACTIVE),
+  // but nothing enforces that, and silently hiding one behind the other would be a lie about
+  // whichever lost. If both ever hold, both are said.
+  if (document.text_quality_degraded) {
+    parts.push('text may be unreadable');
   }
   return parts.join(' · ');
 }

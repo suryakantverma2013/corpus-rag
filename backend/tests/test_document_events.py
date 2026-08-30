@@ -522,7 +522,9 @@ async def test_the_snapshot_frame_carries_the_metadata_only_dto(
     owner, _ = await _caller(session, make_token)
     document = await _document(session, owner_id=owner, status=DocumentStatus.EMBEDDING)
 
-    frame = _frame(Snapshot(documents=await _states(db_connection, owner_id=owner)))
+    frame = _frame(
+        Snapshot(documents=await _states(db_connection, owner_id=owner)), degraded_above=0.02
+    )
 
     assert frame.event == "snapshot"
     rows = json.loads(frame.to_event().data.model_dump_json())["data"]
@@ -540,7 +542,7 @@ async def test_a_change_is_framed_as_one_document_event(
     document = await _document(session, owner_id=owner, status=DocumentStatus.PARSING)
     states = await _states(db_connection, owner_id=owner)
 
-    frame = _frame(DocumentChanged(state=states[0]))
+    frame = _frame(DocumentChanged(state=states[0]), degraded_above=0.02)
 
     assert frame.event == "document"
     row = json.loads(frame.to_event().data.model_dump_json())["data"]
@@ -552,7 +554,7 @@ async def test_a_change_is_framed_as_one_document_event(
 def test_a_removal_is_framed_as_an_id_only() -> None:
     document_id = uuid.uuid4()
 
-    frame = _frame(DocumentRemoved(document_id=document_id))
+    frame = _frame(DocumentRemoved(document_id=document_id), degraded_above=0.02)
 
     assert frame.event == "removed"
     assert json.loads(frame.to_event().data.model_dump_json()) == {

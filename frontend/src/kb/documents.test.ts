@@ -62,6 +62,7 @@ function doc(overrides: Partial<DocumentEvent> = {}): DocumentEvent {
     created_at: '2026-07-10T09:00:00Z',
     updated_at: '2026-07-10T09:05:00Z',
     deleted_at: null,
+    text_quality_degraded: false,
     stalled: false,
     ...overrides,
   };
@@ -348,5 +349,30 @@ describe('NFR-A11Y-05 — what is announced', () => {
 
   it('never announces on the opening snapshot', () => {
     expect(seeded(doc(), doc({ document_id: 'b' })).announcement).toBeNull();
+  });
+});
+
+describe('FR-ING-10 text-layer qualifier (R-100)', () => {
+  it('says so when the server reports a degraded text layer', () => {
+    expect(metaLine(doc({ text_quality_degraded: true }))).toContain('text may be unreadable');
+  });
+
+  it('says nothing when it does not', () => {
+    expect(metaLine(doc({ text_quality_degraded: false }))).not.toContain('unreadable');
+  });
+
+  it('keeps the count and the date beside it, rather than replacing them', () => {
+    // The qualifier is additive: a degraded document is still a document, and hiding how
+    // much of it was indexed would make the row less informative than before it was flagged.
+    const line = metaLine(doc({ page_count: 58, text_quality_degraded: true }));
+    expect(line).toContain('58 pages');
+    expect(line).toContain('text may be unreadable');
+  });
+
+  it('is decided by the server alone, never re-derived here', () => {
+    // The deciding threshold (PARSER_TEXT_QUALITY_MIN_RATIO) is not on the wire, so this
+    // module must read the boolean and nothing else. If a future edit tries to compute it
+    // from a ratio, there is no ratio to compute it from -- which is the point.
+    expect(JSON.stringify(doc({}))).not.toContain('text_quality_ratio');
   });
 });

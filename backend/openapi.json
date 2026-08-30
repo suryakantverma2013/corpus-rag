@@ -4728,6 +4728,11 @@
             ],
             "title": "Chunk Count"
           },
+          "text_quality_degraded": {
+            "type": "boolean",
+            "title": "Text Quality Degraded",
+            "default": false
+          },
           "error_message": {
             "anyOf": [
               {
@@ -4950,6 +4955,11 @@
               }
             ],
             "title": "Chunk Count"
+          },
+          "text_quality_degraded": {
+            "type": "boolean",
+            "title": "Text Quality Degraded",
+            "default": false
           },
           "error_message": {
             "anyOf": [

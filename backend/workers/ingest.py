@@ -423,6 +423,7 @@ async def _run(
         chunk_count=persisted.total,
         current_version=target_version,  # R-37(9) — in this transaction, not after it
         page_count=parsed.page_count,
+        text_quality_ratio=parsed.text_quality_ratio,  # FR-ING-10
     )
     await jobs.update_status(job, JobStatus.SUCCEEDED, progress=_PROGRESS_DONE, clear_error=True)
     # THE SWAP (R-36(3)). Chunk rows, the version pointer, `searchable`, the document state

@@ -542,6 +542,14 @@ class DocumentResponse(BaseModel):
     size_bytes: int | None
     page_count: int | None
     chunk_count: int | None
+    #: FR-ING-10 (R-100) — the document's text layer is likely unreadable, so it may answer
+    #: nothing however well it was ingested. **Server-computed, and deliberately a boolean.**
+    #: The deciding term is `PARSER_TEXT_QUALITY_MIN_RATIO`, which is not on the wire at all,
+    #: so a client could never derive this and would need the threshold from somewhere — two
+    #: copies of one state, which is the drift R-71(1) had to reconcile and the call T-727
+    #: made for `ungrounded_offerable`. The raw ratio stays off the wire on R-49(1)'s
+    #: precedent: it is a diagnostic, and nothing downstream may threshold on it.
+    text_quality_degraded: bool = False
     error_message: str | None
     knowledge_base_id: uuid.UUID
     scope: UploadScope
@@ -569,7 +577,7 @@ class ReplaceResponse(BaseModel):
     duplicate: bool = False
 
 
-def _to_response(listing: DocumentListing) -> DocumentResponse:
+def _to_response(listing: DocumentListing, *, degraded_above: float) -> DocumentResponse:
     """Build the DTO field by field.
 
     Never `model_validate(document, from_attributes=True)`: that idiom would pick up
@@ -587,6 +595,11 @@ def _to_response(listing: DocumentListing) -> DocumentResponse:
         size_bytes=document.size_bytes,
         page_count=document.page_count,
         chunk_count=document.chunk_count,
+        # `None` is *not measured* and must never read as degraded (FR-ING-10).
+        text_quality_degraded=(
+            document.text_quality_ratio is not None
+            and document.text_quality_ratio >= degraded_above
+        ),
         error_message=document.error_message,
         knowledge_base_id=document.knowledge_base_id,
         scope="global" if listing.scope is KBVisibility.GLOBAL else "chat",
@@ -614,6 +627,7 @@ def _to_response(listing: DocumentListing) -> DocumentResponse:
 async def list_documents(
     user: CurrentUser,
     session: DbSession,
+    settings: SettingsDep,
     scope: Annotated[UploadScope | None, Query()] = None,
     conversation_id: Annotated[uuid.UUID | None, Query()] = None,
     status_filter: Annotated[DocumentStatus | None, Query(alias="status")] = None,
@@ -656,7 +670,8 @@ async def list_documents(
         limit=limit,
         offset=offset,
     )
-    return [_to_response(listing) for listing in listings]
+    threshold = settings.parser.text_quality_min_ratio
+    return [_to_response(listing, degraded_above=threshold) for listing in listings]
 
 
 # --- live status channel (T-210, FR-KBM-09, R-41) -----------------------------
@@ -681,9 +696,9 @@ class DocumentEventResponse(DocumentResponse):
     stalled: bool
 
 
-def _to_event_response(state: DocumentState) -> DocumentEventResponse:
+def _to_event_response(state: DocumentState, *, degraded_above: float) -> DocumentEventResponse:
     return DocumentEventResponse(
-        **_to_response(state.listing).model_dump(),
+        **_to_response(state.listing, degraded_above=degraded_above).model_dump(),
         stalled=state.stalled,
     )
 
@@ -865,17 +880,24 @@ async def stream_documents(
         poll_interval=settings.sse.poll_interval_seconds,
         stall_after=settings.stall_after,
     )
+    threshold = settings.parser.text_quality_min_ratio
     async for event in events:
-        yield _frame(event).to_event()
+        yield _frame(event, degraded_above=threshold).to_event()
 
 
-def _frame(event: document_events.DocumentEvent) -> DocumentStreamFrame:
+def _frame(event: document_events.DocumentEvent, *, degraded_above: float) -> DocumentStreamFrame:
     """One SSE frame. `data` is JSON in every case, so the client has one parse path."""
     match event:
         case document_events.Snapshot(documents=documents):
-            return DocumentSnapshotFrame(data=[_to_event_response(state) for state in documents])
+            return DocumentSnapshotFrame(
+                data=[
+                    _to_event_response(state, degraded_above=degraded_above) for state in documents
+                ]
+            )
         case document_events.DocumentChanged(state=state):
-            return DocumentChangedFrame(data=_to_event_response(state))
+            return DocumentChangedFrame(
+                data=_to_event_response(state, degraded_above=degraded_above)
+            )
         case document_events.DocumentRemoved(document_id=document_id):
             return DocumentRemovedFrame(data=DocumentRemovedData(document_id=document_id))
         case _:  # pragma: no cover — exhaustive over the union; keeps mypy honest if it grows
@@ -893,6 +915,7 @@ async def get_document(
     user: CurrentUser,
     principal: CurrentPrincipal,
     session: DbSession,
+    settings: SettingsDep,
 ) -> DocumentResponse:
     """One document's metadata, owner-or-admin (R-40(5)).
 
@@ -905,7 +928,7 @@ async def get_document(
     )
     if listing is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, _DOCUMENT_NOT_FOUND)
-    return _to_response(listing)
+    return _to_response(listing, degraded_above=settings.parser.text_quality_min_ratio)
 
 
 #: One year, and the URL is content-addressed so it is honest: a re-ingestion producing the same

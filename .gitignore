@@ -72,6 +72,18 @@ Nexus_AI_Detailed_Specification.md
 # Agent orientation + project skills (reference the excluded docs above).
 CLAUDE.md
 .claude/
+# Measurement corpora for a task in flight — third-party books and vendor manuals held only
+# to measure a detector against (T-728 sized FR-ING-10's ratio on six of them). Same reason as
+# ReferenceDocs/ above: not ours to relicense, and hundreds of megabytes nobody reviews.
+.t728-samples/
+
+# ---- Ad-hoc probe scripts at the repo root (NEVER commit) ----
+# The root is where throwaway PowerShell probes land while driving a running stack by hand, and
+# they routinely carry a live password inline (both of the ones this rule was written for do).
+# Same backstop reasoning as the OAuth secret below — the window between writing one and
+# deciding where it belongs is exactly when `git add -A` catches it. A script worth keeping goes
+# under deployment/ or backend/tools/, which this pattern deliberately does not match.
+/*.ps1
 
 # ---- Third-party OAuth credentials (NEVER commit) ----
 # Google Cloud Console hands you a `client_secret_*.json` containing a live

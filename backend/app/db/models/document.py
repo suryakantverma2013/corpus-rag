@@ -18,6 +18,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -83,5 +84,9 @@ class Document(TimestampMixin, Base):
     searchable: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     page_count: Mapped[int | None] = mapped_column(Integer)
     chunk_count: Mapped[int | None] = mapped_column(Integer)
+    #: FR-ING-10 (R-100) — share of extracted characters from a font with no usable Unicode
+    #: mapping. `NULL` means **not measured** (a non-PDF, a pre-T-728 document, or a PDF that
+    #: extracted nothing), which is deliberately distinct from 0.0, "measured and clean".
+    text_quality_ratio: Mapped[float | None] = mapped_column(Float)
     error_message: Mapped[str | None] = mapped_column(Text)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

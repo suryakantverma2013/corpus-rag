@@ -182,6 +182,22 @@ class ParserSettings(BaseSettings):
     # operator decision to be settled by measurement on a real scanned corpus.
     ocr_enabled: bool = Field(default=False)  # TBD(§8.4)
 
+    # FR-ING-10 / R-100 (§8.90): the share of extracted characters that may be mojibake,
+    # above which a document is reported as having a degraded text layer.
+    #
+    # **There is deliberately no enable flag.** FR-ING-10 says the pipeline *shall* measure,
+    # and a switch whose off state removes a requirement is the `GATE_ENABLED` mistake
+    # (R-48(3)) rather than the `EVAL_ENABLED` one: measuring costs +1.3% on a healthy
+    # document and its degraded output is *no qualifier*, which nothing depends on. An
+    # operator who wants the qualifier silenced raises this above 1.0; the measurement still
+    # happens and still lands on the row's data, which is what a later diagnosis needs.
+    #
+    # 0.02 is provisional and tuned for **sensitivity**, because R-100(5) makes this signal
+    # advisory: a false positive costs a misleading hint, a false negative costs B-007's
+    # futile-advice loop. Measured 8.39% on the document that prompted it, against 0.00%
+    # across five healthy technical documents and 1,296 pages.
+    text_quality_min_ratio: float = Field(default=0.02, ge=0.0)  # TBD(§8.4)
+
     # Rasterisation resolution. Fixed rather than adaptive: R-88(1) makes the recognised text
     # an input to `embedding_fingerprint`, so the raster the engine sees has to be a function
     # of the page alone. 300 is also the DPI T-217 measured byte-reproducibility at.

@@ -250,8 +250,9 @@ class DocumentRepository(BaseRepository[Document]):
         chunk_count: int,
         current_version: int,
         page_count: int | None = None,
+        text_quality_ratio: float | None = None,
     ) -> Document:
-        """The end of a successful ingestion (T-207) — five writes that must land together.
+        """The end of a successful ingestion (T-207) — six writes that must land together.
 
         The caller commits this in the **same transaction** as `persist_chunk_set`, and
         that commit *is* R-36(3)'s swap: readers see the previous version until it lands
@@ -273,11 +274,17 @@ class DocumentRepository(BaseRepository[Document]):
         FR-KBM-04 would render "58 pages" for a CSV forever. Safe because the only caller
         always passes `parsed.page_count` for the version it is swapping in, and a
         same-version retry re-parses the same bytes to the same answer.
+
+        **`text_quality_ratio` is assigned unconditionally too, and for the same reason**
+        (FR-ING-10, R-100): a PDF replaced by a CSV must not keep the PDF's measurement, and
+        a document whose replacement fixed its fonts must stop reporting a degraded text
+        layer. `None` is the honest value for every non-PDF.
         """
         document.status = DocumentStatus.ACTIVE
         document.chunk_count = chunk_count
         document.current_version = current_version
         document.page_count = page_count
+        document.text_quality_ratio = text_quality_ratio
         # FR-RET-04: nothing retrieves a document until it is genuinely queryable.
         document.searchable = True
         document.error_message = None

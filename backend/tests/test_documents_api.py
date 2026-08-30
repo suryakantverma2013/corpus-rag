@@ -25,6 +25,7 @@ import pytest
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.db.base import DEFAULT_TENANT_ID
 from app.db.enums import DocumentStatus, JobStatus, JobType, KBVisibility
 from app.db.models.conversation import Conversation
@@ -62,6 +63,7 @@ async def _document(
     created_at: datetime | None = None,
     deleted_at: datetime | None = None,
     current_version: int = 1,
+    text_quality_ratio: float | None = None,
 ) -> Document:
     if knowledge_base_id is None:
         kb = await KnowledgeBaseRepository(session).get_or_create_default(owner_id)
@@ -80,6 +82,7 @@ async def _document(
         searchable=status is DocumentStatus.ACTIVE,
         page_count=58,
         chunk_count=12,
+        text_quality_ratio=text_quality_ratio,
         deleted_at=deleted_at,
     )
     if created_at is not None:
@@ -350,6 +353,69 @@ async def test_list_returns_documents_that_have_no_job_at_all(
     assert row["latest_job_id"] is None
     assert row["latest_job_error_code"] is None
     assert row["latest_job_document_version"] is None
+
+
+async def test_a_text_layer_at_the_threshold_is_reported_as_degraded(
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    make_token,  # noqa: ANN001
+) -> None:
+    """FR-ING-10 / R-100(5). Seeded at *exactly* the threshold, which is the only value that
+    pins the comparison's direction: a well-clear ratio passes under `>` and `>=` alike, so it
+    would say nothing about the tie. Ties degrade, because R-100(5) tunes this for sensitivity
+    — a false positive costs a misleading hint, a false negative costs B-007's futile-advice
+    loop. The threshold is read from settings rather than written as `0.02`; pinning the
+    shipped number is the acceptance manifest's `Default` pointer, not this test's job.
+    """
+    owner, headers = await _caller(session, make_token)
+    threshold = get_settings().parser.text_quality_min_ratio
+    await _document(session, owner_id=owner, text_quality_ratio=threshold)
+
+    row = (await client.get("/api/v1/documents", headers=headers)).json()[0]
+
+    assert row["text_quality_degraded"] is True
+    # The ratio itself stays off the wire (R-49(1)): it is a diagnostic, and nothing
+    # downstream may threshold on it.
+    assert "text_quality_ratio" not in row
+
+
+async def test_a_clean_text_layer_is_not_reported_as_degraded(
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    make_token,  # noqa: ANN001
+) -> None:
+    """The other direction, and the one that keeps the qualifier meaningful: every healthy
+    document measured for R-100 came in at 0.00, so a detector that reported them all would
+    make the meta line noise on the whole corpus."""
+    owner, headers = await _caller(session, make_token)
+    threshold = get_settings().parser.text_quality_min_ratio
+    await _document(session, owner_id=owner, text_quality_ratio=threshold / 2)
+
+    row = (await client.get("/api/v1/documents", headers=headers)).json()[0]
+
+    assert row["text_quality_degraded"] is False
+
+
+async def test_an_unmeasured_text_layer_never_reads_as_degraded(
+    client: httpx.AsyncClient,
+    session: AsyncSession,
+    make_token,  # noqa: ANN001
+) -> None:
+    """`None` is *not measured*, which is what FR-ING-10's fail-open direction produces for a
+    document whose fonts could not be inspected — and for every document ingested before this
+    column existed, which is most of a live corpus.
+
+    It must read false rather than degraded, and the guard is load-bearing in a second way the
+    boolean hides: `None >= 0.02` raises `TypeError`, so dropping it does not merely mislabel
+    the row, it turns the whole list route into a 500.
+    """
+    owner, headers = await _caller(session, make_token)
+    await _document(session, owner_id=owner, text_quality_ratio=None)
+
+    response = await client.get("/api/v1/documents", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()[0]["text_quality_degraded"] is False
 
 
 async def test_the_listing_query_does_not_fan_out_per_document(

@@ -297,6 +297,13 @@ class ParsedDocument:
     #: → `documents.page_count`. PDF only; `None` for the flow and tabular formats,
     #: where any page number would be invented (R-34).
     page_count: int | None = None
+    #: FR-ING-10 (R-100) — share of extracted characters from a font with no usable Unicode
+    #: mapping. **PDF only**, and `None` for every other format *and* for a PDF that
+    #: extracted nothing: `None` means "not measured", which is a different fact from 0.0,
+    #: "measured and clean". Presentation metadata — no part of `embedding_fingerprint`,
+    #: so it forces no re-embedding and no `PREPROCESSING_VERSION` bump.
+    text_quality_ratio: float | None = None
+
     preprocessing_version: str = PREPROCESSING_VERSION
 
     @property

@@ -1,7 +1,7 @@
 # Configuration
 
 **This is not a list of every setting.** [`backend/.env.example`](../backend/.env.example) already
-documents all 189 of them, one comment per variable, and `backend/tests/test_env_templates.py` fails
+documents all 190 of them, one comment per variable, and `backend/tests/test_env_templates.py` fails
 if it ever stops — in both directions, and it boots `Settings` from the template to catch a value
 that parses as a name but not as a number. Copying that list here would create a second copy to
 drift.
@@ -15,7 +15,7 @@ they are wrong, and the rules the whole surface obeys.
 
 | Surface | Answers | Where |
 |---|---|---|
-| `app/config.py` | **what exists** — 189 names, types, defaults, validators | 30 groups, each with an `env_prefix` |
+| `app/config.py` | **what exists** — 190 names, types, defaults, validators | 30 groups, each with an `env_prefix` |
 | `backend/.env.example` | **what you may set** — documentation only, no runtime role | guarded both ways |
 | `x-corpus-env` | **what a container actually receives** — 46 keys | `deployment/docker-compose.prod.yml` |
 

@@ -89,20 +89,40 @@ class PyTest:
         return f"pytest  {self.nodeid}"
 
     def check(self) -> str | None:
-        path_part, _, name = self.nodeid.partition("::")
-        if not name:
+        """Resolve ``path::test_name`` and ``path::TestClass::test_name`` alike.
+
+        The class-qualified form is looked up **inside that class** rather than against a flat
+        walk of the module. A flat set would resolve `TestA::test_x` while `test_x` actually
+        lives on `TestB` — the pointer would still name a runnable test, just not the one the
+        row claims, which is the precise failure this guard exists to catch.
+        """
+        path_part, _, rest = self.nodeid.partition("::")
+        if not rest:
             return f"{self.nodeid}: not a nodeid (expected 'path::test_name')"
         path = BACKEND_ROOT / path_part
         if not path.is_file():
             return f"{self.nodeid}: {path_part} does not exist"
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+        class_name, _, name = rest.rpartition("::")
+        if class_name:
+            scopes = [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.ClassDef) and node.name == class_name
+            ]
+            if not scopes:
+                return f"{self.nodeid}: {path_part} defines no class {class_name}"
+            bodies: list[ast.AST] = list(scopes[0].body)
+        else:
+            bodies = list(ast.walk(tree))
+
         defined = {
-            node.name
-            for node in ast.walk(tree)
-            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+            node.name for node in bodies if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
         }
         if name not in defined:
-            return f"{self.nodeid}: {path_part} defines no {name}"
+            where = f"{class_name} in {path_part}" if class_name else path_part
+            return f"{self.nodeid}: {where} defines no {name}"
         return None
 
 
@@ -316,9 +336,15 @@ SPEC_9_ROWS: dict[str, tuple[Evidence, ...]] = {
         Source("frontend/src/kb/DropZone.tsx", "This chat"),
         Fidelity("§9 knowledge-base copy"),
     ),
-    "FR-KBM-04 meta line *(Rev 0.38, R-71(2)/(4))*": (
+    # The second qualifier arrived in Rev 0.67 and is pinned the same way as the first: the copy
+    # is a §9 literal, so it is read back out of the source *and* its test. `metaLine` is the
+    # only place either string exists — the server sends a boolean, deliberately (R-100), so
+    # there is no second copy on the backend for these to drift against.
+    "FR-KBM-04 meta line *(Rev 0.38, R-71(2)/(4); Rev 0.67, R-100(7))*": (
         Source("frontend/src/kb/documents.ts", "still answering"),
         Source("frontend/src/kb/documents.test.ts", "still answering"),
+        Source("frontend/src/kb/documents.ts", "text may be unreadable"),
+        Source("frontend/src/kb/documents.test.ts", "text may be unreadable"),
     ),
     "Processing-lock `409` *(Rev 0.38, R-71(1))*": (
         Source("backend/app/api/errors.py", 'error_code: Literal["PROCESSING_LOCKED"]'),
@@ -600,11 +626,15 @@ SPEC_9_ROWS: dict[str, tuple[Evidence, ...]] = {
             "tests/test_figures.py"
             "::test_extraction_is_off_by_default_and_the_detector_does_not_read_the_flag"
         ),
-        PyTest("tests/test_figure_extraction.py::test_a_figure_over_the_byte_cap_is_dropped_not_truncated"),
+        PyTest(
+            "tests/test_figure_extraction.py::test_a_figure_over_the_byte_cap_is_dropped_not_truncated"
+        ),
         PyTest(
             "tests/test_figure_extraction.py::test_an_exhausted_clock_stops_the_pass_without_failing_it"
         ),
-        PyTest("tests/test_figure_extraction.py::test_an_extracted_figure_carries_no_text_of_the_document"),
+        PyTest(
+            "tests/test_figure_extraction.py::test_an_extracted_figure_carries_no_text_of_the_document"
+        ),
     ),
     # FR-CIT-07 and NFR-SEC-10 share a row because they are one surface from two sides: what is
     # rendered, and who may fetch it. The administrator pointer is the one to protect - it is the
@@ -613,14 +643,52 @@ SPEC_9_ROWS: dict[str, tuple[Evidence, ...]] = {
     # absent-not-null, which a client distinguishes and a schema change would silently flip.
     "Figure display and serving (Rev 0.61, FR-CIT-07, NFR-SEC-10, R-94)": (
         PyTest("tests/test_figure_route.py::test_the_owner_is_served_the_raster_inline"),
-        PyTest("tests/test_figure_route.py::test_an_administrator_gets_404_on_another_users_figure"),
+        PyTest(
+            "tests/test_figure_route.py::test_an_administrator_gets_404_on_another_users_figure"
+        ),
         PyTest("tests/test_figure_route.py::test_storage_being_down_is_503_rather_than_404"),
         PyTest("tests/test_figure_route.py::test_no_route_serves_the_uploaded_file"),
         PyTest("tests/test_figure_route.py::test_the_cache_lifetime_is_long_and_private"),
-        PyTest("tests/test_figure_citations.py::test_a_cited_page_resolves_the_figures_printed_on_it"),
+        PyTest(
+            "tests/test_figure_citations.py::test_a_cited_page_resolves_the_figures_printed_on_it"
+        ),
         PyTest("tests/test_figure_citations.py::test_a_citation_with_no_figure_carries_no_key"),
         PyTest("tests/test_figure_citations.py::test_another_users_figure_is_never_resolved"),
         Fidelity("FR-CIT-07 figure under the citation"),
+    ),
+    # FR-ING-10. The `Default` is the whole policy in one number, and it is the pointer that
+    # matters most here: unlike FR-ING-07 and FR-ING-09 this feature has **no enable flag**, so
+    # the threshold is the only thing standing between a diagnostic and noise on every row.
+    # The PyTests are the three properties R-100 leans on, each a different failure direction —
+    # the `embedded` term (without it, healthy documents are flagged), the cheap-path short
+    # circuit (which is *why* on-by-default is affordable, so it is a correctness pointer here
+    # rather than a performance one), and `None` meaning *not measured* in both the detector and
+    # on the wire. The threshold's own direction is pinned at the API, seeded at exactly the
+    # configured value, because a well-clear ratio passes under `>` and `>=` alike.
+    "Text-layer quality (Rev 0.67, FR-ING-10, R-100)": (
+        Default("app.config:ParserSettings", "text_quality_min_ratio", 0.02),
+        PyTest(
+            "tests/test_text_quality.py::TestTheEmbeddedTermIsLoadBearing"
+            "::test_a_descriptor_with_no_font_program_is_not_suspect"
+        ),
+        PyTest(
+            "tests/test_text_quality.py::TestTheCostIsAsymmetric"
+            "::test_a_page_with_no_suspect_font_never_takes_the_span_pass"
+        ),
+        PyTest(
+            "tests/test_text_quality.py::TestTheMeasurement"
+            "::test_nothing_extracted_is_none_rather_than_zero"
+        ),
+        PyTest(
+            "tests/test_text_quality.py::TestItFailsOpen"
+            "::test_an_unreadable_page_contributes_nothing_and_does_not_raise"
+        ),
+        PyTest(
+            "tests/test_documents_api.py::test_a_text_layer_at_the_threshold_is_reported_as_degraded"
+        ),
+        PyTest(
+            "tests/test_documents_api.py::test_an_unmeasured_text_layer_never_reads_as_degraded"
+        ),
     ),
     "Retrieval default (Rev 0.5)": (
         PyTest("tests/test_fusion.py::test_agreement_between_arms_beats_a_single_arms_top_hit"),
@@ -640,10 +708,11 @@ SPEC_9_ROWS: dict[str, tuple[Evidence, ...]] = {
         Fidelity("§9 message action bar"),
     ),
     "Ungrounded answer (Rev 0.65, FR-MSG-09, R-98)": (
-        Default(
-            "app.config:UngroundedSettings", "fallback_enabled", False
+        Default("app.config:UngroundedSettings", "fallback_enabled", False),
+        Source(
+            "frontend/src/chat/messages.ts",
+            "From the model’s general knowledge — not from your documents",
         ),
-        Source("frontend/src/chat/messages.ts", "From the model’s general knowledge — not from your documents"),
         Source("frontend/src/chat/messages.ts", "Answer from general knowledge"),
         PyTest(
             "tests/test_ungrounded_api.py::test_it_appends_an_uncited_answer_and_leaves_the_abstention"
@@ -651,9 +720,7 @@ SPEC_9_ROWS: dict[str, tuple[Evidence, ...]] = {
         PyTest(
             "tests/test_ungrounded_api.py::test_it_is_refused_when_the_deployment_has_not_enabled_it"
         ),
-        PyTest(
-            "tests/test_ungrounded_api.py::test_the_answer_is_marked_ungrounded_on_the_wire"
-        ),
+        PyTest("tests/test_ungrounded_api.py::test_the_answer_is_marked_ungrounded_on_the_wire"),
         Fidelity("§9 ungrounded answer"),
     ),
     "Login copy (Rev 0.6)": (

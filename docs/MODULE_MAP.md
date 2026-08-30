@@ -104,9 +104,9 @@ retrieval query until it was dropped.
 
 **Enforced by.** `tests/test_openapi_contract.py`, and the migration round-trip tests.
 
-### `app/ingestion/` — 4 modules + `parsers/` (9)
+### `app/ingestion/` — 4 modules + `parsers/` (10)
 `chunker` `figures` `incremental` `scanner` · parsers: `base` `csv` `docx` `figures` `markdown`
-`pdf` `recognition` `tables` `text`
+`pdf` `recognition` `tables` `text` `textquality`
 
 **Owns.** Bytes to chunks: format sniffing, extraction, optional recognition (OCR), table
 structure, splitting, and the incremental diff that decides what gets re-embedded. Also optional

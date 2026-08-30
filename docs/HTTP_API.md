@@ -1340,6 +1340,7 @@ The list/get DTO plus the one field the live channel adds (R-41(4)/(5)). Subclas
 | `size_bytes` | integer \| null | yes |  |
 | `stalled` | boolean | yes |  |
 | `status` | [`DocumentStatus`](#documentstatus) | yes |  |
+| `text_quality_degraded` | boolean | no |  |
 | `updated_at` | string (date-time) | yes |  |
 
 ### `DocumentRemovedData`
@@ -1389,6 +1390,7 @@ One document, for both the list and the single-document read (R-40(5)). **Metada
 | `searchable` | boolean | yes |  |
 | `size_bytes` | integer \| null | yes |  |
 | `status` | [`DocumentStatus`](#documentstatus) | yes |  |
+| `text_quality_degraded` | boolean | no |  |
 | `updated_at` | string (date-time) | yes |  |
 
 ### `DocumentSnapshotFrame`

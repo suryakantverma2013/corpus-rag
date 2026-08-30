@@ -1373,6 +1373,11 @@ export interface components {
       page_count: number | null;
       /** Chunk Count */
       chunk_count: number | null;
+      /**
+       * Text Quality Degraded
+       * @default false
+       */
+      text_quality_degraded: boolean;
       /** Error Message */
       error_message: string | null;
       /**
@@ -1479,6 +1484,11 @@ export interface components {
       page_count: number | null;
       /** Chunk Count */
       chunk_count: number | null;
+      /**
+       * Text Quality Degraded
+       * @default false
+       */
+      text_quality_degraded: boolean;
       /** Error Message */
       error_message: string | null;
       /**
