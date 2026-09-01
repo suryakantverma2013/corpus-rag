@@ -383,6 +383,17 @@ detected table's cells are excluded from the page's ordinary text so one passage
 twice — while in DOCX and Markdown it is **declared**, the format stating the grid and its header
 outright, so there is nothing to guess and nothing to exclude.
 
+**Parsing also measures the text layer it just read.** A PDF can extract characters that bear no
+relation to what the page displays: an embedded font with no `ToUnicode` map turns `f(x)` into
+`fsxd`, and nothing downstream notices, because those are real letters forming plausible words. Such
+a document ingests perfectly, retrieves fine, and then abstains on every question needing the
+affected notation — which reads as a retrieval failure and is not one. So the parser records the
+share of characters drawn from such fonts, and the document carries the verdict as a qualifier on
+its own row in the knowledge base. It is **advisory**: no state depends on it, nothing refuses
+because of it, and it is not a fingerprint input, so switching it on re-embeds nothing. Its cost is
+asymmetric by construction — the expensive per-span pass runs only on pages that actually use a
+suspect font — which is why it is the one parsing extra that ships **on**.
+
 Recognition has to be **byte-reproducible**, which is a correctness property rather
 than a nicety. `embedding_fingerprint` reuse is set membership, so a recogniser whose output
 varied between two passes over one page would leave that set permanently empty — and step 2 below

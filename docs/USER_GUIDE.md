@@ -112,6 +112,9 @@ This is the product working, not failing. Three things to try:
 2. **Check the document is ready.** Open the knowledge base; a document still processing cannot be
    searched yet.
 3. **Check it is in scope.** A document attached to a *different* chat is not searched here.
+4. **Check the document's own line in the knowledge base.** If it reads *text may be unreadable*,
+   rephrasing will not help: the words Corpus extracted are not the words printed on the page. See
+   [§ Adding documents](#adding-documents).
 
 Some deployments additionally offer an **Answer from general knowledge** button on a refusal. It asks
 the model to answer from its own training instead. That answer is clearly labelled, carries **no
@@ -150,6 +153,12 @@ Some things worth knowing:
 - **Deleting a document removes it from future answers**, but answers already given keep the passages
   they quoted, so an old conversation still makes sense.
 - **Replacing** a document keeps the old version answering until the new one has finished processing.
+- **A document can be Ready and still say `text may be unreadable`.** Some PDFs — most often ones
+  heavy in mathematical notation — store a text layer that extracts as nonsense, so `f(x)` comes out
+  as `fsxd`. Corpus indexes such a document anyway, because it genuinely is ready; what it cannot
+  promise is that questions about the affected pages will be answerable. Re-exporting the PDF from
+  its source, or getting a different copy of it, is the fix. The check is a hint rather than a
+  verdict — see [LIMITATIONS.md §2](LIMITATIONS.md).
 
 ---
 

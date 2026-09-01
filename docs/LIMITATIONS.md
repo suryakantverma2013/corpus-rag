@@ -104,6 +104,15 @@ prose as a grid is worse than missing a table. There is deliberately no setting 
 ★ **A poor built-in text layer is never improved by OCR.** If a page yields any characters at all,
 those characters win — a garbled PDF stays garbled. → [SECURITY.md §11.12](SECURITY.md)
 
+★ **"Text may be unreadable" is a hint, and it is wrong in both directions by design.** Corpus
+measures the share of characters a PDF extracted from an *embedded* font carrying no Unicode map —
+the failure that turns `f(x)` into `fsxd` — and says so above a deliberately low threshold. An old
+PDF whose simple embedded font relies on a standard encoding extracts perfectly and can still be
+flagged; a document mangled some other way is not flagged at all. It is tuned to over-report,
+because a false positive costs you a hint and a false negative costs an afternoon rephrasing a
+question that cannot be rephrased. **Nothing gates on it:** a flagged document stays `ACTIVE`, is
+searched, and answers exactly as it did before the measurement existed. PDFs only.
+
 ★ **Text printed inside a picture may silently not be searchable** while the document still ingests
 fine. Recognition fails *open* per page; only a document with no text anywhere fails closed. (This
 is about OCR reading *words* in an image — not about whether the picture is *displayed*, which is

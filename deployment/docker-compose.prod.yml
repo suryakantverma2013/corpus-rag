@@ -77,6 +77,13 @@ x-corpus-env: &corpus-env
   PARSER_FIGURE_BUDGET_SECONDS: ${PARSER_FIGURE_BUDGET_SECONDS:-300}
   PARSER_FIGURE_MAX_BYTES: ${PARSER_FIGURE_MAX_BYTES:-8388608}
 
+  # FR-ING-10 text-layer quality (R-100 §8.90) is deliberately ABSENT from this map, and the
+  # reason is the sentence above about the detection floors. It ships ON, has no switch and no
+  # budget, and its single knob is a detection threshold against a false-positive class R-100(4)
+  # accepted on purpose. The signal is advisory — nothing gates on it, a flagged document stays
+  # ACTIVE and answering — so a mis-tuned threshold costs a hint, never a document. Move it with a
+  # corpus measurement, not with an environment variable in production.
+
   # Listed here because the two features above force it. Recognition and extraction run in ONE
   # ingestion job, so the app refuses to construct `Settings` unless
   # PARSER_OCR_BUDGET_SECONDS + OCR_TIMEOUT_SECONDS + PARSER_FIGURE_BUDGET_SECONDS fits inside

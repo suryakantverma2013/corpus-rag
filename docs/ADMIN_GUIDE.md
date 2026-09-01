@@ -107,6 +107,15 @@ transcript.
 A document that will not process shows **Failed** with a reason. `GET /api/v1/jobs/{id}` gives the
 detail: the error code, which attempt it is on, and which document version was being built.
 
+A document may instead show **Ready** with *text may be unreadable* beside it, and that one is worth
+recognising because nothing is broken. The PDF's text layer extracted characters that are probably
+not what the page displays; the document is indexed, searched and answerable, and questions needing
+the affected pages will simply tend to abstain. **OCR will not rescue it** — extracted characters
+always beat recognised ones, so a bad text layer stays bad. The fix is a better copy of the file.
+The measurement is advisory and nothing gates on it, which is also why its threshold is not exposed
+in `x-corpus-env`: tuning it is a corpus measurement rather than an operator action, exactly as with
+the figure-detection floors ([CONFIGURATION.md §1](CONFIGURATION.md)).
+
 ---
 
 ## Re-embedding, and when you are forced to
